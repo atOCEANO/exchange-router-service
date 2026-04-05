@@ -1,0 +1,20 @@
+name: oceano
+
+services:
+  exchange-router-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: exchange-router-service
+    ports:
+      - "${EXCHANGE_ROUTER_SERVICE_PORT}:8040"
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    healthcheck:
+      test: curl -f http://localhost:${EXCHANGE_ROUTER_SERVICE_PORT}/status
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
