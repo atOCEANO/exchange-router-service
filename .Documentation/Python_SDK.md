@@ -1,14 +1,10 @@
-<img src="imgs/banners/banner_1.png" width="100%" />
-
-<h1>OCEΛNO | Exchange Router Service</h1>
+<h1>OCEΛNO <small><code>exchange-router-service</code></small></h1>
 
 
 <div style="padding-top: 0px;">
   <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.8+-blue.svg" alt="Python 3.8+" /></a>
   <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/FastAPI-0.123.0-05998b.svg?logo=fastapi&logoColor=white" alt="FastAPI" /></a>
-  <a href="https://www.docker.com/"><img src="https://img.shields.io/badge/docker-supported-blue.svg" alt="Docker" /></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
-  <a href="https://github.com/atOCEANO"><img src="https://img.shields.io/badge/org-OCE%CE%9BNO-black.svg" alt="Organization: OCEΛNO" /></a>
 </div>
 
 <sub>
@@ -28,7 +24,7 @@
 
 The Python SDK is a thin async client over the router's REST and WebSocket interfaces. Market data methods return `pandas.DataFrame` objects indexed by datetime, ready for use in research workflows. Discovery methods return plain dicts or lists.
 
-<br>
+---
 
 ### Installation
 
@@ -45,7 +41,7 @@ cd client
 pip install -e .
 ```
 
-<br>
+---
 
 ### Quick Start
 
@@ -60,11 +56,30 @@ df = await client.get_candles("binance", "spot", "BTCUSDT", interval="1h", limit
 print(df.head())
 ```
 
-<br>
+---
 
 ### Reference
 
 The client holds persistent network connections. Always call `await client.close()` when done to release resources.
+
+#### Errors
+
+The client raises three exception types depending on where the failure happens:
+
+* `ValueError` for any 4xx response from the router. The message includes the HTTP status and the router's `detail` field.
+* `ConnectionError` when a request keeps failing after `max_retries` attempts. 5xx responses and connection-level errors are retried with linear backoff before this is raised.
+* `RuntimeError` for anything unexpected that is not an HTTP or connection error.
+
+`fetch_multi_candles` is the one exception to this rule. It logs failures per symbol and returns only the symbols that succeeded, so an unknown ticker in a batch will not break the whole call.
+
+#### DataFrame output
+
+Market data methods that return a `pd.DataFrame` follow the same conventions:
+
+* The index is a `DatetimeIndex` built from the response `timestamp` (Unix milliseconds). The index is timezone-naive and represents UTC.
+* Column names are lowercased.
+* OHLCV columns (`open`, `high`, `low`, `close`, `volume`) are coerced to numeric. Rows that cannot be parsed become `NaN`.
+* An empty response returns an empty `DataFrame`, not `None`.
 
 #### Discovery Methods
 
@@ -73,6 +88,17 @@ Returns service health and the list of active exchange adapters.
 
 ```python
 await client.get_status()
+```
+
+**Parameters:** None
+
+---
+
+##### `get_version`
+Returns the running service version as a plain string.
+
+```python
+await client.get_version()
 ```
 
 **Parameters:** None
@@ -170,39 +196,7 @@ await client.get_book_ticker(exchange: str, market_type: str, symbol: str)
 
 ---
 
-#### Market Data Methods
-
-##### `get_orderbook`
-Returns the current L2 orderbook snapshot.
-
-```python
-await client.get_orderbook(exchange: str, market_type: str, symbol: str, depth: int = 20)
-```
-
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-* `market_type` *(str)*: Market category.
-* `symbol` *(str)*: Trading pair.
-* `depth` *(int)*: Number of price levels to return (default: 20).
-
----
-
-##### `get_candles`
-Returns historical OHLCV data as a DataFrame indexed by datetime.
-
-```python
-await client.get_candles(exchange: str, market_type: str, symbol: str, interval: str = "1h", limit: int = 100, start: Optional[int] = None)
-```
-
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-* `market_type` *(str)*: `"spot"`, `"linear"`, or `"inverse"`.
-* `symbol` *(str)*: Trading pair (e.g., `"BTCUSDT"`).
-* `interval` *(str)*: Timeframe (e.g., `"1m"`, `"5m"`, `"1h"`, `"1d"`).
-* `limit` *(int)*: Number of candles to return (default: 100).
-* `start` *(int)*: Optional Unix millisecond start timestamp.
-
----
+#### Trades
 
 ##### `get_trades`
 Returns recent public trade executions.
@@ -235,8 +229,44 @@ await client.get_agg_trades(exchange: str, market_type: str, symbol: str, start:
 
 ---
 
+#### Orderbook
+
+##### `get_orderbook`
+Returns the current L2 orderbook snapshot.
+
+```python
+await client.get_orderbook(exchange: str, market_type: str, symbol: str, depth: int = 20)
+```
+
+**Parameters:**
+* `exchange` *(str)*: Adapter name.
+* `market_type` *(str)*: Market category.
+* `symbol` *(str)*: Trading pair.
+* `depth` *(int)*: Number of price levels to return (default: 20).
+
+---
+
+#### Historical Data
+
+##### `get_candles`
+Returns historical OHLCV data as a DataFrame indexed by datetime.
+
+```python
+await client.get_candles(exchange: str, market_type: str, symbol: str, interval: str = "1h", limit: int = 100, start: Optional[int] = None)
+```
+
+**Parameters:**
+* `exchange` *(str)*: Adapter name.
+* `market_type` *(str)*: `"spot"`, `"linear"`, or `"inverse"`.
+* `symbol` *(str)*: Trading pair (e.g., `"BTCUSDT"`).
+* `interval` *(str)*: Timeframe (e.g., `"1m"`, `"5m"`, `"1h"`, `"1d"`).
+* `limit` *(int)*: Number of candles to return (default: 100).
+* `start` *(int)*: Optional Unix millisecond start timestamp.
+
+---
+
 ##### `fetch_multi_candles`
-Fetches OHLCV candles for multiple symbols concurrently. Uses a semaphore to cap parallel requests.
+Batch variant of `get_candles`. Fetches OHLCV for many symbols concurrently, with a semaphore capping parallel requests.
 
 ```python
 results = await client.fetch_multi_candles(
@@ -257,7 +287,7 @@ results = await client.fetch_multi_candles(
 * `limit` *(int)*: Candles per symbol (default: 1000).
 * `max_concurrent` *(int)*: Max simultaneous requests (default: 4).
 
-**Returns:** `Dict[str, pd.DataFrame]` keyed by symbol. Symbols that fail are omitted.
+**Returns:** `Dict[str, pd.DataFrame]` keyed by symbol. Symbols that fail are omitted, so always iterate `results.items()` instead of assuming all input symbols are present.
 
 ```python
 results = await client.fetch_multi_candles("binance", "spot", ["BTCUSDT", "ETHUSDT", "SOLUSDT"], interval="1h", limit=500)
@@ -348,15 +378,19 @@ await client.get_long_short_ratio(exchange: str, market_type: str, symbol: str, 
 #### Real-time Streams
 
 ##### `subscribe`
-Connects to a WebSocket feed and yields messages as an async generator.
+Connects to a WebSocket feed and yields messages as an async generator. One subscription per connection. To switch channels or symbols, exit the iterator and open a new one.
 
 ```python
-async for msg in client.subscribe(exchange: str, market_type: str, channel: str, symbol: str):
+async for msg in client.subscribe("binance", "spot", "ticker", "BTCUSDT"):
     print(msg)
 ```
 
 **Parameters:**
 * `exchange` *(str)*: Adapter name.
 * `market_type` *(str)*: `"spot"`, `"linear"`, or `"inverse"`.
-* `channel` *(str)*: One of `"ticker"`, `"book_ticker"`, `"trades"`, `"agg_trades"`, `"orderbook"`, `"mark_price"`, `"liquidations"`. Not all channels are available on every exchange and market type. Call `get_capabilities()` first to check.
+* `channel` *(str)*: One of `"ticker"`, `"book_ticker"`, `"trades"`, `"agg_trades"`, `"orderbook"`, `"mark_price"`, `"liquidations"`. Check `get_capabilities` first to confirm the channel is supported on that exchange and market type.
 * `symbol` *(str)*: Trading pair.
+
+**Yields:** `Dict[str, Any]`. Each message matches the shape of the equivalent REST response. A `ticker` subscription yields the same fields as `get_ticker`, an `orderbook` subscription yields the same fields as `get_orderbook`, and so on.
+
+If the upstream exchange connection drops, the server closes the WebSocket with code `1011`. The generator will raise `websockets.ConnectionClosed`, which you should catch and handle by re-subscribing.

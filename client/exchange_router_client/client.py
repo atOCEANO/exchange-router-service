@@ -76,6 +76,10 @@ class ExchangeRouterClient:
     async def get_status(self) -> Dict:
         return await self._request("GET", "status")
 
+    async def get_version(self) -> str:
+        data = await self._request("GET", "version")
+        return data.get("version", "")
+
     async def get_exchanges(self) -> List[str]:
         data = await self._request("GET", "exchanges")
         return data.get("exchanges", [])
