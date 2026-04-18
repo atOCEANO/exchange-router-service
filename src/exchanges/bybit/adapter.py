@@ -325,10 +325,17 @@ class BybitAdapter(BaseExchange):
 
     async def get_exchange_info(self, market_type: MarketType) -> List[SymbolInfo]:
         cat = self._get_category(market_type)
-        data = await self._make_request("GET", "/v5/market/instruments-info", {"category": cat, "limit": 1000})
+        params: dict = {"category": cat, "limit": 1000}
+        if market_type == MarketType.LINEAR:
+            params["contractType"] = "LinearPerpetual"
+        elif market_type == MarketType.INVERSE:
+            params["contractType"] = "InversePerpetual"
+        data = await self._make_request("GET", "/v5/market/instruments-info", params)
         results = []
         for s in data["list"]:
             if s["status"] != "Trading": continue
+            if market_type == MarketType.LINEAR and s.get("contractType") != "LinearPerpetual": continue
+            if market_type == MarketType.INVERSE and s.get("contractType") != "InversePerpetual": continue
             min_qty, max_qty, min_notional = 0.0, 0.0, 0.0
             if "lotSizeFilter" in s:
                 min_qty = float(s["lotSizeFilter"].get("minOrderQty", 0))

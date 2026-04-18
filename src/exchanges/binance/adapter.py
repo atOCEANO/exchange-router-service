@@ -281,6 +281,7 @@ class BinanceAdapter(BaseExchange):
         for s in data["symbols"]:
             status = s.get("status") or s.get("contractStatus")
             if status != "TRADING": continue
+            if market_type != MarketType.SPOT and s.get("contractType") != "PERPETUAL": continue
 
             min_qty = 0.0
             max_qty = 0.0
