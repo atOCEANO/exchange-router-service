@@ -109,8 +109,8 @@ class BinanceAdapter(BaseExchange):
 
     def get_model_symbol(self, api_symbol: str, market_type: MarketType) -> str:
         s = api_symbol.upper()
-        if market_type == MarketType.INVERSE and not s.endswith("_PERP"):
-            s += "_PERP"
+        if s.endswith("_PERP"):
+            s = s[:-5]
         return s
 
     def get_stream_symbol(self, symbol: str, market_type: MarketType) -> str:
@@ -294,7 +294,8 @@ class BinanceAdapter(BaseExchange):
                     min_notional = float(f.get("minNotional", 0) or f.get("notional", 0))
 
             results.append(SymbolInfo(
-                symbol=s["symbol"],
+                symbol=self.get_model_symbol(s["symbol"], market_type),
+                native_symbol=s["symbol"],
                 base_asset=s["baseAsset"],
                 quote_asset=s["quoteAsset"],
                 price_precision=s.get("quotePrecision", 8),

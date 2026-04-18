@@ -11,6 +11,7 @@ class MarketType(str, Enum):
 
 class SymbolInfo(BaseModel):
     symbol: str
+    native_symbol: str
     base_asset: str
     quote_asset: str
     price_precision: int

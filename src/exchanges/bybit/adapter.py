@@ -63,8 +63,8 @@ class BybitAdapter(BaseExchange):
 
     def get_model_symbol(self, api_symbol: str, market_type: MarketType) -> str:
         s = api_symbol.upper()
-        if market_type == MarketType.INVERSE and not s.endswith("_PERP"):
-            s += "_PERP"
+        if s.endswith("_PERP"):
+            s = s[:-5]
         return s
 
     def _get_category(self, market_type: MarketType) -> str:
@@ -355,6 +355,7 @@ class BybitAdapter(BaseExchange):
                 min_notional = float(s["lotSizeFilter"].get("minNotionalValue", 0))
             results.append(SymbolInfo(
                 symbol=s["symbol"],
+                native_symbol=s["symbol"],
                 base_asset=s["baseCoin"],
                 quote_asset=s["quoteCoin"],
                 price_precision=int(len(s.get("priceFilter", {}).get("tickSize", "0.01").split(".")[-1])),
