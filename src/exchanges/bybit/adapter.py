@@ -153,33 +153,45 @@ class BybitAdapter(BaseExchange):
         while retries > 0:
             now = time.time()
             if now < self._backoff_until:
-                wait_time = self._backoff_until - now + 0.1
-                await asyncio.sleep(wait_time)
+                wait_time = self._backoff_until - now
+                if wait_time > 30:
+                    raise ValueError(f"Bybit IP ban in effect. Retry in {wait_time:.0f}s.")
+                await asyncio.sleep(wait_time + 0.1)
 
             try:
                 resp = await self.http_client.request(method, url, params=params)
-                
+
                 remaining = int(resp.headers.get("X-Bapi-Limit-Status", 100))
-                
                 if remaining < 10:
                     reset_time_ms = int(resp.headers.get("X-Bapi-Limit-Reset-Timestamp", int(time.time() * 1000) + 5000))
                     reset_time = float(reset_time_ms) / 1000.0
-                    
                     async with self._backoff_lock:
                         self._backoff_until = max(self._backoff_until, reset_time)
-                    logger.warning(f"Bybit Limits Low ({remaining}). Pausing until reset.")
+                    logger.warning(f"Bybit rate limit low ({remaining} remaining). Pausing until reset.")
 
                 if resp.status_code == 200:
                     data = resp.json()
+                    if data["retCode"] == 10006:
+                        async with self._backoff_lock:
+                            self._backoff_until = max(self._backoff_until, time.time() + 2)
+                        logger.warning(f"Bybit soft rate limit (10006). Retrying after 2s.")
+                        retries -= 1
+                        continue
                     if data["retCode"] != 0:
                         raise ValueError(f"Bybit API Error ({data['retCode']}): {data['retMsg']}")
                     return data["result"]
 
-                if resp.status_code in [429, 403]:
+                if resp.status_code == 403:
+                    ban_until = time.time() + 600
+                    async with self._backoff_lock:
+                        self._backoff_until = max(self._backoff_until, ban_until)
+                    logger.error(f"Bybit IP ban (403). All requests blocked for 10 min.")
+                    raise ValueError("Bybit IP ban triggered (403). Retry in 10 minutes.")
+
+                if resp.status_code == 429:
                     async with self._backoff_lock:
                         self._backoff_until = max(self._backoff_until, time.time() + 5)
-                    
-                    logger.error(f"Rate Limit Hit ({resp.status_code}). Global backoff set for 5s.")
+                    logger.error(f"Bybit rate limit (429). Backing off 5s.")
                     retries -= 1
                     continue
 
