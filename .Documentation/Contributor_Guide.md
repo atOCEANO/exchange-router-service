@@ -154,7 +154,7 @@ Dishonesty in either direction fails loudly. Claim `True` for a feature the adap
 
 The suite also runs a pagination sanity check against candles: it fetches 1500 bars and asserts timestamps are strictly ascending. This is the one place where normalization correctness is tested beyond "did the response parse," and it tends to catch adapters that mix up `start` and `end` semantics between exchanges.
 
-WebSocket tests open a connection and listen for the declared duration (default 60 seconds). Channels like `ticker` and `trades` produce messages immediately on most pairs, but low-frequency channels such as `liquidations` may produce nothing in a quiet 60-second window. This is expected and is not a test failure. When running a thorough validation — for example, before a release or after a significant adapter change — increase the duration by setting `WS_TEST_DURATION` before running the suite. The organization's own validation runs use a longer window specifically to exercise these channels.
+WebSocket tests open a connection and listen for the declared duration (default 60 seconds). Channels like `ticker` and `trades` produce messages immediately on most pairs, but low-frequency channels such as `liquidations` may produce nothing in a quiet 60-second window. This is expected and is not a test failure. For a thorough validation (before a release or after a significant adapter change) increase the duration by setting `WS_TEST_DURATION` before running the suite. The organization's own validation runs use a longer window specifically to exercise these channels.
 
 ```bash
 # Point the test suite at the running router (default port 8040)

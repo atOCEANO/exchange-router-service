@@ -31,7 +31,7 @@ Per-adapter implementation details. This document covers behaviors that are spec
 
 All adapters normalize to bare trading pairs (`BTCUSDT`, `ETHUSDT`) with no exchange-specific suffixes. The market type in the URL path conveys that context, so a symbol like `BTCUSDT` means different things depending on whether the path is `/binance/spot/`, `/binance/linear/`, or `/binance/inverse/`.
 
-`GET /{exchange}/{market_type}/markets` returns a flat list of symbol strings. `GET /{exchange}/{market_type}/info` returns the full specs for each symbol, including `native_symbol` — the raw symbol as it appears on the exchange's own API:
+`GET /{exchange}/{market_type}/markets` returns a flat list of symbol strings. `GET /{exchange}/{market_type}/info` returns the full specs for each symbol, including `native_symbol`, the raw symbol as it appears on the exchange's own API:
 
 ```json
 {

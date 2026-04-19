@@ -159,7 +159,7 @@ await client.get_markets(exchange: str, market_type: str)
 ---
 
 **`get_exchange_info`**
-Returns symbol specifications, filters, and precision constraints as a DataFrame. Includes `native_symbol` — the raw exchange symbol for each entry.
+Returns symbol specifications, filters, and precision constraints as a DataFrame. Includes `native_symbol`, the raw exchange symbol for each entry.
 
 ```python
 await client.get_exchange_info(exchange: str, market_type: str)
