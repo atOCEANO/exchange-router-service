@@ -129,7 +129,7 @@ class BybitAdapter(BaseExchange):
                     "open_interest":    {"rest": True, "ws": False, "intervals": METRICS_INTERVALS},
                     "funding_rate":     {"rest": True, "ws": False},
                     "long_short_ratio": {"rest": True, "ws": False, "intervals": METRICS_INTERVALS},
-                    "liquidations":     {"rest": False, "ws": True},
+                    "liquidations":     {"rest": False, "ws": False},
                 },
                 MarketType.INVERSE: {
                     "candles":          {"rest": True, "ws": False, "intervals": CANDLE_INTERVALS},
@@ -217,7 +217,11 @@ class BybitAdapter(BaseExchange):
         last_ts_seen = -1
 
         while len(results) < total_limit and req_count < max_requests:
-            batch = await fetch_func(current_start, limit_per_req)
+            try:
+                batch = await fetch_func(current_start, limit_per_req)
+            except (httpx.HTTPStatusError, ValueError) as e:
+                logger.warning(f"Bybit _paginate_time: stopping early due to error: {e}")
+                break
             if not batch: break
             
             batch.sort(key=lambda x: x.timestamp)
@@ -545,14 +549,16 @@ class BybitAdapter(BaseExchange):
         if start_time:
             async def fetch(s, l):
                 p = {"category": cat, "symbol": api_symbol, "limit": min(l, 200)}
-                if s: p["startTime"] = s
+                if s:
+                    p["startTime"] = s
+                    p["endTime"] = int(time.time() * 1000)
                 data = await self._make_request("GET", "/v5/market/funding/history", p)
-                
+
                 parsed = [FundingRate(
                     symbol=self.get_model_symbol(api_symbol, market_type),
                     rate=float(i["fundingRate"]),
                     timestamp=self.normalize_timestamp(i["fundingRateTimestamp"])
-                ) for i in data["list"]]
+                ) for i in data.get("list", [])]
                 return sorted(parsed, key=lambda x: x.timestamp)
             return await self._paginate_time(fetch, start_time, limit, 200)
 
@@ -560,12 +566,12 @@ class BybitAdapter(BaseExchange):
             p = {"category": cat, "symbol": api_symbol, "limit": min(l, 200)}
             if end_ts: p["endTime"] = end_ts
             data = await self._make_request("GET", "/v5/market/funding/history", p)
-            
+
             parsed = [FundingRate(
                 symbol=self.get_model_symbol(api_symbol, market_type),
                 rate=float(i["fundingRate"]),
                 timestamp=self.normalize_timestamp(i["fundingRateTimestamp"])
-            ) for i in data["list"]]
+            ) for i in data.get("list", [])]
             return sorted(parsed, key=lambda x: x.timestamp)
 
         return await self._paginate_backwards(fetch_backwards, limit, 200)

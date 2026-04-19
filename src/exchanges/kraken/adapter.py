@@ -14,8 +14,9 @@ from src.models import (
 
 logger = logging.getLogger("kraken_adapter")
 
-CANDLE_INTERVALS =["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"]
-ANALYTICS_INTERVALS =["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d"]
+SPOT_CANDLE_INTERVALS    = ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"]
+FUTURES_CANDLE_INTERVALS = ["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d", "1w"]
+ANALYTICS_INTERVALS      = ["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d"]
 
 
 class KrakenAdapter(BaseExchange):
@@ -131,7 +132,7 @@ class KrakenAdapter(BaseExchange):
             "name": self.name,
             "markets": {
                 MarketType.SPOT: {
-                    "candles":          {"rest": True,  "ws": False, "intervals": CANDLE_INTERVALS},
+                    "candles":          {"rest": True,  "ws": False, "intervals": SPOT_CANDLE_INTERVALS},
                     "ticker":           {"rest": True,  "ws": True},
                     "book_ticker":      {"rest": True,  "ws": True},
                     "trades":           {"rest": True,  "ws": True},
@@ -144,7 +145,7 @@ class KrakenAdapter(BaseExchange):
                     "liquidations":     {"rest": False, "ws": False},
                 },
                 MarketType.LINEAR: {
-                    "candles":          {"rest": True, "ws": False, "intervals": CANDLE_INTERVALS},
+                    "candles":          {"rest": True, "ws": False, "intervals": FUTURES_CANDLE_INTERVALS},
                     "ticker":           {"rest": True, "ws": True},
                     "book_ticker":      {"rest": True, "ws": True},
                     "trades":           {"rest": True, "ws": True},
@@ -157,7 +158,7 @@ class KrakenAdapter(BaseExchange):
                     "liquidations":     {"rest": False, "ws": False},
                 },
                 MarketType.INVERSE: {
-                    "candles":          {"rest": True, "ws": False, "intervals": CANDLE_INTERVALS},
+                    "candles":          {"rest": True, "ws": False, "intervals": FUTURES_CANDLE_INTERVALS},
                     "ticker":           {"rest": True, "ws": True},
                     "book_ticker":      {"rest": True, "ws": True},
                     "trades":           {"rest": True, "ws": True},
@@ -439,30 +440,43 @@ class KrakenAdapter(BaseExchange):
             return results[-limit:]
 
     def _extract_analytics(self, data: Any, field_name: str) -> List[Dict]:
-        results: List[Dict] = []
         if not isinstance(data, dict):
-            logger.warning(f"Kraken analytics: expected dict, got {type(data).__name__}")
-            return results
+            logger.warning(f"Kraken analytics: expected dict, got {type(data).__name__}. Raw: {str(data)[:500]}")
+            return []
+
+        candles = data.get("candles")
+        if isinstance(candles, list) and candles:
+            results = []
+            for c in candles:
+                if isinstance(c, dict) and field_name in c and "time" in c:
+                    results.append({"time": c["time"] * 1000, "value": c[field_name]})
+            if results:
+                return results
+
         res = data.get("result")
-        if not isinstance(res, dict):
-            logger.warning(f"Kraken analytics: missing 'result' dict. Top-level keys: {list(data.keys())}")
-            return results
-        timestamps = res.get("timestamp")
-        payload = res.get("data")
-        if not isinstance(timestamps, list) or not isinstance(payload, dict):
-            logger.warning(f"Kraken analytics: unexpected result shape. result keys: {list(res.keys())}")
-            return results
-        values = payload.get(field_name)
-        if not isinstance(values, list):
-            logger.warning(
-                f"Kraken analytics: field '{field_name}' missing from data. "
-                f"Available keys: {list(payload.keys())}"
-            )
-            return results
-        for t, v in zip(timestamps, values):
-            if v is not None:
-                results.append({"time": t, "value": v})
-        return results
+        if isinstance(res, dict):
+            timestamps = res.get("timestamp")
+            payload = res.get("data")
+            if isinstance(timestamps, list) and isinstance(payload, list):
+                results = []
+                for t, row in zip(timestamps, payload):
+                    if isinstance(row, (list, tuple)) and row:
+                        val = row[-1]
+                    else:
+                        val = row
+                    if val is not None:
+                        results.append({"time": t, "value": float(val)})
+                return results
+            if isinstance(timestamps, list) and isinstance(payload, dict):
+                values = payload.get(field_name)
+                if isinstance(values, list):
+                    return [{"time": t, "value": v} for t, v in zip(timestamps, values) if v is not None]
+
+        logger.warning(
+            f"Kraken analytics: unrecognised format for '{field_name}'. "
+            f"Top-level keys: {list(data.keys())}. Raw: {str(data)[:500]}"
+        )
+        return []
 
     async def get_open_interest(self, market_type: MarketType, symbol: str, period: str = "1h", start_time: Optional[int] = None, limit: int = 30) -> List[OpenInterest]:
         if market_type == MarketType.SPOT: raise NotImplementedError()
@@ -630,7 +644,7 @@ class KrakenAdapter(BaseExchange):
         api_symbol = self.get_api_symbol(symbol, market_type)
         if market_type == MarketType.SPOT:
             ws_sym = await self._spot_ws_symbol(api_symbol)
-            payload = {"method": "subscribe", "params": {"channel": "trade", "symbol": [ws_sym]}}
+            payload = {"method": "subscribe", "params": {"channel": "trade", "symbol": [ws_sym], "snapshot": True}}
             async for data in self._ws_connect(self.spot_ws_url, payload):
                 if data.get("type") in ["snapshot", "update"] and data.get("channel") == "trade":
                     for t in data.get("data",[]):

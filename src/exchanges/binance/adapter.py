@@ -75,7 +75,7 @@ class BinanceAdapter(BaseExchange):
                     "open_interest":    {"rest": True, "ws": False, "intervals": FUTURES_METRICS_INTERVALS},
                     "funding_rate":     {"rest": True, "ws": False},
                     "long_short_ratio": {"rest": True, "ws": False, "intervals": FUTURES_METRICS_INTERVALS},
-                    "liquidations":     {"rest": True, "ws": True},
+                    "liquidations":     {"rest": False, "ws": True},
                 },
                 MarketType.INVERSE: {
                     "candles":          {"rest": True, "ws": False, "intervals": CANDLE_INTERVALS},
@@ -88,7 +88,7 @@ class BinanceAdapter(BaseExchange):
                     "open_interest":    {"rest": True, "ws": False, "intervals": FUTURES_METRICS_INTERVALS},
                     "funding_rate":     {"rest": True, "ws": False},
                     "long_short_ratio": {"rest": True, "ws": False, "intervals": FUTURES_METRICS_INTERVALS},
-                    "liquidations":     {"rest": True, "ws": True},
+                    "liquidations":     {"rest": False, "ws": True},
                 },
             }
         }

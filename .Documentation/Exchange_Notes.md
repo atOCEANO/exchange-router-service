@@ -55,6 +55,8 @@ Both endpoints return perpetual contracts only. Quarterly and dated futures are 
 
 **Rate limiting.** Standard HTTP 429 with a `Retry-After` header. Request weight is tracked via the `x-mbx-used-weight-1m` response header.
 
+**Liquidations REST.** The public REST endpoints for forced liquidation history (`/fapi/v1/allForceOrders` on USDM, `/dapi/v1/allForceOrders` on COINM) were deprecated by Binance in April 2021 and no longer return data without authentication. The adapter marks `liquidations.rest: False` for both LINEAR and INVERSE. The WebSocket stream (`forceOrder@arr`) remains publicly available and is still exposed as `liquidations.ws: True`.
+
 <br>
 
 ### Bybit
@@ -66,6 +68,8 @@ Both endpoints return perpetual contracts only. Quarterly and dated futures are 
 - **HTTP 429** is a standard rate limit. The adapter backs off 5 seconds and retries.
 
 **Perpetuals filter.** Bybit returns all contract types from `/v5/market/instruments-info`. The adapter passes `contractType=LinearPerpetual` or `contractType=InversePerpetual` as a query parameter and also applies a client-side guard on the response to ensure no dated contracts (`LinearFutures`, `InverseFutures`) slip through.
+
+**Liquidations WS.** The current Bybit V5 liquidation topic is `allLiquidation.{symbol}`. This topic works on the inverse public WebSocket (`wss://stream.bybit.com/v5/public/inverse`) but causes the Bybit server to close the connection with a 1011 error on the linear endpoint (`wss://stream.bybit.com/v5/public/linear`). As a result, `liquidations.ws` is `True` for INVERSE and `False` for LINEAR. The inverse channel is low-frequency; a short observation window may produce no events, which is expected behaviour for a quiet market and is not a failure.
 
 <br>
 
@@ -83,3 +87,7 @@ The message shapes, subscription formats, and acknowledgement patterns differ be
 **Perpetuals filter.** Kraken futures instruments share the same `type` field value (`futures_inverse`, `flexible_futures`) for both perpetuals and dated contracts. The adapter distinguishes them by instrument prefix: `PI_` and `PF_` are perpetuals; `FI_` and `FF_` are dated. Both a type check and a prefix check are required; the type check alone is not sufficient.
 
 **Book ticker on spot.** The v2 WS `ticker` channel does not emit BBO updates by default; it waits for a trade. The adapter passes `event_trigger: "bbo"` in the subscription payload to receive best-bid/offer updates independently of trade activity.
+
+**Trades WS on spot.** The Kraken v2 WebSocket `trade` channel does not send a historical snapshot by default; it only pushes trades as they occur. The adapter includes `"snapshot": true` in the subscription payload so Kraken immediately sends the most-recent trades on connect, ensuring at least one message arrives regardless of market activity.
+
+**Open interest and long/short ratio.** OI and L/S ratio data is served from the Kraken Futures chart API at `https://futures.kraken.com/api/charts/v1/analytics/{symbol}/{type}`. The endpoint accepts `interval` (seconds, e.g. `3600` for 1h) and `since` (Unix seconds) as query parameters. The response format is `{"result": {"timestamp": [t1, t2, ...], "data": [[open, high, low, close], ...]}}` where each entry in `data` is an OHLC-style array of open interest or ratio values over the bucket. The adapter extracts the last element (close) of each array as the representative value for that timestamp.
