@@ -9,9 +9,10 @@
 
 <sub>
   <a href="../README.md">Introduction</a> &nbsp;•&nbsp; 
-  <a href="Python_SDK.md">Python SDK</a> &nbsp;•&nbsp; 
   <b>API Reference</b> &nbsp;•&nbsp; 
+  <a href="Python_SDK.md">Python SDK</a> &nbsp;•&nbsp; 
   <a href="System_Architecture.md">System Architecture</a> &nbsp;•&nbsp; 
+  <a href="Exchange_Notes.md">Exchange Notes</a> &nbsp;•&nbsp; 
   <a href="Contributor_Guide.md">Contributor Guide</a>
 </sub>
 
@@ -27,7 +28,7 @@ The router exposes two interfaces. REST covers everything request/response (disc
 *   **REST Base URI:** `http://localhost:8040`
 *   **WebSocket Base URI:** `ws://localhost:8040/ws/{exchange}/{market_type}`
 
----
+<br>
 
 ### Path Variables
 
@@ -35,13 +36,13 @@ The router exposes two interfaces. REST covers everything request/response (disc
 *   `{market_type}`: Market category (`spot`, `linear`, `inverse`).
 *   `{symbol}`: Trading pair (e.g., `BTCUSDT`).
 
----
+<br>
 
 ## REST
 
 The REST interface covers everything that is request/response in shape: service discovery, capability maps, historical data pulls, and point-in-time snapshots. Every endpoint returns a normalized JSON payload matching one of the schemas documented in Response Shapes below, regardless of which upstream exchange served the request.
 
----
+<br>
 
 ### Endpoints
 
@@ -56,7 +57,7 @@ The REST interface covers everything that is request/response in shape: service 
 | `GET` | `/{exchange}/capabilities` | Supported REST routes and WebSocket channels for an adapter. | None |
 | `GET` | `/{exchange}/market_types` | Market types available on the exchange. | None |
 | `GET` | `/{exchange}/{market_type}/info` | Symbol specs, filters, and precision constraints. | None |
-| `GET` | `/{exchange}/{market_type}/markets` | All tradable symbols for a market. | None |
+| `GET` | `/{exchange}/{market_type}/markets` | All perpetual contracts for a market. Dated and quarterly futures are excluded. | None |
 
 #### Pricing
 
@@ -95,7 +96,7 @@ The REST interface covers everything that is request/response in shape: service 
 | `GET` | `/{exchange}/{market_type}/open_interest/{symbol}` | Open interest history. | `period`, `start`, `limit` |
 | `GET` | `/{exchange}/{market_type}/long_short_ratio/{symbol}` | Long/short account distribution. | `period`, `start`, `limit` |
 
----
+<br>
 
 ### Parameter Bounds
 
@@ -112,11 +113,34 @@ All `limit` and `depth` values are validated server-side. Requests outside these
 | `limit` (liquidations) | 1 | 1000 | 100 |
 | `limit` (long_short_ratio) | 1 | 5000 | 30 |
 
----
+<br>
 
 ### Response Shapes
 
 All REST responses are normalized to the same schema regardless of the upstream exchange. Timestamps are Unix milliseconds. Prices and volumes are floats. WebSocket channels emit the same shapes, noted inline.
+
+**Markets** &nbsp;·&nbsp; `GET /markets` &nbsp;·&nbsp; *returns a list of symbol strings*
+```json
+["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+```
+
+**Symbol Info** &nbsp;·&nbsp; `GET /info` &nbsp;·&nbsp; *returns a list of full symbol objects*
+```json
+{
+  "symbol": "BTCUSDT",
+  "native_symbol": "BTCUSD_PERP",
+  "base_asset": "BTC",
+  "quote_asset": "USD",
+  "price_precision": 1,
+  "quantity_precision": 4,
+  "min_qty": 0.001,
+  "max_qty": 1000.0,
+  "min_notional": 1.0,
+  "status": "TRADING"
+}
+```
+
+`symbol` is the normalized trading pair used across all router endpoints. `native_symbol` is the raw exchange symbol (e.g. `BTCUSD_PERP`, `PF_XBTUSD`) for cross-referencing back to the upstream API. Not all precision and notional fields are populated on every exchange; fields the upstream does not provide default to `0`.
 
 **Ticker** &nbsp;·&nbsp; `GET /ticker/{symbol}` &nbsp;·&nbsp; WS `ticker`
 ```json
@@ -244,7 +268,7 @@ All REST responses are normalized to the same schema regardless of the upstream 
 }
 ```
 
----
+<br>
 
 ### HTTP Status Codes
 
@@ -257,6 +281,7 @@ All REST responses are normalized to the same schema regardless of the upstream 
 | **500** | Internal Error | Upstream connection failure or unhandled error. |
 | **501** | Not Implemented | Feature not supported by the target adapter. |
 
+<br>
 All error responses include a `detail` field describing what went wrong:
 
 ```json
@@ -271,7 +296,7 @@ Parameter validation errors also carry an `error` field set to `"Invalid Request
 
 The router never masks upstream error detail. If the underlying exchange returns a specific message, it is passed through in `detail`.
 
----
+<br>
 
 ## WebSocket
 
@@ -279,7 +304,7 @@ The WebSocket interface covers everything REST does not, real-time streams from 
 
 Connect to `ws://localhost:8040/ws/{exchange}/{market_type}` and send a JSON subscription payload. The server starts streaming as soon as the upstream exchange connection is established. There is no acknowledgement message, just data.
 
----
+<br>
 
 ### Protocol Rules
 
@@ -289,7 +314,7 @@ Connect to `ws://localhost:8040/ws/{exchange}/{market_type}` and send a JSON sub
 * **Stream payloads match REST shapes.** A `ticker` subscription yields the same JSON object as `GET /ticker/{symbol}`. See the response shapes above.
 * **Availability is not uniform.** Not every channel is available on every exchange or market type. Check `GET /{exchange}/capabilities` before subscribing.
 
----
+<br>
 
 ### Channels
 
@@ -303,7 +328,6 @@ Connect to `ws://localhost:8040/ws/{exchange}/{market_type}` and send a JSON sub
 | `mark_price` | Mark price and funding rate updates. | `{"channel": "mark_price", "symbol": "BTCUSDT"}` |
 | `liquidations` | Real-time liquidation events. | `{"channel": "liquidations", "symbol": "BTCUSDT"}` |
 
----
 
 ### Close Codes
 
@@ -313,7 +337,7 @@ Connect to `ws://localhost:8040/ws/{exchange}/{market_type}` and send a JSON sub
 | **1008** | Exchange not registered, or market type not supported by that adapter. |
 | **1011** | Upstream exchange connection lost. Reconnect and re-subscribe. |
 
----
+<br>
 
 ## Examples
 

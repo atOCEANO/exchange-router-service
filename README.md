@@ -9,9 +9,10 @@
 
 <sub>
   <b>Introduction</b> &nbsp;•&nbsp; 
-  <a href=".Documentation/Python_SDK.md">Python SDK</a> &nbsp;•&nbsp; 
   <a href=".Documentation/API_Reference.md">API Reference</a> &nbsp;•&nbsp; 
+  <a href=".Documentation/Python_SDK.md">Python SDK</a> &nbsp;•&nbsp; 
   <a href=".Documentation/System_Architecture.md">System Architecture</a> &nbsp;•&nbsp; 
+  <a href=".Documentation/Exchange_Notes.md">Exchange Notes</a> &nbsp;•&nbsp; 
   <a href=".Documentation/Contributor_Guide.md">Contributor Guide</a>
 </sub>
 
@@ -28,15 +29,18 @@ The service handles the boring parts that every exchange integration hits eventu
 
 **Stateless and keyless.** The service handles public market data only. It places no orders, holds no API keys, manages no accounts, and persists nothing to disk. If you need authentication or private endpoints, this is not it.
 
+<br>
 
 <div align="center">
   <img src=".Documentation/imgs/204644.png" alt="Exchange Router Architecture" width="90%" />
   <p style="margin: 0;"><i>Architecture: Client -> Router -> Multiple Exchanges</i></p>
 </div>
 
+<br>
+
 Clients talk to one endpoint, the router fans requests out to the right exchange adapter, and the adapter normalizes the response into a schema that is identical across exchanges. REST and WebSocket both sit on the same port, and the same adapter instance serves both, so a client written against Binance spot works against Bybit linear with a single path change.
 
----
+<br>
 
 ### Supported Exchanges
 
@@ -113,7 +117,7 @@ Clients talk to one endpoint, the router fans requests out to the right exchange
       <td style="padding: 8px; text-align: center;">[x]</td>
       <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook, Liquidations</td>
     </tr>
-    <tr style="border-bottom: 1px solid #30363d;">
+    <tr style="border-bottom: 2px solid #30363d;">
       <td style="padding: 8px 12px; opacity: 0.8;">Inverse</td>
       <td style="padding: 8px; text-align: center;">[x]</td>
       <td style="padding: 8px; text-align: center;">[x]</td>
@@ -123,12 +127,46 @@ Clients talk to one endpoint, the router fans requests out to the right exchange
       <td style="padding: 8px; text-align: center;">[x]</td>
       <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook, Liquidations</td>
     </tr>
+    <!-- Kraken -->
+    <tr style="border-bottom: 1px solid #30363d;">
+      <td rowspan="3" style="padding: 12px; vertical-align: middle; text-align: left; border-right: 1px solid #30363d;">
+        <img src=".Documentation/imgs/exchanges/kraken_logo.png" height="24" />
+      </td>
+      <td style="padding: 8px 12px; opacity: 0.8;">Spot</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook</td>
+    </tr>
+    <tr style="border-bottom: 1px solid #30363d;">
+      <td style="padding: 8px 12px; opacity: 0.8;">Linear</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook, Mark Price</td>
+    </tr>
+    <tr style="border-bottom: 1px solid #30363d;">
+      <td style="padding: 8px 12px; opacity: 0.8;">Inverse</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook, Mark Price</td>
+    </tr>
   </tbody>
 </table>
 
-<p style="font-size: 0.9em; opacity: 0.8; margin-top: 12px;"><i>*WebSocket streams provide real-time updates for the listed channels. See the <a href=".Documentation/API_Reference.md#websocket-streams" style="color: #8b949e;">API Reference</a> for full channel specs and subscription payloads.</i></p>
+<small><i>*WebSocket streams provide real-time updates for the listed channels. See the <a href=".Documentation/API_Reference.md#websocket-streams">API Reference</a> for full channel specs and subscription payloads.</i></small>
 
----
+<br>
 
 ### Quick Start
 
@@ -152,7 +190,7 @@ curl http://localhost:8040/status
 curl http://localhost:8040/binance/spot/ticker/BTCUSDT
 ```
 
----
+<br>
 
 ### Configuration
 
@@ -162,11 +200,23 @@ The service is deliberately thin on configuration. Everything it needs at runtim
 | :--- | :--- | :--- | :--- |
 | `EXCHANGE_ROUTER_SERVICE_PORT` | Yes | `8040` | Host port that Docker publishes. The container always binds `8040` internally. Change this if `8040` is already taken on the host, or if you run multiple router instances on the same machine. |
 
+<br>
+
 The variable lives in `.env` and is consumed by `docker-compose.yml` in the `ports` mapping. It is not read by the Python service at all, so running `uvicorn src.main:app` directly during development ignores it, use `--port` on the uvicorn command line instead.
 
 There is no configuration file for adapters, upstream URLs, timeouts, or rate limit thresholds. Those are defined in code, per adapter, and changing them means editing the adapter and rebuilding the container. This is intentional, the router ships as a fixed artifact and should behave identically across deployments.
 
----
+<br>
+
+### Symbol Conventions
+
+All model symbols are normalized to bare trading pairs, such as `BTCUSDT` and `ETHUSDT`, with no exchange-specific suffixes. The market type in the URL path carries that context.
+
+Markets endpoints where the market type is `linear` or `inverse` (`/{exchange}/{market_type}/markets`) return perpetual contracts only. Dated and quarterly futures are excluded.
+
+Symbol info (`/{exchange}/{market_type}/info`) includes a `native_symbol` field with the raw exchange symbol (e.g. `BTCUSD_PERP` for Binance inverse, `PF_XBTUSD` for Kraken linear) for cross-referencing back to the upstream API.
+
+<br>
 
 ### Python SDK
 
@@ -187,4 +237,4 @@ print(df.tail())
 await client.close()
 ```
 
-Full method reference in the [Python SDK](.Documentation/Python_SDK.md) doc.
+<small>Full method reference in the <a href=".Documentation/Python_SDK.md">Python SDK</a> doc.</small>

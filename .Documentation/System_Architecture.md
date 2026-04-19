@@ -9,9 +9,10 @@
 
 <sub>
   <a href="../README.md">Introduction</a> &nbsp;•&nbsp; 
-  <a href="Python_SDK.md">Python SDK</a> &nbsp;•&nbsp; 
   <a href="API_Reference.md">API Reference</a> &nbsp;•&nbsp; 
+  <a href="Python_SDK.md">Python SDK</a> &nbsp;•&nbsp; 
   <b>System Architecture</b> &nbsp;•&nbsp; 
+  <a href="Exchange_Notes.md">Exchange Notes</a> &nbsp;•&nbsp; 
   <a href="Contributor_Guide.md">Contributor Guide</a>
 </sub>
 
@@ -24,7 +25,7 @@
 
 The sections below cover the router's core contract, the two request paths (REST and WebSocket), how rate limiting and failures are handled, and the deployment and security constraints that shape how the service should be operated in practice.
 
----
+<br>
 
 ### Core Design
 
@@ -32,7 +33,7 @@ The router is built around an abstract base contract (`BaseExchange`). Each exch
 
 Adapters are discovered automatically. On startup, the loader in `src/exchanges/__init__.py` scans the `src/exchanges/` directory, finds every valid `BaseExchange` subclass, instantiates it, and registers it in the `EXCHANGE_REGISTRY`. Adding a new exchange is a matter of dropping a compliant adapter into that directory and restarting the service.
 
----
+<br>
 
 ### Request Lifecycle
 
@@ -46,7 +47,7 @@ Every request follows the same path, regardless of exchange or data type:
 4. **Normalization:** The raw JSON response is mapped to a Pydantic model defined in `src/models.py`.
 5. **Response:** The validated model is returned to the client. Raw dicts are never passed through.
 
----
+<br>
 
 ### WebSocket Lifecycle
 
@@ -61,18 +62,20 @@ When a client subscribes to a `(channel, symbol)` tuple on an exchange, the mana
 
 This is also why re-subscribing on the same connection is not supported. Each connection is bound to one stream task, and the router has no mechanism for moving a client between tasks.
 
----
+<br>
 
 ### Rate Limiting
 
-The router manages request weight per adapter to avoid upstream IP bans when multiple local processes hit the same exchange. Each adapter holds a dedicated `asyncio.Lock()` and a shared `_backoff_until` timestamp, and combines them in two layers:
+The router manages request weight per adapter to avoid upstream IP bans. Each adapter holds a dedicated `asyncio.Lock()` and a shared `_backoff_until` timestamp, combining them in two layers:
 
-- **Proactive.** Every response is inspected for rate limit headers (`X-Bapi-Limit-Status`, `x-mbx-used-weight`, and similar). If the remaining API weight drops below a threshold, the adapter sets a backoff timestamp and stalls pending tasks before the upstream starts rejecting anything.
-- **Reactive.** If the exchange returns a `429 Too Many Requests` or `418 IP Ban`, the adapter reads `Retry-After`, acquires the lock, sets the backoff timestamp, and puts all pending tasks to sleep until the window clears.
+- **Proactive.** Every response is inspected for rate limit headers (`X-Bapi-Limit-Status`, `x-mbx-used-weight`, and similar). If remaining weight drops below a threshold, the adapter sets a backoff timestamp and stalls pending tasks before the upstream starts rejecting anything.
+- **Reactive.** Exchange-specific: Bybit uses HTTP 403 for IP bans (not 429), which sets a 10-minute backoff and fails the triggering request immediately. A `retCode: 10006` inside a 200 response signals a soft per-endpoint limit and triggers a short backoff with a retry. Binance and Kraken use standard HTTP 429. All cases update the shared `_backoff_until` timestamp.
 
-The net effect is that concurrent requests to the same exchange queue behind a single shared budget, and the router slows itself down before the exchange does.
+If the remaining backoff exceeds 30 seconds when a request arrives, the adapter fails it immediately with a clear error rather than making the caller wait. All requests to the same exchange share a single budget and serialize behind the same lock.
 
----
+For detailed per-exchange behavior, see the [Exchange Notes](Exchange_Notes.md).
+
+<br>
 
 ### Error Handling
 
@@ -95,7 +98,7 @@ Two more conditions do not correspond to exception types at all:
 
 The `detail` field in error responses always carries the underlying exception message, whether it came from the adapter or the upstream exchange. Nothing is rewritten or swallowed.
 
----
+<br>
 
 ### Deployment Notes
 
@@ -108,7 +111,7 @@ The router is designed to run as a single container per exchange IP. A few conse
 
 None of these are bugs. They are intentional tradeoffs that keep the service stateless and simple to restart. They should be understood before pointing real traffic at it.
 
----
+<br>
 
 ### Security and Exposure
 

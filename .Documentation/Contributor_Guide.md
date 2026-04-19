@@ -9,9 +9,10 @@
 
 <sub>
   <a href="../README.md">Introduction</a> &nbsp;•&nbsp; 
-  <a href="Python_SDK.md">Python SDK</a> &nbsp;•&nbsp; 
   <a href="API_Reference.md">API Reference</a> &nbsp;•&nbsp; 
+  <a href="Python_SDK.md">Python SDK</a> &nbsp;•&nbsp; 
   <a href="System_Architecture.md">System Architecture</a> &nbsp;•&nbsp; 
+  <a href="Exchange_Notes.md">Exchange Notes</a> &nbsp;•&nbsp; 
   <b>Contributor Guide</b>
 </sub>
 
@@ -24,7 +25,7 @@
 
 The router is extended through isolated exchange adapters. Almost every contribution lives in `src/exchanges/<name>/` and leaves the routing core untouched. This guide walks through the work in roughly the order you will actually do it: set up a local loop, build the adapter, satisfy the contract, follow the code standards, and run the test suite before opening a PR.
 
----
+<br>
 
 ### Local Development
 
@@ -46,7 +47,7 @@ The `--reload` flag restarts the worker whenever a file under `src/` changes. Pa
 
 When something breaks, it helps to bypass FastAPI entirely. Instantiate the adapter in a Python REPL and call its methods directly. The stack trace is cleaner, and you can poke at intermediate state without routing a request end to end.
 
----
+<br>
 
 ### Adapter Implementation
 
@@ -55,9 +56,12 @@ All adapters must inherit from `BaseExchange` in `src/exchanges/base.py`. The fo
 - [ ] **Capability Mapping:** Implement `get_capabilities()` returning the full list of supported REST routes and WebSocket channels.
 - [ ] **Data Normalization:** Map all raw upstream JSON payloads to the Pydantic models in `src/models.py`.
 - [ ] **Market Routing:** Handle `spot`, `linear`, and `inverse` market types, including any subdomain or parameter differences between them.
+- [ ] **Symbol Normalization:** Implement `get_model_symbol(api_symbol, market_type)` to translate raw exchange symbols to normalized form (e.g. `BTCUSD_PERP` → `BTCUSDT`), and `get_api_symbol(symbol, market_type)` to reverse the translation when constructing upstream requests. Normalized symbols must be bare pairs with no suffixes.
+- [ ] **Perpetuals Filter:** For `linear` and `inverse` markets, `get_exchange_info` must exclude dated and quarterly contracts. Only perpetual instruments should appear in `/markets` and `/info`.
+- [ ] **`native_symbol` Field:** Populate `native_symbol` on every `SymbolInfo` object with the raw exchange symbol before normalization.
 - [ ] **Registry Registration:** Add an `__init__.py` that imports the adapter class (e.g., `from .adapter import KrakenAdapter`). The auto-loader relies on this import to discover subclasses of `BaseExchange`.
 
----
+<br>
 
 ### Capabilities Contract
 
@@ -106,7 +110,7 @@ This split matters because REST and WS support do not always line up. For exampl
 
 The canonical implementation lives in `src/exchanges/binance/adapter.py` (`BinanceAdapter.get_capabilities`). When adding a new adapter, copy it as a starting point rather than reconstructing this schema by hand.
 
----
+<br>
 
 ### Data Normalization
 
@@ -128,7 +132,7 @@ If an upstream response carries a field that no existing model captures, you hav
 
 Do not add adapter-specific fields under a generic name, and do not return raw dicts as an escape hatch. The normalization contract is the whole point of the router.
 
----
+<br>
 
 ### Code Standards
 
@@ -138,7 +142,9 @@ Do not add adapter-specific fields under a generic name, and do not return raw d
 * **No hand-rolled retry logic at the call site.** `_make_request` (or the adapter's equivalent) handles retries and backoff. Per-call retry loops fight the rate limiter.
 * **Logging via `logging.getLogger("<adapter>_adapter")`.** Keep each adapter's logs isolated so they can be filtered independently.
 
----
+For exchange-specific behaviors (rate limit tiers, symbol translation quirks, API version notes) see [Exchange Notes](Exchange_Notes.md).
+
+<br>
 
 ### Testing
 
@@ -148,15 +154,20 @@ Dishonesty in either direction fails loudly. Claim `True` for a feature the adap
 
 The suite also runs a pagination sanity check against candles: it fetches 1500 bars and asserts timestamps are strictly ascending. This is the one place where normalization correctness is tested beyond "did the response parse," and it tends to catch adapters that mix up `start` and `end` semantics between exchanges.
 
+WebSocket tests open a connection and listen for the declared duration (default 60 seconds). Channels like `ticker` and `trades` produce messages immediately on most pairs, but low-frequency channels such as `liquidations` may produce nothing in a quiet 60-second window. This is expected and is not a test failure. When running a thorough validation — for example, before a release or after a significant adapter change — increase the duration by setting `WS_TEST_DURATION` before running the suite. The organization's own validation runs use a longer window specifically to exercise these channels.
+
 ```bash
 # Point the test suite at the running router (default port 8040)
 export API_URL=http://localhost:8040
 
 # Run the suite
 python tests/verify_routes.py
+
+# Run with extended WebSocket observation window (seconds)
+WS_TEST_DURATION=300 python tests/verify_routes.py
 ```
 
----
+<br>
 
 ### Service Lifecycle
 

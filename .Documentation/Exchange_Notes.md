@@ -1,0 +1,85 @@
+<h1>OCEΛNO <small><code>exchange-router-service</code></small></h1>
+
+
+<div style="padding-top: 0px;">
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.8+-blue.svg" alt="Python 3.8+" /></a>
+  <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/FastAPI-0.123.0-05998b.svg?logo=fastapi&logoColor=white" alt="FastAPI" /></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
+</div>
+
+<sub>
+  <a href="../README.md">Introduction</a> &nbsp;•&nbsp; 
+  <a href="API_Reference.md">API Reference</a> &nbsp;•&nbsp; 
+  <a href="Python_SDK.md">Python SDK</a> &nbsp;•&nbsp; 
+  <a href="System_Architecture.md">System Architecture</a> &nbsp;•&nbsp; 
+  <b>Exchange Notes</b> &nbsp;•&nbsp; 
+  <a href="Contributor_Guide.md">Contributor Guide</a>
+</sub>
+
+<br>
+<br>
+<br>
+<br>
+
+## Exchange Notes
+
+Per-adapter implementation details. This document covers behaviors that are specific to an exchange and not derivable from the normalized API contract: API version differences, symbol translation quirks, rate limit tiers, and filter logic. It is intended for contributors implementing or maintaining adapters.
+
+<br>
+
+### Symbol Conventions
+
+All adapters normalize to bare trading pairs (`BTCUSDT`, `ETHUSDT`) with no exchange-specific suffixes. The market type in the URL path conveys that context, so a symbol like `BTCUSDT` means different things depending on whether the path is `/binance/spot/`, `/binance/linear/`, or `/binance/inverse/`.
+
+`GET /{exchange}/{market_type}/markets` returns a flat list of symbol strings. `GET /{exchange}/{market_type}/info` returns the full specs for each symbol, including `native_symbol` — the raw symbol as it appears on the exchange's own API:
+
+```json
+{
+  "symbol": "BTCUSDT",
+  "native_symbol": "BTCUSD_PERP",
+  ...
+}
+```
+
+For Binance inverse, `symbol` is `BTCUSDT` and `native_symbol` is `BTCUSD_PERP`. For Kraken linear, `symbol` is `XBTUSD` and `native_symbol` is `PF_XBTUSD`. Use `native_symbol` when you need to cross-reference a normalized symbol back to the exchange's documentation or raw API.
+
+Both endpoints return perpetual contracts only. Quarterly and dated futures are excluded at the adapter level (Bybit `LinearFutures`/`InverseFutures`, Kraken `FI_*`/`FF_*`).
+
+<br>
+
+### Binance
+
+**Symbol format.** Binance COIN-M (inverse) perpetuals carry a `_PERP` suffix in the exchange API (`BTCUSD_PERP`, `ETHUSD_PERP`). The adapter strips this suffix to produce the normalized symbol. `get_api_symbol` restores the suffix when constructing requests back to Binance, so the upstream always receives the format it expects.
+
+**Perpetuals filter.** Binance returns all contract types from `/dapi/v1/exchangeInfo`. The adapter filters on `contractType == "PERPETUAL"` to exclude quarterly and dated contracts.
+
+**Rate limiting.** Standard HTTP 429 with a `Retry-After` header. Request weight is tracked via the `x-mbx-used-weight-1m` response header.
+
+<br>
+
+### Bybit
+
+**Rate limit tiers.** Bybit uses two distinct mechanisms:
+
+- **HTTP 403** signals an IP ban. This is not a transient limit; bans last on the order of 10 minutes. The adapter sets a 10-minute backoff and raises immediately. Requests arriving while the ban is active are rejected with a clear error if the remaining backoff exceeds 30 seconds.
+- **`retCode: 10006`** inside an HTTP 200 response signals a soft per-endpoint limit. The adapter backs off 2 seconds and retries rather than failing the request.
+- **HTTP 429** is a standard rate limit. The adapter backs off 5 seconds and retries.
+
+**Perpetuals filter.** Bybit returns all contract types from `/v5/market/instruments-info`. The adapter passes `contractType=LinearPerpetual` or `contractType=InversePerpetual` as a query parameter and also applies a client-side guard on the response to ensure no dated contracts (`LinearFutures`, `InverseFutures`) slip through.
+
+<br>
+
+### Kraken
+
+**Two separate WebSocket APIs.** Kraken runs distinct WebSocket services for spot and futures:
+
+- Spot: `wss://ws.kraken.com/v2` (Kraken v2 protocol)
+- Futures: `wss://futures.kraken.com/ws/v1` (Kraken v1 protocol)
+
+The message shapes, subscription formats, and acknowledgement patterns differ between the two. The adapter branches on `market_type` throughout the WebSocket methods.
+
+**XBT → BTC symbol translation.** Kraken's spot REST API (`/AssetPairs`) returns ticker symbols using legacy asset names: `XBT/USDT`, `XDG/USDT`. The v2 WebSocket API requires the modern names: `BTC/USDT`, `DOGE/USDT`. The adapter translates via `_to_v2_wsname` when building the spot WebSocket symbol map and when constructing subscription payloads. Normalized model symbols always use the modern form.
+
+**Perpetuals filter.** Kraken futures instruments share the same `type` field value (`futures_inverse`, `flexible_futures`) for both perpetuals and dated contracts. The adapter distinguishes them by instrument prefix: `PI_` and `PF_` are perpetuals; `FI_` and `FF_` are dated. Both a type check and a prefix check are required; the type check alone is not sufficient.
+
+**Book ticker on spot.** The v2 WS `ticker` channel does not emit BBO updates by default; it waits for a trade. The adapter passes `event_trigger: "bbo"` in the subscription payload to receive best-bid/offer updates independently of trade activity.

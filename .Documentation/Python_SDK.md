@@ -9,9 +9,10 @@
 
 <sub>
   <a href="../README.md">Introduction</a> &nbsp;•&nbsp; 
-  <b>Python SDK</b> &nbsp;•&nbsp; 
   <a href="API_Reference.md">API Reference</a> &nbsp;•&nbsp; 
+  <b>Python SDK</b> &nbsp;•&nbsp; 
   <a href="System_Architecture.md">System Architecture</a> &nbsp;•&nbsp; 
+  <a href="Exchange_Notes.md">Exchange Notes</a> &nbsp;•&nbsp; 
   <a href="Contributor_Guide.md">Contributor Guide</a>
 </sub>
 
@@ -24,7 +25,7 @@
 
 The Python SDK is a thin async client over the router's REST and WebSocket interfaces. Market data methods return `pandas.DataFrame` objects indexed by datetime, ready for use in research workflows. Discovery methods return plain dicts or lists.
 
----
+<br>
 
 ### Installation
 
@@ -41,7 +42,7 @@ cd client
 pip install -e .
 ```
 
----
+<br>
 
 ### Quick Start
 
@@ -56,11 +57,13 @@ df = await client.get_candles("binance", "spot", "BTCUSDT", interval="1h", limit
 print(df.head())
 ```
 
----
+<br>
 
 ### Reference
 
 The client holds persistent network connections. Always call `await client.close()` when done to release resources.
+
+<br>
 
 #### Errors
 
@@ -71,6 +74,8 @@ The client raises three exception types depending on where the failure happens:
 * `RuntimeError` for anything unexpected that is not an HTTP or connection error.
 
 `fetch_multi_candles` is the one exception to this rule. It logs failures per symbol and returns only the symbols that succeeded, so an unknown ticker in a batch will not break the whole call.
+
+<br>
 
 #### DataFrame output
 
@@ -83,7 +88,7 @@ Market data methods that return a `pd.DataFrame` follow the same conventions:
 
 #### Discovery Methods
 
-##### `get_status`
+**`get_status`**
 Returns service health and the list of active exchange adapters.
 
 ```python
@@ -94,7 +99,7 @@ await client.get_status()
 
 ---
 
-##### `get_version`
+**`get_version`**
 Returns the running service version as a plain string.
 
 ```python
@@ -105,7 +110,7 @@ await client.get_version()
 
 ---
 
-##### `get_exchanges`
+**`get_exchanges`**
 Lists every enabled exchange adapter registered in the router.
 
 ```python
@@ -116,7 +121,7 @@ await client.get_exchanges()
 
 ---
 
-##### `get_market_types`
+**`get_market_types`**
 Returns the market categories supported by a specific exchange.
 
 ```python
@@ -128,7 +133,7 @@ await client.get_market_types(exchange: str)
 
 ---
 
-##### `get_capabilities`
+**`get_capabilities`**
 Returns the full feature map for an adapter. For each market type, every feature is described with `{"rest": bool, "ws": bool}` flags indicating whether a REST endpoint and a WebSocket channel are available. Interval-based features (candles, open interest, long/short ratio) also include an `"intervals"` list.
 
 ```python
@@ -140,8 +145,8 @@ await client.get_capabilities(exchange: str)
 
 ---
 
-##### `get_markets`
-Returns all tradable symbols for a given market type.
+**`get_markets`**
+Returns all tradable perpetual symbols for a given market type as a list of strings.
 
 ```python
 await client.get_markets(exchange: str, market_type: str)
@@ -153,8 +158,8 @@ await client.get_markets(exchange: str, market_type: str)
 
 ---
 
-##### `get_exchange_info`
-Returns symbol specifications, filters, and precision constraints as a DataFrame.
+**`get_exchange_info`**
+Returns symbol specifications, filters, and precision constraints as a DataFrame. Includes `native_symbol` — the raw exchange symbol for each entry.
 
 ```python
 await client.get_exchange_info(exchange: str, market_type: str)
@@ -168,7 +173,9 @@ await client.get_exchange_info(exchange: str, market_type: str)
 
 #### Pricing
 
-##### `get_ticker`
+---
+
+**`get_ticker`**
 Returns the latest price and 24h rolling window statistics.
 
 ```python
@@ -182,7 +189,7 @@ await client.get_ticker(exchange: str, market_type: str, symbol: str)
 
 ---
 
-##### `get_book_ticker`
+**`get_book_ticker`**
 Returns the current best bid and ask price/quantity.
 
 ```python
@@ -194,11 +201,11 @@ await client.get_book_ticker(exchange: str, market_type: str, symbol: str)
 * `market_type` *(str)*: Market category.
 * `symbol` *(str)*: Trading pair.
 
----
-
 #### Trades
 
-##### `get_trades`
+---
+
+**`get_trades`**
 Returns recent public trade executions.
 
 ```python
@@ -213,7 +220,7 @@ await client.get_trades(exchange: str, market_type: str, symbol: str, limit: int
 
 ---
 
-##### `get_agg_trades`
+**`get_agg_trades`**
 Returns aggregated trade data.
 
 ```python
@@ -227,11 +234,11 @@ await client.get_agg_trades(exchange: str, market_type: str, symbol: str, start:
 * `start` *(int)*: Optional start timestamp.
 * `limit` *(int)*: Number of results to return.
 
----
-
 #### Orderbook
 
-##### `get_orderbook`
+---
+
+**`get_orderbook`**
 Returns the current L2 orderbook snapshot.
 
 ```python
@@ -244,11 +251,11 @@ await client.get_orderbook(exchange: str, market_type: str, symbol: str, depth: 
 * `symbol` *(str)*: Trading pair.
 * `depth` *(int)*: Number of price levels to return (default: 20).
 
----
-
 #### Historical Data
 
-##### `get_candles`
+---
+
+**`get_candles`**
 Returns historical OHLCV data as a DataFrame indexed by datetime.
 
 ```python
@@ -265,7 +272,7 @@ await client.get_candles(exchange: str, market_type: str, symbol: str, interval:
 
 ---
 
-##### `fetch_multi_candles`
+**`fetch_multi_candles`**
 Batch variant of `get_candles`. Fetches OHLCV for many symbols concurrently, with a semaphore capping parallel requests.
 
 ```python
@@ -298,7 +305,9 @@ for symbol, df in results.items():
 
 #### Futures
 
-##### `get_mark_price`
+---
+
+**`get_mark_price`**
 Returns the mark price, index price, and current funding rate. Linear and inverse only.
 
 ```python
@@ -312,7 +321,7 @@ await client.get_mark_price(exchange: str, market_type: str, symbol: str)
 
 ---
 
-##### `get_funding_rate`
+**`get_funding_rate`**
 Returns funding rate history for perpetual contracts.
 
 ```python
@@ -328,7 +337,7 @@ await client.get_funding_rate(exchange: str, market_type: str, symbol: str, star
 
 ---
 
-##### `get_open_interest`
+**`get_open_interest`**
 Returns open interest history.
 
 ```python
@@ -345,7 +354,7 @@ await client.get_open_interest(exchange: str, market_type: str, symbol: str, per
 
 ---
 
-##### `get_liquidations`
+**`get_liquidations`**
 Returns recent forced liquidation events.
 
 ```python
@@ -361,7 +370,7 @@ await client.get_liquidations(exchange: str, market_type: str, symbol: str, star
 
 ---
 
-##### `get_long_short_ratio`
+**`get_long_short_ratio`**
 Returns global long/short account ratio history.
 
 ```python
@@ -377,7 +386,9 @@ await client.get_long_short_ratio(exchange: str, market_type: str, symbol: str, 
 
 #### Real-time Streams
 
-##### `subscribe`
+---
+
+**`subscribe`**
 Connects to a WebSocket feed and yields messages as an async generator. One subscription per connection. To switch channels or symbols, exit the iterator and open a new one.
 
 ```python
