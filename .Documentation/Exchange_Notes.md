@@ -69,7 +69,6 @@ Both endpoints return perpetual contracts only. Quarterly and dated futures are 
 
 **Perpetuals filter.** Bybit returns all contract types from `/v5/market/instruments-info`. The adapter passes `contractType=LinearPerpetual` or `contractType=InversePerpetual` as a query parameter and also applies a client-side guard on the response to ensure no dated contracts (`LinearFutures`, `InverseFutures`) slip through.
 
-**Liquidations WS.** The current Bybit V5 liquidation topic is `allLiquidation.{symbol}`. This topic works on the inverse public WebSocket (`wss://stream.bybit.com/v5/public/inverse`) but causes the Bybit server to close the connection with a 1011 error on the linear endpoint (`wss://stream.bybit.com/v5/public/linear`). As a result, `liquidations.ws` is `True` for INVERSE and `False` for LINEAR. The inverse channel is low-frequency; a short observation window may produce no events, which is expected behaviour for a quiet market and is not a failure.
 
 <br>
 

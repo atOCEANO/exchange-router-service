@@ -115,7 +115,7 @@ Clients talk to one endpoint, the router fans requests out to the right exchange
       <td style="padding: 8px; text-align: center;">[x]</td>
       <td style="padding: 8px; text-align: center;">[x]</td>
       <td style="padding: 8px; text-align: center;">[x]</td>
-      <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook</td>
+      <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook, Liquidations</td>
     </tr>
     <tr style="border-bottom: 2px solid #30363d;">
       <td style="padding: 8px 12px; opacity: 0.8;">Inverse</td>

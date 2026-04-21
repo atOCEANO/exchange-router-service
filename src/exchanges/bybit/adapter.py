@@ -129,7 +129,7 @@ class BybitAdapter(BaseExchange):
                     "open_interest":    {"rest": True, "ws": False, "intervals": METRICS_INTERVALS},
                     "funding_rate":     {"rest": True, "ws": False},
                     "long_short_ratio": {"rest": True, "ws": False, "intervals": METRICS_INTERVALS},
-                    "liquidations":     {"rest": False, "ws": False},
+                    "liquidations":     {"rest": False, "ws": True},
                 },
                 MarketType.INVERSE: {
                     "candles":          {"rest": True, "ws": False, "intervals": CANDLE_INTERVALS},
@@ -666,11 +666,11 @@ class BybitAdapter(BaseExchange):
         api_symbol = self.get_api_symbol(symbol, market_type)
         topic = f"allLiquidation.{api_symbol}"
         async for msg in self._ws_connect(market_type, [topic]):
-            d = msg["data"]
-            yield Liquidation(
-                symbol=self.get_model_symbol(d.get("symbol", api_symbol), market_type),
-                side=d.get("side", "").lower(),
-                price=float(d.get("price", 0)),
-                qty=float(d.get("size", 0)),
-                timestamp=self.normalize_timestamp(d.get("time", msg.get("ts")))
-            )
+            for d in msg.get("data", []):
+                yield Liquidation(
+                    symbol=self.get_model_symbol(d.get("s", api_symbol), market_type),
+                    side=d.get("S", "").lower(),
+                    price=float(d.get("p", 0)),
+                    qty=float(d.get("v", 0)),
+                    timestamp=self.normalize_timestamp(d.get("T", msg.get("ts")))
+                )
