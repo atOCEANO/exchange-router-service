@@ -218,15 +218,24 @@ class KrakenAdapter(BaseExchange):
 
         raise Exception(f"Max retries exceeded for {url}")
 
+    @staticmethod
+    def _decimal_places(value: float) -> int:
+        if not value or value <= 0:
+            return 8
+        s = f"{value:.10f}".rstrip("0")
+        return len(s.split(".")[1]) if "." in s else 0
+
     async def get_exchange_info(self, market_type: MarketType) -> List[SymbolInfo]:
-        results =[]
+        results = []
         if market_type == MarketType.SPOT:
             data = await self._make_request("GET", f"{self.spot_rest_url}/AssetPairs")
             for k, v in data.items():
                 if "." in k: continue
                 wsname = v.get("wsname", "/")
                 base, quote = wsname.split("/") if "/" in wsname else (v.get("base", ""), v.get("quote", ""))
-                
+                base = self._to_v2_wsname(base)
+                quote = self._to_v2_wsname(quote)
+
                 results.append(SymbolInfo(
                     symbol=self.get_model_symbol(v.get("altname", k), market_type),
                     native_symbol=v.get("altname", k),
@@ -234,23 +243,33 @@ class KrakenAdapter(BaseExchange):
                     quote_asset=quote,
                     price_precision=int(v.get("pair_decimals", 8)),
                     quantity_precision=int(v.get("lot_decimals", 8)),
-                    min_qty=float(v.get("ordermin", 0)), max_qty=0.0, min_notional=0.0,
+                    min_qty=float(v.get("ordermin", 0)),
+                    max_qty=0.0,
+                    min_notional=float(v.get("costmin", 0)),
                     status="TRADING" if v.get("status") == "online" else "OFFLINE"
                 ))
         else:
             data = await self._make_request("GET", f"{self.futures_rest_url}/instruments")
-            for v in data.get("instruments",[]):
+            for v in data.get("instruments", []):
                 t = v.get("type", "")
                 sym = v.get("symbol", "")
                 if market_type == MarketType.INVERSE and (t != "futures_inverse" or not sym.startswith("PI_")): continue
                 if market_type == MarketType.LINEAR and (t != "flexible_futures" or not sym.startswith("PF_")): continue
-                
+
+                tick = float(v.get("tickSize", 0) or 0)
+                min_size = float(v.get("minTradeSize", 0) or 0)
+                max_size = float(v.get("maxTradeSize", 0) or 0)
+
                 results.append(SymbolInfo(
                     symbol=self.get_model_symbol(v["symbol"], market_type),
                     native_symbol=v["symbol"],
-                    base_asset=v.get("baseCurrency", ""),
-                    quote_asset=v.get("quoteCurrency", ""),
-                    price_precision=8, quantity_precision=8, min_qty=0.0, max_qty=0.0, min_notional=0.0,
+                    base_asset=self._to_v2_wsname(v.get("baseCurrency", "")),
+                    quote_asset=self._to_v2_wsname(v.get("quoteCurrency", "")),
+                    price_precision=self._decimal_places(tick),
+                    quantity_precision=self._decimal_places(min_size),
+                    min_qty=min_size,
+                    max_qty=max_size,
+                    min_notional=0.0,
                     status="TRADING" if v.get("tradeable") else "OFFLINE"
                 ))
         return results
@@ -427,17 +446,41 @@ class KrakenAdapter(BaseExchange):
             interval_secs_map = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600,
                                  "4h": 14400, "12h": 43200, "1d": 86400, "1w": 604800}
             interval_secs = interval_secs_map.get(interval, 3600)
-            from_ts = int(start_time / 1000) if start_time else int(time.time()) - limit * interval_secs
-            url = f"{self.futures_chart_url}/trade/{api_symbol}/{interval}"
-            params = {"from": from_ts}
-            data = await self._make_request("GET", url, params)
+            now_secs = int(time.time())
+            from_ts = int(start_time / 1000) if start_time else now_secs - limit * interval_secs
 
-            results = [Candle(
-                timestamp=self.normalize_timestamp(b["time"]),
-                open=float(b["open"]), high=float(b["high"]), low=float(b["low"]), close=float(b["close"]),
-                volume=float(b["volume"])
-            ) for b in data.get("candles", [])]
-            return results[-limit:]
+            url = f"{self.futures_chart_url}/trade/{api_symbol}/{interval}"
+            all_candles: List[Candle] = []
+            seen_ts: set = set()
+
+            for _ in range(20):
+                data = await self._make_request("GET", url, {"from": from_ts})
+                batch = data.get("candles", [])
+                if not batch:
+                    break
+
+                added = 0
+                last_ts_secs = from_ts
+                for b in batch:
+                    ts_ms = self.normalize_timestamp(b["time"])
+                    if ts_ms not in seen_ts:
+                        seen_ts.add(ts_ms)
+                        all_candles.append(Candle(
+                            timestamp=ts_ms,
+                            open=float(b["open"]), high=float(b["high"]),
+                            low=float(b["low"]), close=float(b["close"]),
+                            volume=float(b["volume"])
+                        ))
+                        added += 1
+                    last_ts_secs = ts_ms // 1000
+
+                if added == 0 or len(all_candles) >= limit or last_ts_secs >= now_secs - interval_secs:
+                    break
+
+                from_ts = last_ts_secs + interval_secs
+
+            all_candles.sort(key=lambda c: c.timestamp)
+            return all_candles[-limit:]
 
     def _extract_analytics(self, data: Any, field_name: str) -> List[Dict]:
         if not isinstance(data, dict):
