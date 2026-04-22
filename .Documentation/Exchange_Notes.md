@@ -69,7 +69,7 @@ Both endpoints return perpetual contracts only. Quarterly and dated futures are 
 
 **Perpetuals filter.** Bybit returns all contract types from `/v5/market/instruments-info`. The adapter passes `contractType=LinearPerpetual` or `contractType=InversePerpetual` as a query parameter and also applies a client-side guard on the response to ensure no dated contracts (`LinearFutures`, `InverseFutures`) slip through.
 
-**Open interest `value_usd`.** The Bybit `/v5/market/open-interest` endpoint returns only `openInterest` and `timestamp` — there is no USD notional field. The unit of `open_interest` depends on the contract type: USD for inverse, base asset (e.g. BTC) for linear. `value_usd` is always `0.0` for Bybit; this is an API limitation, not a bug.
+**Open interest `value_usd`.** The Bybit `/v5/market/open-interest` endpoint returns only `openInterest` and `timestamp`, there is no USD notional field. The unit of `open_interest` depends on the contract type: USD for inverse, base asset (e.g. BTC) for linear. `value_usd` is always `0.0` for Bybit; this is an API limitation, not a bug.
 
 
 <br>
@@ -95,6 +95,6 @@ The message shapes, subscription formats, and acknowledgement patterns differ be
 
 **Open interest `value_usd`.** The Kraken Futures chart analytics endpoint returns a raw OI value only, with no USD notional. `value_usd` is always `0.0` for Kraken; this is an API limitation, not a bug.
 
-**Candle history limits.** The Kraken spot OHLC endpoint (`/0/public/OHLC`) returns a hard maximum of 720 candles per request and does not support pagination — this is an API-level restriction with no workaround. Requesting more than 720 candles on spot will silently return only the most recent 720. Linear and inverse candles are served from the Futures chart API, which has no such restriction; the adapter paginates those endpoints normally by advancing the `from` parameter across successive requests.
+**Candle history limits.** The Kraken spot OHLC endpoint (`/0/public/OHLC`) returns a hard maximum of 720 candles per request and does not support pagination, this is an API-level restriction with no workaround. Requesting more than 720 candles on spot will silently return only the most recent 720. Linear and inverse candles are served from the Futures chart API, which has no such restriction; the adapter paginates those endpoints normally by advancing the `from` parameter across successive requests.
 
 **Inverse `/info` metadata.** The `/derivatives/api/v3/instruments` endpoint does not include `baseCurrency` or `quoteCurrency` for inverse perpetuals (`PI_*`). The `underlying` field present in those responses is a reference-rate identifier (e.g. `rr_xbtusd`), not a currency code. As a result, `base_asset` and `quote_asset` are empty strings for Kraken inverse symbols in `/info` responses. Linear perpetuals (`PF_*`) include these fields and return them correctly.
