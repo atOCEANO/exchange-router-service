@@ -69,6 +69,8 @@ Both endpoints return perpetual contracts only. Quarterly and dated futures are 
 
 **Perpetuals filter.** Bybit returns all contract types from `/v5/market/instruments-info`. The adapter passes `contractType=LinearPerpetual` or `contractType=InversePerpetual` as a query parameter and also applies a client-side guard on the response to ensure no dated contracts (`LinearFutures`, `InverseFutures`) slip through.
 
+**Open interest `value_usd`.** The Bybit `/v5/market/open-interest` endpoint returns only `openInterest` and `timestamp` — there is no USD notional field. The unit of `open_interest` depends on the contract type: USD for inverse, base asset (e.g. BTC) for linear. `value_usd` is always `0.0` for Bybit; this is an API limitation, not a bug.
+
 
 <br>
 
@@ -90,6 +92,8 @@ The message shapes, subscription formats, and acknowledgement patterns differ be
 **Trades WS on spot.** The Kraken v2 WebSocket `trade` channel does not send a historical snapshot by default; it only pushes trades as they occur. The adapter includes `"snapshot": true` in the subscription payload so Kraken immediately sends the most-recent trades on connect, ensuring at least one message arrives regardless of market activity.
 
 **Open interest and long/short ratio.** OI and L/S ratio data is served from the Kraken Futures chart API at `https://futures.kraken.com/api/charts/v1/analytics/{symbol}/{type}`. The endpoint accepts `interval` (seconds, e.g. `3600` for 1h) and `since` (Unix seconds) as query parameters. The response format is `{"result": {"timestamp": [t1, t2, ...], "data": [[open, high, low, close], ...]}}` where each entry in `data` is an OHLC-style array of open interest or ratio values over the bucket. The adapter extracts the last element (close) of each array as the representative value for that timestamp.
+
+**Open interest `value_usd`.** The Kraken Futures chart analytics endpoint returns a raw OI value only, with no USD notional. `value_usd` is always `0.0` for Kraken; this is an API limitation, not a bug.
 
 **Candle history limits.** The Kraken spot OHLC endpoint (`/0/public/OHLC`) returns a hard maximum of 720 candles per request and does not support pagination — this is an API-level restriction with no workaround. Requesting more than 720 candles on spot will silently return only the most recent 720. Linear and inverse candles are served from the Futures chart API, which has no such restriction; the adapter paginates those endpoints normally by advancing the `from` parameter across successive requests.
 
