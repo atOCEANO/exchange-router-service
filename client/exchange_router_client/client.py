@@ -160,22 +160,23 @@ class ExchangeRouterClient:
         return self._normalize_frame(data)
 
 
-    async def fetch_multi_candles(self, 
-                            exchange: str, 
-                            market_type: str, 
-                            symbols: List[str], 
-                            interval: str = "1h", 
+    async def fetch_multi_candles(self,
+                            exchange: str,
+                            market_type: str,
+                            symbols: List[str],
+                            interval: str = "1h",
                             limit: int = 1000,
+                            start: Optional[int] = None,
                             max_concurrent: int = 4) -> Dict[str, pd.DataFrame]:
         results = {}
         semaphore = asyncio.Semaphore(max_concurrent)
-        
+
         logger.info(f"Fetching {len(symbols)} assets from {exchange}...")
-        
+
         async def _fetch(sym: str):
             async with semaphore:
                 try:
-                    df = await self.get_candles(exchange, market_type, sym, interval, limit)
+                    df = await self.get_candles(exchange, market_type, sym, interval, limit, start)
                     return sym, df
                 except Exception as e:
                     logger.error(f"Failed to fetch {sym}: {e}")
