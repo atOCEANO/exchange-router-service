@@ -489,13 +489,16 @@ class BybitAdapter(BaseExchange):
             if s: p["start"] = s
             data = await self._make_request("GET", "/v5/market/kline", p)
             if not data["list"]: return []
-            
+
             parsed = [Candle(
                 timestamp=self.normalize_timestamp(k[0]),
                 open=float(k[1]), high=float(k[2]), low=float(k[3]), close=float(k[4]), volume=float(k[5])
             ) for k in data["list"]]
-            
+
             return sorted(parsed, key=lambda x: x.timestamp)
+
+        if calc_start_time is None:
+            return await fetch(None, limit)
 
         return await self._paginate_time(fetch, calc_start_time, limit, MAX_PER_REQ)
 
@@ -581,7 +584,10 @@ class BybitAdapter(BaseExchange):
         cat = self._get_category(market_type)
         api_symbol = self.get_api_symbol(symbol, market_type)
         interval = self._map_metric_interval(period)
-        
+
+        if start_time:
+            logger.warning("Bybit /v5/market/account-ratio does not support startTime; returning most recent data only.")
+
         req_limit = min(limit, 500)
         p = {"category": cat, "symbol": api_symbol, "period": interval, "limit": req_limit}
         
