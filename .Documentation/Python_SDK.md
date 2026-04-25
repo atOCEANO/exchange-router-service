@@ -95,6 +95,11 @@ Market data methods that return a `pd.DataFrame` follow the same conventions:
 * OHLCV columns (`open`, `high`, `low`, `close`, `volume`) are coerced to numeric. Rows that cannot be parsed become `NaN`.
 * An empty response returns an empty `DataFrame`, not `None`.
 
+<br>
+<br>
+
+---
+
 #### Discovery Methods
 
 **`get_status`**
@@ -106,11 +111,6 @@ await client.get_status()
 
 **Parameters:** None
 
-<br>
-<br>
-
----
-
 **`get_version`**
 Returns the running service version as a plain string.
 
@@ -120,11 +120,6 @@ await client.get_version()
 
 **Parameters:** None
 
-<br>
-<br>
-
----
-
 **`get_exchanges`**
 Lists every enabled exchange adapter registered in the router.
 
@@ -133,11 +128,6 @@ await client.get_exchanges()
 ```
 
 **Parameters:** None
-
-<br>
-<br>
-
----
 
 **`get_market_types`**
 Returns the market categories supported by a specific exchange.
@@ -149,11 +139,6 @@ await client.get_market_types(exchange: str)
 **Parameters:**
 * `exchange` *(str)*: Adapter name (e.g., `"binance"`).
 
-<br>
-<br>
-
----
-
 **`get_capabilities`**
 Returns the full feature map for an adapter. For each market type, every feature is described with `{"rest": bool, "ws": bool}` flags indicating whether a REST endpoint and a WebSocket channel are available. Interval-based features (candles, open interest, long/short ratio) also include an `"intervals"` list.
 
@@ -163,11 +148,6 @@ await client.get_capabilities(exchange: str)
 
 **Parameters:**
 * `exchange` *(str)*: Adapter name.
-
-<br>
-<br>
-
----
 
 **`get_markets`**
 Returns all tradable perpetual symbols for a given market type as a list of strings.
@@ -179,11 +159,6 @@ await client.get_markets(exchange: str, market_type: str)
 **Parameters:**
 * `exchange` *(str)*: Adapter name.
 * `market_type` *(str)*: `"spot"`, `"linear"`, or `"inverse"`.
-
-<br>
-<br>
-
----
 
 **`get_exchange_info`**
 Returns symbol specifications, filters, and precision constraints as a DataFrame. Includes `native_symbol`, the raw exchange symbol for each entry.
@@ -217,11 +192,6 @@ await client.get_ticker(exchange: str, market_type: str, symbol: str)
 * `market_type` *(str)*: `"spot"`, `"linear"`, or `"inverse"`.
 * `symbol` *(str)*: Trading pair (e.g., `"BTCUSDT"`).
 
-<br>
-<br>
-
----
-
 **`get_book_ticker`**
 Returns the current best bid and ask price/quantity.
 
@@ -253,11 +223,6 @@ await client.get_trades(exchange: str, market_type: str, symbol: str, limit: int
 * `market_type` *(str)*: Market category.
 * `symbol` *(str)*: Trading pair.
 * `limit` *(int)*: Number of trades to return.
-
-<br>
-<br>
-
----
 
 **`get_agg_trades`**
 Returns aggregated trade data.
@@ -315,11 +280,6 @@ await client.get_candles(exchange: str, market_type: str, symbol: str, interval:
 * `limit` *(int)*: Number of candles to return (default: 100).
 * `start` *(int)*: Optional Unix millisecond start timestamp.
 
-<br>
-<br>
-
----
-
 **`fetch_multi_candles`**
 Batch variant of `get_candles`. Fetches OHLCV for many symbols concurrently, with a semaphore capping parallel requests.
 
@@ -370,11 +330,6 @@ await client.get_mark_price(exchange: str, market_type: str, symbol: str)
 * `market_type` *(str)*: `"linear"` or `"inverse"`.
 * `symbol` *(str)*: Trading pair.
 
-<br>
-<br>
-
----
-
 **`get_funding_rate`**
 Returns funding rate history for perpetual contracts.
 
@@ -388,11 +343,6 @@ await client.get_funding_rate(exchange: str, market_type: str, symbol: str, star
 * `symbol` *(str)*: Trading pair.
 * `start` *(int)*: Optional start timestamp.
 * `limit` *(int)*: Number of results to return.
-
-<br>
-<br>
-
----
 
 **`get_open_interest`**
 Returns open interest history.
@@ -409,11 +359,6 @@ await client.get_open_interest(exchange: str, market_type: str, symbol: str, per
 * `start` *(int)*: Optional start timestamp.
 * `limit` *(int)*: Number of results to return.
 
-<br>
-<br>
-
----
-
 **`get_liquidations`**
 Returns recent forced liquidation events.
 
@@ -427,11 +372,6 @@ await client.get_liquidations(exchange: str, market_type: str, symbol: str, star
 * `symbol` *(str)*: Trading pair.
 * `start` *(int)*: Optional start timestamp.
 * `limit` *(int)*: Number of results to return.
-
-<br>
-<br>
-
----
 
 **`get_long_short_ratio`**
 Returns global long/short account ratio history.
