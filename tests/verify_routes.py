@@ -25,6 +25,15 @@ WS_TEST_DURATION = float(os.getenv("WS_TEST_DURATION", "60.0"))
 
 SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
 
+def _interval_ms(interval: str) -> int:
+    mapping = {
+        "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000,
+        "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000,
+        "6h": 21_600_000, "8h": 28_800_000, "12h": 43_200_000,
+        "1d": 86_400_000, "3d": 259_200_000, "1w": 604_800_000, "1M": 2_592_000_000,
+    }
+    return mapping.get(interval, 0)
+
 console = Console()
 
 @dataclass
@@ -103,7 +112,7 @@ async def fetch(client: httpx.AsyncClient, endpoint: str, params: Optional[Dict]
 
 async def verify_pagination_interval(client: httpx.AsyncClient, exchange: str, market_type: str, symbol: str, interval: str) -> TestResult:
     endpoint = f"/{exchange}/{market_type}/candles/{symbol}"
-    params = {"interval": interval, "limit": 1500}
+    params = {"interval": interval, "limit": 3000}
     test_name = f"Candles {interval}"
     data = await fetch(client, endpoint, params)
 
@@ -114,13 +123,75 @@ async def verify_pagination_interval(client: httpx.AsyncClient, exchange: str, m
     if len(data) == 0:
         return TestResult(exchange, market_type, symbol, test_name, "FAIL", "Received 0 candles")
 
+    findings: list = []  # list of (status, detail)
+
+    if len(data) < 3000:
+        findings.append(("WARN", f"Received {len(data)}/3000 candles (exchange cap, new market, or pagination issue)"))
+
     timestamps = [c.get("timestamp") for c in data if isinstance(c, dict) and c.get("timestamp")]
+    for i in range(len(timestamps) - 1):
+        if timestamps[i] >= timestamps[i+1]:
+            findings.append(("FAIL", f"Time violation at idx {i}: {timestamps[i]} >= {timestamps[i+1]}"))
+            break
+
+    ms = _interval_ms(interval)
+    if ms > 0 and timestamps:
+        now_ms = int(time.time() * 1000)
+        threshold_ms = 2 * ms + max(int(ms * 0.05), 5_000)
+        last_ts = timestamps[-1]
+        age_ms = now_ms - last_ts
+        if age_ms > threshold_ms:
+            findings.append(("FAIL", f"Last candle is stale: {age_ms/1000:.0f}s old, limit is {threshold_ms/1000:.0f}s"))
+
+    if any(s == "FAIL" for s, _ in findings):
+        worst = "FAIL"
+    elif any(s == "WARN" for s, _ in findings):
+        worst = "WARN"
+    else:
+        worst = "PASS"
+
+    if findings:
+        detail = " | ".join(d for _, d in findings)
+    else:
+        age_s = (int(time.time() * 1000) - timestamps[-1]) / 1000 if timestamps else 0
+        detail = f"Verified {len(data)} candles, last candle {age_s:.0f}s ago"
+
+    return TestResult(exchange, market_type, symbol, test_name, worst, detail)
+
+
+async def verify_candle_start_anchoring(client: httpx.AsyncClient, exchange: str, market_type: str, symbol: str, interval: str) -> TestResult:
+    test_name = f"Candles {interval} (start anchor)"
+    ms = _interval_ms(interval)
+    if ms == 0:
+        return TestResult(exchange, market_type, symbol, test_name, "WARN", "Unknown interval, skipping start check")
+
+    now_ms = int(time.time() * 1000)
+    start_ms = now_ms - 48 * ms
+    data = await fetch(client, f"/{exchange}/{market_type}/candles/{symbol}", {"interval": interval, "start": start_ms, "limit": 60})
+
+    if data == "NOT_IMPLEMENTED" or not isinstance(data, list):
+        return TestResult(exchange, market_type, symbol, test_name, "FAIL", "Request failed or invalid response")
+    if len(data) == 0:
+        return TestResult(exchange, market_type, symbol, test_name, "WARN", "No candles returned for start-anchored request")
+
+    timestamps = [c.get("timestamp") for c in data if isinstance(c, dict) and c.get("timestamp")]
+
     for i in range(len(timestamps) - 1):
         if timestamps[i] >= timestamps[i+1]:
             return TestResult(exchange, market_type, symbol, test_name, "FAIL",
                               f"Time violation at idx {i}: {timestamps[i]} >= {timestamps[i+1]}")
 
-    return TestResult(exchange, market_type, symbol, test_name, "PASS", f"Verified {len(data)} candles")
+    first_ts = timestamps[0]
+    if first_ts < start_ms - ms:
+        return TestResult(exchange, market_type, symbol, test_name, "FAIL",
+                          f"First candle ({first_ts}) predates requested start ({start_ms}) : start param ignored")
+    if first_ts > start_ms + 2 * ms:
+        return TestResult(exchange, market_type, symbol, test_name, "WARN",
+                          f"First candle is >2 intervals after requested start ({(first_ts - start_ms) / ms:.1f} intervals gap)")
+
+    delta_s = (first_ts - start_ms) / 1000
+    return TestResult(exchange, market_type, symbol, test_name, "PASS",
+                      f"Start anchored correctly ({len(data)} candles, first {delta_s:.0f}s after start)")
 
 async def verify_analytics_interval(
     client: httpx.AsyncClient,
@@ -250,7 +321,7 @@ async def verify_exchange(client: httpx.AsyncClient, exchange: str) -> List[Test
             else:
                 results.append(TestResult(exchange, market_type, symbol, display_name, "FAIL", "Request Failed"))
 
-        # Candles — pagination + timestamp order check
+        # Candles : pagination + timestamp order check
         candle_caps = caps.get("candles", {})
         if candle_caps.get("rest"):
             intervals = candle_caps.get("intervals", [])
@@ -258,7 +329,7 @@ async def verify_exchange(client: httpx.AsyncClient, exchange: str) -> List[Test
             for interval in test_intervals:
                 results.append(await verify_pagination_interval(client, exchange, market_type, symbol, interval))
 
-        # Funding rate — historical, must have data over 7-day window
+        # Funding rate : historical, must have data over 7-day window
         fr_caps = caps.get("funding_rate", {})
         if fr_caps.get("rest"):
             results.append(await verify_historical_route(
@@ -267,7 +338,7 @@ async def verify_exchange(client: httpx.AsyncClient, exchange: str) -> List[Test
                 start_ms, allow_empty=False,
             ))
 
-        # Open interest — interval-based, test every declared period
+        # Open interest : interval-based, test every declared period
         oi_caps = caps.get("open_interest", {})
         if oi_caps.get("rest"):
             for period in oi_caps.get("intervals", ["1h"]):
@@ -277,7 +348,7 @@ async def verify_exchange(client: httpx.AsyncClient, exchange: str) -> List[Test
                     period, start_ms,
                 ))
 
-        # Liquidations — historical, allow empty (quiet market periods may have none)
+        # Liquidations : historical, allow empty (quiet market periods may have none)
         liq_caps = caps.get("liquidations", {})
         if liq_caps.get("rest"):
             results.append(await verify_historical_route(
@@ -286,7 +357,7 @@ async def verify_exchange(client: httpx.AsyncClient, exchange: str) -> List[Test
                 start_ms, allow_empty=True,
             ))
 
-        # Long/short ratio — interval-based, test every declared period
+        # Long/short ratio : interval-based, test every declared period
         ls_caps = caps.get("long_short_ratio", {})
         if ls_caps.get("rest"):
             for period in ls_caps.get("intervals", ["1h"]):
@@ -307,7 +378,7 @@ async def verify_exchange(client: httpx.AsyncClient, exchange: str) -> List[Test
 
 def render_results(results: List[TestResult], colors: Dict[str, str]) -> None:
     table = Table(
-        title="[bold]Exchange Router — Route Verification[/bold]",
+        title="[bold]Exchange Router : Route Verification[/bold]",
         box=SIMPLE_HEAD,
         show_lines=False,
         header_style="bold",
