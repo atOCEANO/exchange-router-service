@@ -289,7 +289,10 @@ class BybitAdapter(BaseExchange):
         req_count = 0
 
         while len(results) < total_limit and req_count < max_requests:
-            batch, next_cursor = await fetch_func_cursor(cursor, limit_per_req)
+            try:
+                batch, next_cursor = await fetch_func_cursor(cursor, limit_per_req)
+            except (httpx.HTTPStatusError, ValueError):
+                break
             if not batch: break
             
             new_items = []
