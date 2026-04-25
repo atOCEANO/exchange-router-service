@@ -454,7 +454,10 @@ class KrakenAdapter(BaseExchange):
             seen_ts: set = set()
 
             for _ in range(20):
-                data = await self._make_request("GET", url, {"from": from_ts})
+                try:
+                    data = await self._make_request("GET", url, {"from": from_ts})
+                except (httpx.HTTPStatusError, ValueError):
+                    break
                 batch = data.get("candles", [])
                 if not batch:
                     break
