@@ -195,7 +195,10 @@ class BinanceAdapter(BaseExchange):
 
         while len(results) < total_limit and request_count < max_requests:
             req_size = limit_per_req
-            batch = await fetch_func(current_start, req_size)
+            try:
+                batch = await fetch_func(current_start, req_size)
+            except (httpx.HTTPStatusError, ValueError):
+                break
 
             if not batch: break
             
@@ -432,14 +435,11 @@ class BinanceAdapter(BaseExchange):
     async def get_candles(self, market_type: MarketType, symbol: str, interval: str, start_time: Optional[int] = None, limit: int = 100) -> List[Candle]:
         base_url = self._get_rest_url(market_type)
         api_symbol = self.get_api_symbol(symbol, market_type)
-        
+
         path = "/api/v3/klines" if market_type == MarketType.SPOT else "/fapi/v1/klines"
         if market_type == MarketType.INVERSE: path = "/dapi/v1/klines"
 
-        async def fetch_batch(s, l):
-            p = {"symbol": api_symbol, "interval": interval, "limit": l}
-            if s: p["startTime"] = s
-            data = await self._make_request("GET", f"{base_url}{path}", params=p)
+        def _parse_candles(data):
             return [Candle(
                 timestamp=self.normalize_timestamp(k[0]),
                 open=float(k[1]),
@@ -449,22 +449,24 @@ class BinanceAdapter(BaseExchange):
                 volume=float(k[5])
             ) for k in data]
 
+        async def fetch_batch(s, l):
+            p = {"symbol": api_symbol, "interval": interval, "limit": l}
+            if s: p["startTime"] = s
+            return _parse_candles(await self._make_request("GET", f"{base_url}{path}", params=p))
+
+        async def fetch_batch_by_end(e, l):
+            p = {"symbol": api_symbol, "interval": interval, "limit": l}
+            if e: p["endTime"] = e
+            return _parse_candles(await self._make_request("GET", f"{base_url}{path}", params=p))
+
         MAX_PER_REQ = 1500 if market_type != MarketType.SPOT else 1000
-        current_start = start_time
 
-        if limit > MAX_PER_REQ and current_start is None:
-            interval_ms = self._interval_to_ms(interval)
-            if interval_ms > 0:
-                duration_ms = limit * interval_ms
-                current_start = int(time.time() * 1000) - duration_ms - interval_ms
-
-        if current_start is not None and current_start < 0:
-            current_start = None
-
-        if current_start or limit > MAX_PER_REQ:
-            return await self._paginate(fetch_batch, current_start, limit, MAX_PER_REQ)
+        if start_time is not None:
+            return await self._paginate(fetch_batch, start_time, limit, MAX_PER_REQ)
+        elif limit > MAX_PER_REQ:
+            return await self._paginate_backwards(fetch_batch_by_end, limit, MAX_PER_REQ)
         else:
-            return await fetch_batch(current_start, limit)
+            return await fetch_batch(None, limit)
 
     async def get_open_interest(self, market_type: MarketType, symbol: str, period: str = "1h", start_time: Optional[int] = None, limit: int = 30) -> List[OpenInterest]:
         if market_type == MarketType.SPOT:
