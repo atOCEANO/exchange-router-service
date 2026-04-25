@@ -198,12 +198,12 @@ await client.get_exchange_info(exchange: str, market_type: str)
 
 **Returns:** `pd.DataFrame`
 
-#### Pricing
-
 <br>
 <br>
 
 ---
+
+#### Pricing
 
 **`get_ticker`**
 Returns the latest price and 24h rolling window statistics.
@@ -234,12 +234,12 @@ await client.get_book_ticker(exchange: str, market_type: str, symbol: str)
 * `market_type` *(str)*: Market category.
 * `symbol` *(str)*: Trading pair.
 
-#### Trades
-
 <br>
 <br>
 
 ---
+
+#### Trades
 
 **`get_trades`**
 Returns recent public trade executions.
@@ -273,12 +273,12 @@ await client.get_agg_trades(exchange: str, market_type: str, symbol: str, start:
 * `start` *(int)*: Optional start timestamp.
 * `limit` *(int)*: Number of results to return.
 
-#### Orderbook
-
 <br>
 <br>
 
 ---
+
+#### Orderbook
 
 **`get_orderbook`**
 Returns the current L2 orderbook snapshot.
@@ -293,12 +293,12 @@ await client.get_orderbook(exchange: str, market_type: str, symbol: str, depth: 
 * `symbol` *(str)*: Trading pair.
 * `depth` *(int)*: Number of price levels to return (default: 20).
 
-#### Historical Data
-
 <br>
 <br>
 
 ---
+
+#### Historical Data
 
 **`get_candles`**
 Returns historical OHLCV data as a DataFrame indexed by datetime.
@@ -351,12 +351,12 @@ for symbol, df in results.items():
     print(symbol, df.shape)
 ```
 
-#### Futures
-
 <br>
 <br>
 
 ---
+
+#### Futures
 
 **`get_mark_price`**
 Returns the mark price, index price, and current funding rate. Linear and inverse only.
@@ -447,12 +447,12 @@ await client.get_long_short_ratio(exchange: str, market_type: str, symbol: str, 
 * `period` *(str)*: Data interval (e.g., `"5m"`, `"1h"`).
 * `limit` *(int)*: Number of data points (default: 30).
 
-#### Real-time Streams
-
 <br>
 <br>
 
 ---
+
+#### Real-time Streams
 
 **`subscribe`**
 Connects to a WebSocket feed and yields messages as an async generator. One subscription per connection. To switch channels or symbols, exit the iterator and open a new one.
