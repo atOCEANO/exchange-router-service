@@ -26,6 +26,9 @@
 The Python SDK is a thin async client over the router's REST and WebSocket interfaces. Market data methods return `pandas.DataFrame` objects indexed by datetime, ready for use in research workflows. Discovery methods return plain dicts or lists.
 
 <br>
+<br>
+
+---
 
 ### Installation
 
@@ -43,6 +46,9 @@ pip install -e .
 ```
 
 <br>
+<br>
+
+---
 
 ### Quick Start
 
@@ -53,11 +59,14 @@ from exchange_router_client import ExchangeRouterClient
 
 client = ExchangeRouterClient(base_url="http://localhost:8040")
 
-df = await client.get_candles("binance", "spot", "BTCUSDT", interval="1h", limit=100)
+df = await client.get_candles(exchange="binance", market_type="spot", symbol="BTCUSDT", interval="1h", limit=100)
 print(df.head())
 ```
 
 <br>
+<br>
+
+---
 
 ### Reference
 
@@ -97,6 +106,9 @@ await client.get_status()
 
 **Parameters:** None
 
+<br>
+<br>
+
 ---
 
 **`get_version`**
@@ -108,6 +120,9 @@ await client.get_version()
 
 **Parameters:** None
 
+<br>
+<br>
+
 ---
 
 **`get_exchanges`**
@@ -118,6 +133,9 @@ await client.get_exchanges()
 ```
 
 **Parameters:** None
+
+<br>
+<br>
 
 ---
 
@@ -131,6 +149,9 @@ await client.get_market_types(exchange: str)
 **Parameters:**
 * `exchange` *(str)*: Adapter name (e.g., `"binance"`).
 
+<br>
+<br>
+
 ---
 
 **`get_capabilities`**
@@ -142,6 +163,9 @@ await client.get_capabilities(exchange: str)
 
 **Parameters:**
 * `exchange` *(str)*: Adapter name.
+
+<br>
+<br>
 
 ---
 
@@ -155,6 +179,9 @@ await client.get_markets(exchange: str, market_type: str)
 **Parameters:**
 * `exchange` *(str)*: Adapter name.
 * `market_type` *(str)*: `"spot"`, `"linear"`, or `"inverse"`.
+
+<br>
+<br>
 
 ---
 
@@ -173,6 +200,9 @@ await client.get_exchange_info(exchange: str, market_type: str)
 
 #### Pricing
 
+<br>
+<br>
+
 ---
 
 **`get_ticker`**
@@ -186,6 +216,9 @@ await client.get_ticker(exchange: str, market_type: str, symbol: str)
 * `exchange` *(str)*: Adapter name.
 * `market_type` *(str)*: `"spot"`, `"linear"`, or `"inverse"`.
 * `symbol` *(str)*: Trading pair (e.g., `"BTCUSDT"`).
+
+<br>
+<br>
 
 ---
 
@@ -203,6 +236,9 @@ await client.get_book_ticker(exchange: str, market_type: str, symbol: str)
 
 #### Trades
 
+<br>
+<br>
+
 ---
 
 **`get_trades`**
@@ -217,6 +253,9 @@ await client.get_trades(exchange: str, market_type: str, symbol: str, limit: int
 * `market_type` *(str)*: Market category.
 * `symbol` *(str)*: Trading pair.
 * `limit` *(int)*: Number of trades to return.
+
+<br>
+<br>
 
 ---
 
@@ -236,6 +275,9 @@ await client.get_agg_trades(exchange: str, market_type: str, symbol: str, start:
 
 #### Orderbook
 
+<br>
+<br>
+
 ---
 
 **`get_orderbook`**
@@ -253,6 +295,9 @@ await client.get_orderbook(exchange: str, market_type: str, symbol: str, depth: 
 
 #### Historical Data
 
+<br>
+<br>
+
 ---
 
 **`get_candles`**
@@ -269,6 +314,9 @@ await client.get_candles(exchange: str, market_type: str, symbol: str, interval:
 * `interval` *(str)*: Timeframe (e.g., `"1m"`, `"5m"`, `"1h"`, `"1d"`).
 * `limit` *(int)*: Number of candles to return (default: 100).
 * `start` *(int)*: Optional Unix millisecond start timestamp.
+
+<br>
+<br>
 
 ---
 
@@ -305,6 +353,9 @@ for symbol, df in results.items():
 
 #### Futures
 
+<br>
+<br>
+
 ---
 
 **`get_mark_price`**
@@ -318,6 +369,9 @@ await client.get_mark_price(exchange: str, market_type: str, symbol: str)
 * `exchange` *(str)*: Adapter name.
 * `market_type` *(str)*: `"linear"` or `"inverse"`.
 * `symbol` *(str)*: Trading pair.
+
+<br>
+<br>
 
 ---
 
@@ -334,6 +388,9 @@ await client.get_funding_rate(exchange: str, market_type: str, symbol: str, star
 * `symbol` *(str)*: Trading pair.
 * `start` *(int)*: Optional start timestamp.
 * `limit` *(int)*: Number of results to return.
+
+<br>
+<br>
 
 ---
 
@@ -352,6 +409,9 @@ await client.get_open_interest(exchange: str, market_type: str, symbol: str, per
 * `start` *(int)*: Optional start timestamp.
 * `limit` *(int)*: Number of results to return.
 
+<br>
+<br>
+
 ---
 
 **`get_liquidations`**
@@ -367,6 +427,9 @@ await client.get_liquidations(exchange: str, market_type: str, symbol: str, star
 * `symbol` *(str)*: Trading pair.
 * `start` *(int)*: Optional start timestamp.
 * `limit` *(int)*: Number of results to return.
+
+<br>
+<br>
 
 ---
 
@@ -385,6 +448,9 @@ await client.get_long_short_ratio(exchange: str, market_type: str, symbol: str, 
 * `limit` *(int)*: Number of data points (default: 30).
 
 #### Real-time Streams
+
+<br>
+<br>
 
 ---
 

@@ -26,6 +26,9 @@
 The router is extended through isolated exchange adapters. Almost every contribution lives in `src/exchanges/<name>/` and leaves the routing core untouched. This guide walks through the work in roughly the order you will actually do it: set up a local loop, build the adapter, satisfy the contract, follow the code standards, and run the test suite before opening a PR.
 
 <br>
+<br>
+
+---
 
 ### Local Development
 
@@ -48,6 +51,9 @@ The `--reload` flag restarts the worker whenever a file under `src/` changes. Pa
 When something breaks, it helps to bypass FastAPI entirely. Instantiate the adapter in a Python REPL and call its methods directly. The stack trace is cleaner, and you can poke at intermediate state without routing a request end to end.
 
 <br>
+<br>
+
+---
 
 ### Adapter Implementation
 
@@ -62,6 +68,9 @@ All adapters must inherit from `BaseExchange` in `src/exchanges/base.py`. The fo
 - [ ] **Registry Registration:** Add an `__init__.py` that imports the adapter class (e.g., `from .adapter import KrakenAdapter`). The auto-loader relies on this import to discover subclasses of `BaseExchange`.
 
 <br>
+<br>
+
+---
 
 ### Capabilities Contract
 
@@ -111,6 +120,9 @@ This split matters because REST and WS support do not always line up. For exampl
 The canonical implementation lives in `src/exchanges/binance/adapter.py` (`BinanceAdapter.get_capabilities`). When adding a new adapter, copy it as a starting point rather than reconstructing this schema by hand.
 
 <br>
+<br>
+
+---
 
 ### Data Normalization
 
@@ -133,6 +145,9 @@ If an upstream response carries a field that no existing model captures, you hav
 Do not add adapter-specific fields under a generic name, and do not return raw dicts as an escape hatch. The normalization contract is the whole point of the router.
 
 <br>
+<br>
+
+---
 
 ### Code Standards
 
@@ -145,12 +160,15 @@ Do not add adapter-specific fields under a generic name, and do not return raw d
 For exchange-specific behaviors (rate limit tiers, symbol translation quirks, API version notes) see [Exchange Notes](Exchange_Notes.md).
 
 <br>
+<br>
+
+---
 
 ### Testing
 
 Adapter compliance is validated via `tests/verify_routes.py`. The suite reads `/{exchange}/capabilities` and runs only the features the adapter claims to support, so an honest capabilities map is the difference between a passing and a skipped test. All declared endpoints must pass before submitting a Pull Request.
 
-Dishonesty in either direction fails loudly. Claim `True` for a feature the adapter does not implement and the 501 response surfaces as a test failure, not a skip. Claim `False` for a feature that actually works and the test simply never runs, which shows up as suspiciously thin coverage for your adapter in the results table. Neither flavor passes review.
+Getting this wrong in either direction surfaces as a failure, not a skip. Claim `True` for a feature the adapter does not implement and the 501 response surfaces as a test failure. Claim `False` for a feature that actually works and the test simply never runs, which shows up as suspiciously thin coverage for your adapter in the results table. Neither flavor passes review.
 
 The suite also runs a pagination sanity check against candles: it fetches 1500 bars and asserts timestamps are strictly ascending. This is the one place where normalization correctness is tested beyond "did the response parse," and it tends to catch adapters that mix up `start` and `end` semantics between exchanges.
 
@@ -168,9 +186,14 @@ WS_TEST_DURATION=300 python tests/verify_routes.py
 ```
 
 <br>
+<br>
+
+---
 
 ### Service Lifecycle
 
 For reference, the router uses a FastAPI lifespan manager (`@asynccontextmanager`) to handle startup and shutdown. On startup, the auto-loader walks `src/exchanges/`, instantiates every `BaseExchange` subclass it finds, and registers it in `EXCHANGE_REGISTRY`. On shutdown, the manager closes all active WebSocket tasks cleanly and calls `shutdown()` on each adapter to release connection pools and any other resources the adapter holds.
 
 Contributors rarely need to touch this layer. The only thing an adapter owes the lifecycle is a correct `shutdown()` implementation that closes every client it opened in `__init__`.
+
+Once `shutdown()` is correct and `verify_routes.py` passes cleanly, the adapter is ready for review.

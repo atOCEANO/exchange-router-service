@@ -23,12 +23,15 @@
 
 ## API Reference
 
-The router exposes two interfaces. REST covers everything request/response (discovery, historical data, snapshots). WebSocket covers real-time streams. Both sit behind the same port.
+The router exposes two interfaces on the same port. REST is request/response; WebSocket is real-time streaming.
 
 *   **REST Base URI:** `http://localhost:8040`
 *   **WebSocket Base URI:** `ws://localhost:8040/ws/{exchange}/{market_type}`
 
 <br>
+<br>
+
+---
 
 ### Path Variables
 
@@ -37,12 +40,18 @@ The router exposes two interfaces. REST covers everything request/response (disc
 *   `{symbol}`: Trading pair (e.g., `BTCUSDT`).
 
 <br>
+<br>
+
+---
 
 ## REST
 
 The REST interface covers everything that is request/response in shape: service discovery, capability maps, historical data pulls, and point-in-time snapshots. Every endpoint returns a normalized JSON payload matching one of the schemas documented in Response Shapes below, regardless of which upstream exchange served the request.
 
 <br>
+<br>
+
+---
 
 ### Endpoints
 
@@ -97,6 +106,9 @@ The REST interface covers everything that is request/response in shape: service 
 | `GET` | `/{exchange}/{market_type}/long_short_ratio/{symbol}` | Long/short account distribution. | `period`, `start`, `limit` |
 
 <br>
+<br>
+
+---
 
 ### Parameter Bounds
 
@@ -114,6 +126,9 @@ All `limit` and `depth` values are validated server-side. Requests outside these
 | `limit` (long_short_ratio) | 1 | 5000 | 30 |
 
 <br>
+<br>
+
+---
 
 ### Response Shapes
 
@@ -269,6 +284,9 @@ All REST responses are normalized to the same schema regardless of the upstream 
 ```
 
 <br>
+<br>
+
+---
 
 ### HTTP Status Codes
 
@@ -282,6 +300,7 @@ All REST responses are normalized to the same schema regardless of the upstream 
 | **501** | Not Implemented | Feature not supported by the target adapter. |
 
 <br>
+
 All error responses include a `detail` field describing what went wrong:
 
 ```json
@@ -297,6 +316,9 @@ Parameter validation errors also carry an `error` field set to `"Invalid Request
 The router never masks upstream error detail. If the underlying exchange returns a specific message, it is passed through in `detail`.
 
 <br>
+<br>
+
+---
 
 ## WebSocket
 
@@ -305,6 +327,9 @@ The WebSocket interface covers everything REST does not, real-time streams from 
 Connect to `ws://localhost:8040/ws/{exchange}/{market_type}` and send a JSON subscription payload. The server starts streaming as soon as the upstream exchange connection is established. There is no acknowledgement message, just data.
 
 <br>
+<br>
+
+---
 
 ### Protocol Rules
 
@@ -315,6 +340,9 @@ Connect to `ws://localhost:8040/ws/{exchange}/{market_type}` and send a JSON sub
 * **Availability is not uniform.** Not every channel is available on every exchange or market type. Check `GET /{exchange}/capabilities` before subscribing.
 
 <br>
+<br>
+
+---
 
 ### Channels
 
@@ -328,6 +356,10 @@ Connect to `ws://localhost:8040/ws/{exchange}/{market_type}` and send a JSON sub
 | `mark_price` | Mark price and funding rate updates. | `{"channel": "mark_price", "symbol": "BTCUSDT"}` |
 | `liquidations` | Real-time liquidation events. | `{"channel": "liquidations", "symbol": "BTCUSDT"}` |
 
+<br>
+<br>
+
+---
 
 ### Close Codes
 
@@ -338,8 +370,13 @@ Connect to `ws://localhost:8040/ws/{exchange}/{market_type}` and send a JSON sub
 | **1011** | Upstream exchange connection lost. Reconnect and re-subscribe. |
 
 <br>
+<br>
+
+---
 
 ## Examples
+
+The examples below cover the most common request patterns. For the full parameter reference, see the endpoint and bounds tables above.
 
 REST, with `curl`:
 

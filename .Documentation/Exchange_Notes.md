@@ -26,6 +26,9 @@
 Per-adapter implementation details. This document covers behaviors that are specific to an exchange and not derivable from the normalized API contract: API version differences, symbol translation quirks, rate limit tiers, and filter logic. It is intended for contributors implementing or maintaining adapters.
 
 <br>
+<br>
+
+---
 
 ### Symbol Conventions
 
@@ -46,6 +49,9 @@ For Binance inverse, `symbol` is `BTCUSDT` and `native_symbol` is `BTCUSD_PERP`.
 Both endpoints return perpetual contracts only. Quarterly and dated futures are excluded at the adapter level (Bybit `LinearFutures`/`InverseFutures`, Kraken `FI_*`/`FF_*`).
 
 <br>
+<br>
+
+---
 
 ### Binance
 
@@ -58,6 +64,9 @@ Both endpoints return perpetual contracts only. Quarterly and dated futures are 
 **Liquidations REST.** The public REST endpoints for forced liquidation history (`/fapi/v1/allForceOrders` on USDM, `/dapi/v1/allForceOrders` on COINM) were deprecated by Binance in April 2021 and no longer return data without authentication. The adapter marks `liquidations.rest: False` for both LINEAR and INVERSE. The WebSocket stream (`forceOrder@arr`) remains publicly available and is still exposed as `liquidations.ws: True`.
 
 <br>
+<br>
+
+---
 
 ### Bybit
 
@@ -69,10 +78,12 @@ Both endpoints return perpetual contracts only. Quarterly and dated futures are 
 
 **Perpetuals filter.** Bybit returns all contract types from `/v5/market/instruments-info`. The adapter passes `contractType=LinearPerpetual` or `contractType=InversePerpetual` as a query parameter and also applies a client-side guard on the response to ensure no dated contracts (`LinearFutures`, `InverseFutures`) slip through.
 
-**Open interest `value_usd`.** The Bybit `/v5/market/open-interest` endpoint returns only `openInterest` and `timestamp`, there is no USD notional field. The unit of `open_interest` depends on the contract type: USD for inverse, base asset (e.g. BTC) for linear. `value_usd` is always `0.0` for Bybit; this is an API limitation, not a bug.
-
+**Open interest `value_usd`.** The Bybit `/v5/market/open-interest` endpoint returns only `openInterest` and `timestamp`. There is no USD notional field. The unit of `open_interest` depends on the contract type: USD for inverse, base asset (e.g. BTC) for linear. `value_usd` is always `0.0` for Bybit; this is an API limitation, not a bug.
 
 <br>
+<br>
+
+---
 
 ### Kraken
 
@@ -81,7 +92,7 @@ Both endpoints return perpetual contracts only. Quarterly and dated futures are 
 - Spot: `wss://ws.kraken.com/v2` (Kraken v2 protocol)
 - Futures: `wss://futures.kraken.com/ws/v1` (Kraken v1 protocol)
 
-The message shapes, subscription formats, and acknowledgement patterns differ between the two. The adapter branches on `market_type` throughout the WebSocket methods.
+The message shapes, subscription formats, and acknowledgement patterns differ between the two.
 
 **XBT → BTC symbol translation.** Kraken's spot REST API (`/AssetPairs`) returns ticker symbols using legacy asset names: `XBT/USDT`, `XDG/USDT`. The v2 WebSocket API requires the modern names: `BTC/USDT`, `DOGE/USDT`. The adapter translates via `_to_v2_wsname` when building the spot WebSocket symbol map and when constructing subscription payloads. Normalized model symbols always use the modern form.
 
@@ -91,10 +102,10 @@ The message shapes, subscription formats, and acknowledgement patterns differ be
 
 **Trades WS on spot.** The Kraken v2 WebSocket `trade` channel does not send a historical snapshot by default; it only pushes trades as they occur. The adapter includes `"snapshot": true` in the subscription payload so Kraken immediately sends the most-recent trades on connect, ensuring at least one message arrives regardless of market activity.
 
-**Open interest and long/short ratio.** OI and L/S ratio data is served from the Kraken Futures chart API at `https://futures.kraken.com/api/charts/v1/analytics/{symbol}/{type}`. The endpoint accepts `interval` (seconds, e.g. `3600` for 1h) and `since` (Unix seconds) as query parameters. The response format is `{"result": {"timestamp": [t1, t2, ...], "data": [[open, high, low, close], ...]}}` where each entry in `data` is an OHLC-style array of open interest or ratio values over the bucket. The adapter extracts the last element (close) of each array as the representative value for that timestamp.
+**Open interest and long/short ratio.** OI and L/S ratio data is served from the Kraken Futures chart API at `https://futures.kraken.com/api/charts/v1/analytics/{symbol}/{type}`. The endpoint accepts `interval` (seconds, e.g. `3600` for 1h) and `since` (Unix seconds) as query parameters. Each response bucket is an OHLC-style array; the adapter uses the close value as the representative.
 
-**Open interest `value_usd`.** The Kraken Futures chart analytics endpoint returns a raw OI value only, with no USD notional. `value_usd` is always `0.0` for Kraken; this is an API limitation, not a bug.
+**Open interest `value_usd`.** The Kraken Futures chart analytics endpoint returns a raw OI value only, with no USD notional. `value_usd` is always `0.0` for Kraken.
 
-**Candle history limits.** The Kraken spot OHLC endpoint (`/0/public/OHLC`) returns a hard maximum of 720 candles per request and does not support pagination, this is an API-level restriction with no workaround. Requesting more than 720 candles on spot will silently return only the most recent 720. Linear and inverse candles are served from the Futures chart API, which has no such restriction; the adapter paginates those endpoints normally by advancing the `from` parameter across successive requests.
+**Candle history limits.** The Kraken spot OHLC endpoint (`/0/public/OHLC`) has a hard ceiling of 720 candles per request with no pagination support. Requests above this limit silently return only the most recent 720. Linear and inverse candles are served from the Futures chart API, which has no such restriction; the adapter paginates those endpoints normally by advancing the `from` parameter across successive requests.
 
 **Inverse `/info` metadata.** The `/derivatives/api/v3/instruments` endpoint does not include `baseCurrency` or `quoteCurrency` for inverse perpetuals (`PI_*`). The `underlying` field present in those responses is a reference-rate identifier (e.g. `rr_xbtusd`), not a currency code. As a result, `base_asset` and `quote_asset` are empty strings for Kraken inverse symbols in `/info` responses. Linear perpetuals (`PF_*`) include these fields and return them correctly.

@@ -41,6 +41,9 @@ The service handles the boring parts that every exchange integration hits eventu
 Clients talk to one endpoint, the router fans requests out to the right exchange adapter, and the adapter normalizes the response into a schema that is identical across exchanges. REST and WebSocket both sit on the same port, and the same adapter instance serves both, so a client written against Binance spot works against Bybit linear with a single path change.
 
 <br>
+<br>
+
+---
 
 ### Supported Exchanges
 
@@ -167,6 +170,9 @@ Clients talk to one endpoint, the router fans requests out to the right exchange
 <small><i>*WebSocket streams provide real-time updates for the listed channels. See the <a href=".Documentation/API_Reference.md#websocket-streams">API Reference</a> for full channel specs and subscription payloads.</i></small>
 
 <br>
+<br>
+
+---
 
 ### Quick Start
 
@@ -191,6 +197,9 @@ curl http://localhost:8040/binance/spot/ticker/BTCUSDT
 ```
 
 <br>
+<br>
+
+---
 
 ### Configuration
 
@@ -207,16 +216,9 @@ The variable lives in `.env` and is consumed by `docker-compose.yml` in the `por
 There is no configuration file for adapters, upstream URLs, timeouts, or rate limit thresholds. Those are defined in code, per adapter, and changing them means editing the adapter and rebuilding the container. This is intentional, the router ships as a fixed artifact and should behave identically across deployments.
 
 <br>
-
-### Symbol Conventions
-
-All model symbols are normalized to bare trading pairs, such as `BTCUSDT` and `ETHUSDT`, with no exchange-specific suffixes. The market type in the URL path carries that context.
-
-Markets endpoints where the market type is `linear` or `inverse` (`/{exchange}/{market_type}/markets`) return perpetual contracts only. Dated and quarterly futures are excluded.
-
-Symbol info (`/{exchange}/{market_type}/info`) includes a `native_symbol` field with the raw exchange symbol (e.g. `BTCUSD_PERP` for Binance inverse, `PF_XBTUSD` for Kraken linear) for cross-referencing back to the upstream API.
-
 <br>
+
+---
 
 ### Python SDK
 
@@ -233,6 +235,44 @@ client = ExchangeRouterClient("http://localhost:8040")
 
 df = await client.get_candles("binance", "spot", "BTCUSDT", interval="1h", limit=500)
 print(df.tail())
+
+await client.close()
+```
+
+Or pull 1 000 daily candles for every single Binance spot market in one call:
+
+```python
+from exchange_router_client import ExchangeRouterClient
+
+client = ExchangeRouterClient("http://localhost:8040")
+
+# Discover every active Binance spot market
+all_markets = await client.get_markets(exchange="binance", market_type="spot")
+
+all_markets[:5]
+# ['BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT']
+
+f"Total spot markets: {len(all_markets)}"
+# 'Total spot markets: 517'
+
+# Fetch 1 000 daily candles for all of them, 5 requests at a time
+data_map = await client.fetch_multi_candles(
+    exchange="binance",
+    market_type="spot",
+    symbols=all_markets,
+    interval="1d",
+    limit=1000,
+    max_concurrent=5,
+)
+
+f"Fetched {len(data_map)} markets"
+# 'Fetched 517 markets'
+
+data_map["BTCUSDT"].tail()
+#                        open      high       low     close       volume
+# datetime
+# 2025-04-21  84389.97  85300.00  83500.00  84500.01  21345.82
+# ...
 
 await client.close()
 ```
