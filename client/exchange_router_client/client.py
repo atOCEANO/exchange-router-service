@@ -23,10 +23,17 @@ class ExchangeRouterClient:
     async def close(self):
         await self.client.aclose()
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, _exc_type, _exc_val, _exc_tb):
+        await self.close()
+
     async def _request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Any:
         url = f"{self.base_url}/{endpoint}"
         attempt = 0
-        
+        last_error: Optional[str] = None
+
         while attempt < self.max_retries:
             try:
                 response = await self.client.request(method, url, params=params)
@@ -39,18 +46,20 @@ class ExchangeRouterClient:
                     except Exception:
                         detail = str(e)
                     raise ValueError(f"Router API Error ({e.response.status_code}): {detail}")
-                
+
+                last_error = f"HTTP {e.response.status_code}"
                 logger.warning(f"Server Error {e.response.status_code}. Retrying ({attempt+1}/{self.max_retries})...")
                 attempt += 1
                 await asyncio.sleep(1 * attempt)
             except (httpx.ConnectError, httpx.ReadTimeout) as e:
+                last_error = f"{type(e).__name__}: {e}"
                 logger.warning(f"Connection Error: {e}. Retrying ({attempt+1}/{self.max_retries})...")
                 attempt += 1
                 await asyncio.sleep(1 * attempt)
             except Exception as e:
                 raise RuntimeError(f"Unexpected Error: {e}")
 
-        raise ConnectionError(f"Failed to connect to {url} after {self.max_retries} attempts.")
+        raise ConnectionError(f"Request to {url} failed after {self.max_retries} attempts (last error: {last_error}).")
 
     def _normalize_frame(self, data: List[Dict], time_col: str = "timestamp") -> pd.DataFrame:
         if not data:
@@ -110,17 +119,16 @@ class ExchangeRouterClient:
     async def get_mark_price(self, exchange: str, market_type: str, symbol: str) -> Dict:
         return await self._request("GET", f"{exchange}/{market_type}/mark_price/{symbol}")
 
-
-    async def get_candles(self, 
-                    exchange: str, 
-                    market_type: str, 
-                    symbol: str, 
-                    interval: str = "1h", 
-                    limit: int = 100, 
+    async def get_candles(self,
+                    exchange: str,
+                    market_type: str,
+                    symbol: str,
+                    interval: str = "1h",
+                    limit: int = 100,
                     start: Optional[int] = None) -> pd.DataFrame:
         params = {"interval": interval, "limit": limit}
-        if start: params["start"] = start
-        
+        if start is not None: params["start"] = start
+
         data = await self._request("GET", f"{exchange}/{market_type}/candles/{symbol}", params)
         return self._normalize_frame(data)
 
@@ -131,31 +139,31 @@ class ExchangeRouterClient:
 
     async def get_agg_trades(self, exchange: str, market_type: str, symbol: str, start: Optional[int] = None, limit: int = 500) -> pd.DataFrame:
         params = {"limit": limit}
-        if start: params["start"] = start
+        if start is not None: params["start"] = start
         data = await self._request("GET", f"{exchange}/{market_type}/agg_trades/{symbol}", params)
         return self._normalize_frame(data)
 
     async def get_funding_rate(self, exchange: str, market_type: str, symbol: str, start: Optional[int] = None, limit: int = 100) -> pd.DataFrame:
         params = {"limit": limit}
-        if start: params["start"] = start
+        if start is not None: params["start"] = start
         data = await self._request("GET", f"{exchange}/{market_type}/funding_rate/{symbol}", params)
         return self._normalize_frame(data)
 
-    async def get_open_interest(self, exchange: str, market_type: str, symbol: str, period: str = "1h", start: Optional[int] = None, limit: int = 100) -> pd.DataFrame:
+    async def get_open_interest(self, exchange: str, market_type: str, symbol: str, period: str = "1h", start: Optional[int] = None, limit: int = 30) -> pd.DataFrame:
         params = {"period": period, "limit": limit}
-        if start: params["start"] = start
+        if start is not None: params["start"] = start
         data = await self._request("GET", f"{exchange}/{market_type}/open_interest/{symbol}", params)
         return self._normalize_frame(data)
 
     async def get_liquidations(self, exchange: str, market_type: str, symbol: str, start: Optional[int] = None, limit: int = 100) -> pd.DataFrame:
         params = {"limit": limit}
-        if start: params["start"] = start
+        if start is not None: params["start"] = start
         data = await self._request("GET", f"{exchange}/{market_type}/liquidations/{symbol}", params)
         return self._normalize_frame(data)
 
     async def get_long_short_ratio(self, exchange: str, market_type: str, symbol: str, period: str = "5m", start: Optional[int] = None, limit: int = 30) -> pd.DataFrame:
         params = {"period": period, "limit": limit}
-        if start: params["start"] = start
+        if start is not None: params["start"] = start
         data = await self._request("GET", f"{exchange}/{market_type}/long_short_ratio/{symbol}", params)
         return self._normalize_frame(data)
 
@@ -192,12 +200,12 @@ class ExchangeRouterClient:
         return results
 
     async def subscribe(self, exchange: str, market_type: str, channel: str, symbol: str):
-        ws_url = self.base_url.replace("http", "ws") + f"/ws/{exchange}/{market_type}"
-        
+        ws_url = self.base_url.replace("http", "ws", 1) + f"/ws/{exchange}/{market_type}"
+
         async with websockets.connect(ws_url) as ws:
             payload = {"channel": channel, "symbol": symbol}
             await ws.send(json.dumps(payload))
-            
+
             while True:
                 msg = await ws.recv()
                 yield json.loads(msg)
