@@ -186,13 +186,21 @@ class KrakenAdapter(BaseExchange):
 
                 if resp.status_code == 200:
                     data = resp.json()
-                    
+
                     if isinstance(data, dict):
-                        if data.get("error"):
-                            raise ValueError(f"Kraken Spot API Error: {data['error']}")
+                        err = data.get("error")
+                        if err:
+                            err_str = str(err)
+                            if "Too many requests" in err_str or "Rate limit" in err_str:
+                                async with self._backoff_lock:
+                                    self._backoff_until = max(self._backoff_until, time.time() + 5)
+                                logger.error(f"Kraken Spot rate limit ({err}). Backing off 5s.")
+                                retries -= 1
+                                continue
+                            raise ValueError(f"Kraken Spot API Error: {err}")
                         if data.get("result") == "error":
                             raise ValueError(f"Kraken Futures API Error: {data.get('errors', data)}")
-                            
+
                         if "result" in data and isinstance(data["result"], dict) and not url.startswith(self.futures_chart_url):
                             return data["result"]
                     return data
@@ -231,6 +239,7 @@ class KrakenAdapter(BaseExchange):
             data = await self._make_request("GET", f"{self.spot_rest_url}/AssetPairs")
             for k, v in data.items():
                 if "." in k: continue
+                if v.get("status") != "online": continue
                 wsname = v.get("wsname", "/")
                 base, quote = wsname.split("/") if "/" in wsname else (v.get("base", ""), v.get("quote", ""))
                 base = self._to_v2_wsname(base)
@@ -246,11 +255,11 @@ class KrakenAdapter(BaseExchange):
                     min_qty=float(v.get("ordermin", 0)),
                     max_qty=0.0,
                     min_notional=float(v.get("costmin", 0)),
-                    status="TRADING" if v.get("status") == "online" else "OFFLINE"
                 ))
         else:
             data = await self._make_request("GET", f"{self.futures_rest_url}/instruments")
             for v in data.get("instruments", []):
+                if not v.get("tradeable"): continue
                 t = v.get("type", "")
                 sym = v.get("symbol", "")
                 if market_type == MarketType.INVERSE and (t != "futures_inverse" or not sym.startswith("PI_")): continue
@@ -270,7 +279,6 @@ class KrakenAdapter(BaseExchange):
                     min_qty=min_size,
                     max_qty=max_size,
                     min_notional=0.0,
-                    status="TRADING" if v.get("tradeable") else "OFFLINE"
                 ))
         return results
 
@@ -427,27 +435,36 @@ class KrakenAdapter(BaseExchange):
     async def get_candles(self, market_type: MarketType, symbol: str, interval: str, start_time: Optional[int] = None, limit: int = 100) -> List[Candle]:
         api_symbol = self.get_api_symbol(symbol, market_type)
         if market_type == MarketType.SPOT:
-            curr_start = int(start_time / 1000) if start_time else None
-            params = {"pair": api_symbol, "interval": self._map_spot_interval(interval)}
-            if curr_start: params["since"] = curr_start
-            
+            interval_min = self._map_spot_interval(interval)
+            interval_secs = int(interval_min) * 60 if str(interval_min).isdigit() else 0
+
+            params = {"pair": api_symbol, "interval": interval_min}
+            if start_time and interval_secs > 0:
+                anchor_secs = int(start_time / 1000)
+                params["since"] = max(0, anchor_secs - limit * interval_secs)
+
             data = await self._make_request("GET", f"{self.spot_rest_url}/OHLC", params)
-            pair_key =[k for k in data.keys() if k != "last"][0]
+            pair_key = [k for k in data.keys() if k != "last"][0]
             results = []
-            
+
             for b in data[pair_key]:
                 results.append(Candle(
                     timestamp=self.normalize_timestamp(b[0]),
                     open=float(b[1]), high=float(b[2]), low=float(b[3]), close=float(b[4]),
                     volume=float(b[6])
                 ))
+
+            results.sort(key=lambda c: c.timestamp)
+            if start_time:
+                results = [c for c in results if c.timestamp <= start_time]
             return results[-limit:]
         else:
             interval_secs_map = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600,
                                  "4h": 14400, "12h": 43200, "1d": 86400, "1w": 604800}
             interval_secs = interval_secs_map.get(interval, 3600)
             now_secs = int(time.time())
-            from_ts = int(start_time / 1000) if start_time else now_secs - limit * interval_secs
+            anchor_secs = int(start_time / 1000) if start_time else now_secs
+            from_ts = anchor_secs - limit * interval_secs
 
             url = f"{self.futures_chart_url}/trade/{api_symbol}/{interval}"
             all_candles: List[Candle] = []
@@ -477,12 +494,14 @@ class KrakenAdapter(BaseExchange):
                         added += 1
                     last_ts_secs = ts_ms // 1000
 
-                if added == 0 or len(all_candles) >= limit or last_ts_secs >= now_secs - interval_secs:
+                if added == 0 or last_ts_secs >= anchor_secs - interval_secs:
                     break
 
                 from_ts = last_ts_secs + interval_secs
 
             all_candles.sort(key=lambda c: c.timestamp)
+            if start_time:
+                all_candles = [c for c in all_candles if c.timestamp <= start_time]
             return all_candles[-limit:]
 
     def _extract_analytics(self, data: Any, field_name: str) -> List[Dict]:
@@ -527,59 +546,65 @@ class KrakenAdapter(BaseExchange):
     async def get_open_interest(self, market_type: MarketType, symbol: str, period: str = "1h", start_time: Optional[int] = None, limit: int = 30) -> List[OpenInterest]:
         if market_type == MarketType.SPOT: raise NotImplementedError()
         api_symbol = self.get_api_symbol(symbol, market_type)
-        
+
         interval_secs = self._map_analytics_interval(period)
         url = f"{self.futures_chart_url}/analytics/{api_symbol}/open-interest"
-        
-        calc_start = int(start_time / 1000) if start_time else int(time.time()) - (limit * interval_secs)
+
+        anchor_secs = int(start_time / 1000) if start_time else int(time.time())
+        calc_start = max(0, anchor_secs - limit * interval_secs)
         params = {"interval": interval_secs, "since": calc_start}
 
         data = await self._make_request("GET", url, params)
         elements = self._extract_analytics(data, "openInterest")
-        
-        results =[OpenInterest(
+
+        results = [OpenInterest(
             symbol=self.get_model_symbol(api_symbol, market_type),
             open_interest=float(e["value"]),
             value_usd=0.0,
             timestamp=self.normalize_timestamp(e["time"])
         ) for e in elements]
         results.sort(key=lambda x: x.timestamp)
+        if start_time:
+            results = [r for r in results if r.timestamp <= start_time]
         return results[-limit:]
 
     async def get_long_short_ratio(self, market_type: MarketType, symbol: str, period: str = "5m", start_time: Optional[int] = None, limit: int = 30) -> List[LongShortRatio]:
         if market_type == MarketType.SPOT: raise NotImplementedError()
         api_symbol = self.get_api_symbol(symbol, market_type)
-        
+
         interval_secs = self._map_analytics_interval(period)
         url = f"{self.futures_chart_url}/analytics/{api_symbol}/long-short-ratio"
-        
-        calc_start = int(start_time / 1000) if start_time else int(time.time()) - (limit * interval_secs)
+
+        anchor_secs = int(start_time / 1000) if start_time else int(time.time())
+        calc_start = max(0, anchor_secs - limit * interval_secs)
         params = {"interval": interval_secs, "since": calc_start}
 
         data = await self._make_request("GET", url, params)
         elements = self._extract_analytics(data, "ratio")
-        
-        results =[LongShortRatio(
+
+        results = [LongShortRatio(
             symbol=self.get_model_symbol(api_symbol, market_type),
             ratio=float(e["value"]),
-            long_account=0.0, 
+            long_account=0.0,
             short_account=0.0,
             timestamp=self.normalize_timestamp(e["time"])
         ) for e in elements]
         results.sort(key=lambda x: x.timestamp)
+        if start_time:
+            results = [r for r in results if r.timestamp <= start_time]
         return results[-limit:]
 
     async def get_funding_rate(self, market_type: MarketType, symbol: str, start_time: Optional[int] = None, limit: int = 100) -> List[FundingRate]:
         if market_type == MarketType.SPOT: raise NotImplementedError()
         api_symbol = self.get_api_symbol(symbol, market_type)
-        
+
         data = await self._make_request("GET", f"{self.futures_rest_url}/historical-funding-rates", {"symbol": api_symbol})
         rates = data.get("rates", [])
-        
-        results =[]
+
+        results = []
         for r in rates:
             ts = self.normalize_timestamp(r.get("timestamp"))
-            if start_time and ts < start_time: continue
+            if start_time and ts > start_time: continue
             results.append(FundingRate(
                 symbol=self.get_model_symbol(api_symbol, market_type),
                 rate=float(r.get("fundingRate", 0)),

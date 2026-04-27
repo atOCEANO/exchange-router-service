@@ -187,36 +187,9 @@ class BinanceAdapter(BaseExchange):
 
         raise Exception(f"Max retries exceeded for {url}")
 
-    async def _paginate(self, fetch_func: Callable, start: Optional[int], total_limit: int, limit_per_req: int) -> List[Any]:
-        results = []
-        current_start = start
-        max_requests = 50
-        request_count = 0
-
-        while len(results) < total_limit and request_count < max_requests:
-            req_size = limit_per_req
-            try:
-                batch = await fetch_func(current_start, req_size)
-            except (httpx.HTTPStatusError, ValueError):
-                break
-
-            if not batch: break
-            
-            batch.sort(key=lambda x: x.timestamp)
-            results.extend(batch)
-            request_count += 1
-            last_item = batch[-1]
-
-            if hasattr(last_item, 'timestamp'):
-                next_start = last_item.timestamp + 1
-                if current_start and next_start <= current_start: break
-                current_start = next_start
-            else: break
-
-        return results[:total_limit]
-
     async def _paginate_backwards(self, fetch_func_by_end: Callable, total_limit: int, limit_per_req: int) -> List[Any]:
         chunks = []
+        seen = set()
         collected_count = 0
         current_end = None
         max_requests = 50
@@ -230,17 +203,20 @@ class BinanceAdapter(BaseExchange):
                 break
 
             if not batch: break
-            
-            batch.sort(key=lambda x: x.timestamp)
-            chunks.append(batch)
-            collected_count += len(batch)
-            request_count += 1
-            first_item = batch[0]
 
-            if hasattr(first_item, 'timestamp'):
-                current_end = first_item.timestamp - 1
-            else:
-                break
+            batch.sort(key=lambda x: x.timestamp)
+            new_items = [x for x in batch if x.timestamp not in seen]
+            if not new_items: break
+            for x in new_items: seen.add(x.timestamp)
+
+            chunks.append(new_items)
+            collected_count += len(new_items)
+            request_count += 1
+
+            if not hasattr(batch[0], 'timestamp'): break
+            next_end = batch[0].timestamp - 1
+            if next_end <= 0 or (current_end is not None and next_end >= current_end): break
+            current_end = next_end
 
         chunks.reverse()
         final_results = [item for chunk in chunks for item in chunk]
@@ -282,8 +258,8 @@ class BinanceAdapter(BaseExchange):
         results = []
         
         for s in data["symbols"]:
-            status = s.get("status") or s.get("contractStatus")
-            if status != "TRADING": continue
+            s_status = s.get("status") or s.get("contractStatus")
+            if s_status != "TRADING": continue
             if market_type != MarketType.SPOT and s.get("contractType") != "PERPETUAL": continue
 
             min_qty = 0.0
@@ -304,7 +280,6 @@ class BinanceAdapter(BaseExchange):
                 price_precision=s.get("quotePrecision", 8),
                 quantity_precision=s.get("baseAssetPrecision", 8),
                 min_qty=min_qty, max_qty=max_qty, min_notional=min_notional,
-                status=status
             ))
 
         return results
@@ -410,13 +385,14 @@ class BinanceAdapter(BaseExchange):
     async def get_agg_trades(self, market_type: MarketType, symbol: str, start_time: Optional[int] = None, limit: int = 500) -> List[AggTrade]:
         base_url = self._get_rest_url(market_type)
         api_symbol = self.get_api_symbol(symbol, market_type)
-        
+
         path = "/api/v3/aggTrades" if market_type == MarketType.SPOT else "/fapi/v1/aggTrades"
         if market_type == MarketType.INVERSE: path = "/dapi/v1/aggTrades"
 
-        async def fetch_batch(s, l):
+        async def fetch_batch_by_end(end_ts, l):
+            anchor = end_ts if end_ts is not None else start_time
             p = {"symbol": api_symbol, "limit": l}
-            if s: p["startTime"] = s
+            if anchor: p["endTime"] = anchor
             data = await self._make_request("GET", f"{base_url}{path}", params=p)
             return [AggTrade(
                 agg_id=str(t["a"]),
@@ -428,9 +404,9 @@ class BinanceAdapter(BaseExchange):
                 timestamp=self.normalize_timestamp(t["T"])
             ) for t in data]
 
-        if start_time:
-            return await self._paginate(fetch_batch, start_time, limit, 1000)
-        return await fetch_batch(start_time, limit)
+        if start_time or limit > 1000:
+            return await self._paginate_backwards(fetch_batch_by_end, limit, 1000)
+        return await fetch_batch_by_end(None, limit)
 
     async def get_candles(self, market_type: MarketType, symbol: str, interval: str, start_time: Optional[int] = None, limit: int = 100) -> List[Candle]:
         base_url = self._get_rest_url(market_type)
@@ -449,24 +425,17 @@ class BinanceAdapter(BaseExchange):
                 volume=float(k[5])
             ) for k in data]
 
-        async def fetch_batch(s, l):
+        async def fetch_batch_by_end(end_ts, l):
+            anchor = end_ts if end_ts is not None else start_time
             p = {"symbol": api_symbol, "interval": interval, "limit": l}
-            if s: p["startTime"] = s
-            return _parse_candles(await self._make_request("GET", f"{base_url}{path}", params=p))
-
-        async def fetch_batch_by_end(e, l):
-            p = {"symbol": api_symbol, "interval": interval, "limit": l}
-            if e: p["endTime"] = e
+            if anchor: p["endTime"] = anchor
             return _parse_candles(await self._make_request("GET", f"{base_url}{path}", params=p))
 
         MAX_PER_REQ = 1500 if market_type != MarketType.SPOT else 1000
 
-        if start_time is not None:
-            return await self._paginate(fetch_batch, start_time, limit, MAX_PER_REQ)
-        elif limit > MAX_PER_REQ:
+        if start_time is not None or limit > MAX_PER_REQ:
             return await self._paginate_backwards(fetch_batch_by_end, limit, MAX_PER_REQ)
-        else:
-            return await fetch_batch(None, limit)
+        return await fetch_batch_by_end(None, limit)
 
     async def get_open_interest(self, market_type: MarketType, symbol: str, period: str = "1h", start_time: Optional[int] = None, limit: int = 30) -> List[OpenInterest]:
         if market_type == MarketType.SPOT:
@@ -474,30 +443,16 @@ class BinanceAdapter(BaseExchange):
 
         base_url = self._get_rest_url(market_type)
         endpoint = "/futures/data/openInterestHist"
-        
+
         raw_symbol = self.normalize_symbol(symbol).replace("_PERP", "")
         model_symbol = self.get_model_symbol(raw_symbol, market_type)
 
         sym_key = "symbol" if market_type == MarketType.LINEAR else "pair"
 
-        if start_time:
-            async def fetch_batch_forward(s, l):
-                p = {sym_key: raw_symbol, "period": period, "limit": l, "startTime": s}
-                if market_type == MarketType.INVERSE:
-                    p["contractType"] = "PERPETUAL"
-                data = await self._make_request("GET", f"{base_url}{endpoint}", params=p)
-                return [OpenInterest(
-                    symbol=model_symbol,
-                    open_interest=float(i["sumOpenInterest"]),
-                    value_usd=float(i["sumOpenInterestValue"]),
-                    timestamp=self.normalize_timestamp(i["timestamp"])
-                ) for i in data]
-
-            return await self._paginate(fetch_batch_forward, start_time, limit, 500)
-
         async def fetch_batch_backward(end_ts, l):
+            anchor = end_ts if end_ts is not None else start_time
             p = {sym_key: raw_symbol, "period": period, "limit": l}
-            if end_ts: p["endTime"] = end_ts
+            if anchor: p["endTime"] = anchor
             if market_type == MarketType.INVERSE:
                 p["contractType"] = "PERPETUAL"
             data = await self._make_request("GET", f"{base_url}{endpoint}", params=p)
@@ -516,30 +471,16 @@ class BinanceAdapter(BaseExchange):
 
         base_url = self._get_rest_url(market_type)
         endpoint = "/futures/data/globalLongShortAccountRatio"
-        
+
         raw_symbol = self.normalize_symbol(symbol).replace("_PERP", "")
         model_symbol = self.get_model_symbol(raw_symbol, market_type)
 
         sym_key = "symbol" if market_type == MarketType.LINEAR else "pair"
 
-        if start_time:
-            async def fetch_batch_forward(s, l):
-                p = {"period": period, "limit": l, "startTime": s}
-                p[sym_key] = raw_symbol
-                data = await self._make_request("GET", f"{base_url}{endpoint}", params=p)
-                return [LongShortRatio(
-                    symbol=model_symbol,
-                    ratio=float(i["longShortRatio"]),
-                    long_account=float(i["longAccount"]),
-                    short_account=float(i["shortAccount"]),
-                    timestamp=self.normalize_timestamp(i["timestamp"])
-                ) for i in data]
-
-            return await self._paginate(fetch_batch_forward, start_time, limit, 500)
-
         async def fetch_batch_backward(end_ts, l):
+            anchor = end_ts if end_ts is not None else start_time
             p = {"period": period, "limit": l}
-            if end_ts: p["endTime"] = end_ts
+            if anchor: p["endTime"] = anchor
             p[sym_key] = raw_symbol
             data = await self._make_request("GET", f"{base_url}{endpoint}", params=p)
             return [LongShortRatio(
@@ -556,12 +497,13 @@ class BinanceAdapter(BaseExchange):
         if market_type == MarketType.SPOT: raise NotImplementedError("Funding Rate not available for Spot")
         base_url = self._get_rest_url(market_type)
         endpoint = "/fapi/v1/fundingRate" if market_type == MarketType.LINEAR else "/dapi/v1/fundingRate"
-        
+
         api_symbol = self.get_api_symbol(symbol, market_type)
 
-        async def fetch_batch(s, l):
+        async def fetch_batch_by_end(end_ts, l):
+            anchor = end_ts if end_ts is not None else start_time
             p = {"symbol": api_symbol, "limit": l}
-            if s: p["startTime"] = s
+            if anchor: p["endTime"] = anchor
             data = await self._make_request("GET", f"{base_url}{endpoint}", params=p)
             return [FundingRate(
                 symbol=i["symbol"],
@@ -570,46 +512,17 @@ class BinanceAdapter(BaseExchange):
             ) for i in data]
 
         MAX_PER_REQ = 1000
-        current_start = start_time
 
-        if limit > MAX_PER_REQ and current_start is None:
-            interval_ms = 8 * 60 * 60 * 1000
-            duration_ms = limit * interval_ms
-            current_start = int(time.time() * 1000) - duration_ms - interval_ms
-
-        if current_start is not None and current_start < 0:
-            current_start = None
-
-        if current_start or limit > MAX_PER_REQ:
-            return await self._paginate(fetch_batch, current_start, limit, MAX_PER_REQ)
-        else:
-            return await fetch_batch(current_start, limit)
+        if start_time is not None or limit > MAX_PER_REQ:
+            return await self._paginate_backwards(fetch_batch_by_end, limit, MAX_PER_REQ)
+        return await fetch_batch_by_end(None, limit)
 
     async def get_liquidations(self, market_type: MarketType, symbol: str, start_time: Optional[int] = None, limit: int = 100) -> List[Liquidation]:
         if market_type == MarketType.SPOT: raise NotImplementedError("Liquidations not available for Spot")
-        base_url = self._get_rest_url(market_type)
-        endpoint = "/fapi/v1/allForceOrders" if market_type == MarketType.LINEAR else "/dapi/v1/allForceOrders"
-        
-        api_symbol = self.get_api_symbol(symbol, market_type)
-
-        async def fetch_batch(s, l):
-            p = {"symbol": api_symbol, "limit": l}
-            if s: p["startTime"] = s
-            try:
-                data = await self._make_request("GET", f"{base_url}{endpoint}", params=p)
-            except (httpx.HTTPStatusError, ValueError):
-                return []
-            return [Liquidation(
-                symbol=self.get_model_symbol(i["symbol"], market_type),
-                side=i["side"].lower(),
-                price=float(i["price"]),
-                qty=float(i["origQty"]),
-                timestamp=self.normalize_timestamp(i["time"])
-            ) for i in data]
-
-        if start_time:
-            return await self._paginate(fetch_batch, start_time, limit, 100)
-        return await fetch_batch(start_time, limit)
+        raise NotImplementedError(
+            "Binance liquidations REST has been auth-disabled since April 2021. "
+            "Use the WebSocket stream via stream_liquidations (or the router's WS endpoint) instead."
+        )
 
     async def stream_ticker(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Ticker, None]:
         s_norm = self.get_stream_symbol(symbol, market_type)

@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import List, Literal, Optional
+from typing import List, Literal
 from pydantic import BaseModel, Field
 
 
@@ -19,7 +19,6 @@ class SymbolInfo(BaseModel):
     min_qty: float
     max_qty: float
     min_notional: float
-    status: str
 
 
 class Ticker(BaseModel):

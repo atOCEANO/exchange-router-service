@@ -208,50 +208,11 @@ class BybitAdapter(BaseExchange):
 
         raise Exception(f"Max retries exceeded for {url}")
 
-    async def _paginate_time(self, fetch_func: Callable, start: Optional[int], total_limit: int, limit_per_req: int) -> List[Any]:
-        results = []
-        seen_timestamps = set()
-        current_start = start
-        max_requests = 50
-        req_count = 0
-        last_ts_seen = -1
-
-        while len(results) < total_limit and req_count < max_requests:
-            try:
-                batch = await fetch_func(current_start, limit_per_req)
-            except (httpx.HTTPStatusError, ValueError) as e:
-                logger.warning(f"Bybit _paginate_time: stopping early due to error: {e}")
-                break
-            if not batch: break
-            
-            batch.sort(key=lambda x: x.timestamp)
-            
-            new_items = []
-            for item in batch:
-                if item.timestamp not in seen_timestamps:
-                    seen_timestamps.add(item.timestamp)
-                    new_items.append(item)
-            
-            if not new_items: break
-
-            results.extend(new_items)
-            req_count += 1
-            
-            last_item = batch[-1]
-            if hasattr(last_item, 'timestamp'):
-                if len(batch) < limit_per_req: break
-                if last_item.timestamp <= last_ts_seen: break
-                last_ts_seen = last_item.timestamp
-                current_start = last_item.timestamp + 1
-            else:
-                break
-        
-        return sorted(results, key=lambda x: x.timestamp)[:total_limit]
-
     async def _paginate_backwards(self, fetch_func_by_end: Callable, total_limit: int, limit_per_req: int) -> List[Any]:
         chunks = []
+        seen = set()
         collected_count = 0
-        current_end = int(time.time() * 1000)
+        current_end = None
         max_requests = 50
         request_count = 0
 
@@ -263,51 +224,25 @@ class BybitAdapter(BaseExchange):
                 break
 
             if not batch: break
-            
+
             batch.sort(key=lambda x: x.timestamp)
-            
-            chunks.append(batch)
-            collected_count += len(batch)
+            new_items = [x for x in batch if x.timestamp not in seen]
+            if not new_items: break
+            for x in new_items: seen.add(x.timestamp)
+
+            chunks.append(new_items)
+            collected_count += len(new_items)
             request_count += 1
-            
-            first_item = batch[0]
-            if hasattr(first_item, 'timestamp'):
-                current_end = first_item.timestamp - 1
-            else:
-                break
+
+            if not hasattr(batch[0], 'timestamp'): break
+            next_end = batch[0].timestamp - 1
+            if next_end <= 0 or (current_end is not None and next_end >= current_end): break
+            current_end = next_end
 
         chunks.reverse()
         final_results = [item for chunk in chunks for item in chunk]
         final_results.sort(key=lambda x: x.timestamp)
         return final_results[-total_limit:]
-
-    async def _paginate_cursor(self, fetch_func_cursor: Callable, total_limit: int, limit_per_req: int) -> List[Any]:
-        results = []
-        seen_timestamps = set()
-        cursor = None
-        max_requests = 50
-        req_count = 0
-
-        while len(results) < total_limit and req_count < max_requests:
-            try:
-                batch, next_cursor = await fetch_func_cursor(cursor, limit_per_req)
-            except (httpx.HTTPStatusError, ValueError):
-                break
-            if not batch: break
-            
-            new_items = []
-            for item in batch:
-                if item.timestamp not in seen_timestamps:
-                    seen_timestamps.add(item.timestamp)
-                    new_items.append(item)
-
-            results.extend(new_items)
-            req_count += 1
-            
-            if not next_cursor or next_cursor == cursor: break
-            cursor = next_cursor
-
-        return sorted(results, key=lambda x: x.timestamp)[:total_limit]
 
     async def _ws_connect(self, market_type: MarketType, topics: list) -> AsyncGenerator[Dict, None]:
         url = self.ws_urls[market_type]
@@ -368,7 +303,6 @@ class BybitAdapter(BaseExchange):
                 price_precision=int(len(s.get("priceFilter", {}).get("tickSize", "0.01").split(".")[-1])),
                 quantity_precision=int(len(s.get("lotSizeFilter", {}).get("qtyStep", "0.001").split(".")[-1])),
                 min_qty=min_qty, max_qty=max_qty, min_notional=min_notional,
-                status=s["status"]
             ))
         return results
 
@@ -460,36 +394,20 @@ class BybitAdapter(BaseExchange):
         ) for t in data["list"]]
 
     async def get_agg_trades(self, market_type: MarketType, symbol: str, start_time: Optional[int] = None, limit: int = 500) -> List[AggTrade]:
-        trades = await self.get_trades(market_type, symbol, limit)
-        return [AggTrade(
-            agg_id=t.id, price=t.price, qty=t.qty, first_trade_id=t.id, last_trade_id=t.id,
-            side=t.side, timestamp=t.timestamp
-        ) for t in trades]
+        raise NotImplementedError("Bybit does not expose aggregated trade history; use get_trades for raw executions.")
 
     async def get_candles(self, market_type: MarketType, symbol: str, interval: str, start_time: Optional[int] = None, limit: int = 100) -> List[Candle]:
         cat = self._get_category(market_type)
         api_symbol = self.get_api_symbol(symbol, market_type)
-        
+
         bybit_interval = self._map_candle_interval(interval)
 
         MAX_PER_REQ = 1000
-        
-        calc_start_time = start_time
-        if calc_start_time is None and limit > MAX_PER_REQ:
-             ms = self._interval_to_ms(interval)
-             if ms > 0:
-                 now_ms = int(time.time() * 1000)
-                 duration_ms = limit * ms
-                 raw_start = now_ms - duration_ms
-                 
-                 if interval.endswith("m") or interval.endswith("h"):
-                     calc_start_time = raw_start - (raw_start % ms)
-                 else:
-                     calc_start_time = raw_start
 
-        async def fetch(s, l):
+        async def fetch_by_end(end_ts, l):
+            anchor = end_ts if end_ts is not None else start_time
             p = {"category": cat, "symbol": api_symbol, "interval": bybit_interval, "limit": min(l, MAX_PER_REQ)}
-            if s: p["start"] = s
+            if anchor: p["end"] = anchor
             data = await self._make_request("GET", "/v5/market/kline", p)
             if not data["list"]: return []
 
@@ -500,49 +418,31 @@ class BybitAdapter(BaseExchange):
 
             return sorted(parsed, key=lambda x: x.timestamp)
 
-        if calc_start_time is None:
-            return await fetch(None, limit)
-
-        return await self._paginate_time(fetch, calc_start_time, limit, MAX_PER_REQ)
+        if start_time is not None or limit > MAX_PER_REQ:
+            return await self._paginate_backwards(fetch_by_end, limit, MAX_PER_REQ)
+        return await fetch_by_end(None, limit)
 
     async def get_open_interest(self, market_type: MarketType, symbol: str, period: str = "1h", start_time: Optional[int] = None, limit: int = 30) -> List[OpenInterest]:
         if market_type == MarketType.SPOT: raise NotImplementedError()
         cat = self._get_category(market_type)
         api_symbol = self.get_api_symbol(symbol, market_type)
-        
+
         interval = self._map_metric_interval(period)
 
-        if start_time:
-            async def fetch_cursor(cursor, l):
-                p = {"category": cat, "symbol": api_symbol, "intervalTime": interval, "limit": min(l, 200)}
-                if cursor: p["cursor"] = cursor
-                if start_time and not cursor: p["startTime"] = start_time
-                
-                data = await self._make_request("GET", "/v5/market/open-interest", p)
-                
-                res_list = [OpenInterest(
-                    symbol=self.get_model_symbol(api_symbol, market_type),
-                    open_interest=float(i["openInterest"]),
-                    value_usd=0.0,
-                    timestamp=self.normalize_timestamp(i["timestamp"])
-                ) for i in data["list"]]
-                
-                return sorted(res_list, key=lambda x: x.timestamp), data.get("nextPageCursor")
-            return await self._paginate_cursor(fetch_cursor, limit, 200)
-
         async def fetch_backwards(end_ts, l):
+            anchor = end_ts if end_ts is not None else start_time
             p = {"category": cat, "symbol": api_symbol, "intervalTime": interval, "limit": min(l, 200)}
-            if end_ts: p["endTime"] = end_ts
-            
+            if anchor: p["endTime"] = anchor
+
             data = await self._make_request("GET", "/v5/market/open-interest", p)
-            
+
             res_list = [OpenInterest(
                 symbol=self.get_model_symbol(api_symbol, market_type),
                 open_interest=float(i["openInterest"]),
                 value_usd=0.0,
                 timestamp=self.normalize_timestamp(i["timestamp"])
             ) for i in data["list"]]
-            
+
             return sorted(res_list, key=lambda x: x.timestamp)
 
         return await self._paginate_backwards(fetch_backwards, limit, 200)
@@ -552,25 +452,10 @@ class BybitAdapter(BaseExchange):
         cat = self._get_category(market_type)
         api_symbol = self.get_api_symbol(symbol, market_type)
 
-        if start_time:
-            async def fetch(s, l):
-                p = {"category": cat, "symbol": api_symbol, "limit": min(l, 200)}
-                if s:
-                    p["startTime"] = s
-                    p["endTime"] = int(time.time() * 1000)
-                data = await self._make_request("GET", "/v5/market/funding/history", p)
-
-                parsed = [FundingRate(
-                    symbol=self.get_model_symbol(api_symbol, market_type),
-                    rate=float(i["fundingRate"]),
-                    timestamp=self.normalize_timestamp(i["fundingRateTimestamp"])
-                ) for i in data.get("list", [])]
-                return sorted(parsed, key=lambda x: x.timestamp)
-            return await self._paginate_time(fetch, start_time, limit, 200)
-
         async def fetch_backwards(end_ts, l):
+            anchor = end_ts if end_ts is not None else start_time
             p = {"category": cat, "symbol": api_symbol, "limit": min(l, 200)}
-            if end_ts: p["endTime"] = end_ts
+            if anchor: p["endTime"] = anchor
             data = await self._make_request("GET", "/v5/market/funding/history", p)
 
             parsed = [FundingRate(
@@ -589,7 +474,7 @@ class BybitAdapter(BaseExchange):
         interval = self._map_metric_interval(period)
 
         if start_time:
-            logger.warning("Bybit /v5/market/account-ratio does not support startTime; returning most recent data only.")
+            logger.warning("Bybit /v5/market/account-ratio does not support a time anchor; returning most recent data only.")
 
         req_limit = min(limit, 500)
         p = {"category": cat, "symbol": api_symbol, "period": interval, "limit": req_limit}
