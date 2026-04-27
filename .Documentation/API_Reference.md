@@ -42,11 +42,10 @@ The router exposes two interfaces on the same port. REST is request/response; We
 <br>
 <br>
 
----
 
 ## REST
 
-The REST interface covers everything that is request/response in shape: service discovery, capability maps, historical data pulls, and point-in-time snapshots. Every endpoint returns a normalized JSON payload matching one of the schemas documented in Response Shapes below, regardless of which upstream exchange served the request.
+The REST interface covers everything that is request/response based: service discovery, capability maps, historical data pulls, and point-in-time snapshots. Every endpoint returns a normalized JSON payload matching one of the schemas documented in Response Shapes below, regardless of which upstream exchange served the request.
 
 <br>
 <br>
@@ -66,7 +65,7 @@ The REST interface covers everything that is request/response in shape: service 
 | `GET` | `/{exchange}/capabilities` | Supported REST routes and WebSocket channels for an adapter. | None |
 | `GET` | `/{exchange}/market_types` | Market types available on the exchange. | None |
 | `GET` | `/{exchange}/{market_type}/info` | Symbol specs, filters, and precision constraints. | None |
-| `GET` | `/{exchange}/{market_type}/markets` | All perpetual contracts for a market. Dated and quarterly futures are excluded. | None |
+| `GET` | `/{exchange}/{market_type}/markets` | All tradable symbols for the market. On `linear` and `inverse`, only perpetuals are returned (dated and quarterly futures are excluded). | None |
 
 #### Pricing
 
@@ -104,6 +103,21 @@ The REST interface covers everything that is request/response in shape: service 
 | `GET` | `/{exchange}/{market_type}/funding_rate/{symbol}` | Historical funding rates. | `start`, `limit` |
 | `GET` | `/{exchange}/{market_type}/open_interest/{symbol}` | Open interest history. | `period`, `start`, `limit` |
 | `GET` | `/{exchange}/{market_type}/long_short_ratio/{symbol}` | Long/short account distribution. | `period`, `start`, `limit` |
+
+<br>
+<br>
+
+---
+
+### Pagination Semantics
+
+Every endpoint that accepts a `start` query parameter (candles, agg_trades, funding_rate, open_interest, liquidations, long_short_ratio) treats it as an **inclusive backward-walking upper bound**:
+
+* `?start=X&limit=N` returns up to N records with `timestamp <= X`, sorted ascending. X is the newest record in the response when present in the dataset.
+* Omit `start` to get the most recent N records ending at "now".
+* The response is always sorted ascending (oldest first), regardless of whether `start` was set.
+
+The natural pagination loop for "load older" is therefore: pass the oldest timestamp you already have as the new `start`, request the next page, prepend to your view.
 
 <br>
 <br>
@@ -150,12 +164,13 @@ All REST responses are normalized to the same schema regardless of the upstream 
   "quantity_precision": 4,
   "min_qty": 0.001,
   "max_qty": 1000.0,
-  "min_notional": 1.0,
-  "status": "TRADING"
+  "min_notional": 1.0
 }
 ```
 
 `symbol` is the normalized trading pair used across all router endpoints. `native_symbol` is the raw exchange symbol (e.g. `BTCUSD_PERP`, `PF_XBTUSD`) for cross-referencing back to the upstream API. Not all precision and notional fields are populated on every exchange; fields the upstream does not provide default to `0`.
+
+Only tradeable symbols appear in `/info` and `/markets`. Paused, halted, and offline instruments are filtered out at the adapter level, so a symbol's presence in the response is itself the liveness signal.
 
 **Ticker** &nbsp;·&nbsp; `GET /ticker/{symbol}` &nbsp;·&nbsp; WS `ticker`
 ```json
@@ -322,7 +337,7 @@ The router never masks upstream error detail. If the underlying exchange returns
 
 ## WebSocket
 
-The WebSocket interface covers everything REST does not, real-time streams from the exchange pushed through without polling. The two interfaces share a port and a schema, so a `ticker` WebSocket message looks identical to a `GET /ticker/{symbol}` response body, and you can pick whichever fits the workload.
+The WebSocket interface covers everything REST does not. It carries real-time streams from the exchange pushed through without polling. The two interfaces share a port and a schema, so a `ticker` WebSocket message looks identical to a `GET /ticker/{symbol}` response body, and you can pick whichever fits the workload.
 
 Connect to `ws://localhost:8040/ws/{exchange}/{market_type}` and send a JSON subscription payload. The server starts streaming as soon as the upstream exchange connection is established. There is no acknowledgement message, just data.
 
@@ -333,7 +348,7 @@ Connect to `ws://localhost:8040/ws/{exchange}/{market_type}` and send a JSON sub
 
 ### Protocol Rules
 
-* **One subscription per connection.** A connection is bound to a single `(channel, symbol)` tuple. To subscribe to more than one, open additional connections. The internal `StreamManager` still shares a single upstream exchange connection between any clients that pick the same tuple, so this is not wasteful.
+* **One subscription per connection.** A connection is bound to a single `(channel, symbol)` tuple. To subscribe to more than one, open additional connections. The internal `StreamManager` still shares a single upstream exchange connection between any clients that pick the same tuple, so this does not create redundant upstream connections.
 * **No unsubscribe message.** Close the connection to unsubscribe. The server tears down resources immediately.
 * **No client heartbeat required.** Exchange-specific ping/pong handling is abstracted inside the adapter. The server does not close idle connections on its own.
 * **Stream payloads match REST shapes.** A `ticker` subscription yields the same JSON object as `GET /ticker/{symbol}`. See the response shapes above.

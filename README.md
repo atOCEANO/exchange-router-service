@@ -23,9 +23,9 @@
 
 ## Introduction
 
-The `exchange-router-service` is an async API gateway for public cryptocurrency market data. It sits in front of multiple exchanges and normalizes their REST and WebSocket APIs into a single consistent schema, so you write one client instead of many.
+The `exchange-router-service` is an async API gateway for public cryptocurrency market data. It sits in front of multiple exchanges and normalizes their REST and WebSocket APIs into a single consistent schema. You write one client instead of many.
 
-The service handles the boring parts that every exchange integration hits eventually: pagination for large historical pulls, request-weight throttling to prevent IP bans, and persistent connection management for WebSocket streams. Adding a new exchange means dropping in a new adapter, no changes to the routing core.
+The service handles the parts that every exchange integration ends up needing: pagination for large historical pulls, request-weight throttling to prevent IP bans, and persistent connection management for WebSocket streams. Adding a new exchange is a matter of dropping in a new adapter, with no changes to the routing core.
 
 **Stateless and keyless.** The service handles public market data only. It places no orders, holds no API keys, manages no accounts, and persists nothing to disk. If you need authentication or private endpoints, this is not it.
 
@@ -38,7 +38,7 @@ The service handles the boring parts that every exchange integration hits eventu
 
 <br>
 
-Clients talk to one endpoint, the router fans requests out to the right exchange adapter, and the adapter normalizes the response into a schema that is identical across exchanges. REST and WebSocket both sit on the same port, and the same adapter instance serves both, so a client written against Binance spot works against Bybit linear with a single path change.
+Clients talk to one endpoint, the router routes requests to the right exchange adapter, and the adapter normalizes the response into a schema that is identical across exchanges. REST and WebSocket both sit on the same port, and the same adapter instance serves both, so a client written against Binance spot works against Bybit linear with a single path change. The schema is uniform; some unit semantics are not. See the [Unit semantics](.Documentation/Exchange_Notes.md#unit-semantics) note in Exchange Notes before comparing values across markets.
 
 <br>
 <br>
@@ -154,7 +154,7 @@ Clients talk to one endpoint, the router fans requests out to the right exchange
       <td style="padding: 8px; text-align: center;">[x]</td>
       <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook, Mark Price</td>
     </tr>
-    <tr style="border-bottom: 1px solid #30363d;">
+    <tr style="border-bottom: 2px solid #30363d;">
       <td style="padding: 8px 12px; opacity: 0.8;">Inverse</td>
       <td style="padding: 8px; text-align: center;">[x]</td>
       <td style="padding: 8px; text-align: center;">[x]</td>
@@ -163,6 +163,40 @@ Clients talk to one endpoint, the router fans requests out to the right exchange
       <td style="padding: 8px; text-align: center;">[x]</td>
       <td style="padding: 8px; text-align: center;">[x]</td>
       <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook, Mark Price</td>
+    </tr>
+    <!-- OKX -->
+    <tr style="border-bottom: 1px solid #30363d;">
+      <td rowspan="3" style="padding: 12px; vertical-align: middle; text-align: left; border-right: 1px solid #30363d;">
+        <img src=".Documentation/imgs/exchanges/okx_logo.png" height="24" />
+      </td>
+      <td style="padding: 8px 12px; opacity: 0.8;">Spot</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook</td>
+    </tr>
+    <tr style="border-bottom: 1px solid #30363d;">
+      <td style="padding: 8px 12px; opacity: 0.8;">Linear</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook, Mark Price, Liquidations</td>
+    </tr>
+    <tr style="border-bottom: 1px solid #30363d;">
+      <td style="padding: 8px 12px; opacity: 0.8;">Inverse</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook, Mark Price, Liquidations</td>
     </tr>
   </tbody>
 </table>
@@ -211,9 +245,9 @@ The service is deliberately thin on configuration. Everything it needs at runtim
 
 <br>
 
-The variable lives in `.env` and is consumed by `docker-compose.yml` in the `ports` mapping. It is not read by the Python service at all, so running `uvicorn src.main:app` directly during development ignores it, use `--port` on the uvicorn command line instead.
+The variable lives in `.env` and is consumed by `docker-compose.yml` in the `ports` mapping.
 
-There is no configuration file for adapters, upstream URLs, timeouts, or rate limit thresholds. Those are defined in code, per adapter, and changing them means editing the adapter and rebuilding the container. This is intentional, the router ships as a fixed artifact and should behave identically across deployments.
+There is no configuration file for adapters, upstream URLs, timeouts, or rate limit thresholds. Those are defined in code, per adapter, and changing them means editing the adapter and rebuilding the container. This is intentional. The router ships as a single immutable image and should behave identically across deployments.
 
 <br>
 <br>
@@ -222,7 +256,7 @@ There is no configuration file for adapters, upstream URLs, timeouts, or rate li
 
 ### Python SDK
 
-A thin async client over the router's REST and WebSocket interfaces. Market data methods return `pandas.DataFrame` objects indexed by datetime.
+A thin async client over the router's REST and WebSocket interfaces. Historical and time-series methods return `pandas.DataFrame` objects indexed by datetime; point-in-time snapshots (ticker, book ticker, orderbook, mark price) return plain dicts. See [Unit semantics](.Documentation/Exchange_Notes.md#unit-semantics) for fields whose units vary across exchanges.
 
 ```bash
 pip install git+https://github.com/atOCEANO/exchange-router-service.git#subdirectory=client
@@ -239,7 +273,7 @@ print(df.tail())
 await client.close()
 ```
 
-Or pull 1 000 daily candles for every single Binance spot market in one call:
+Fetch candles for every symbol on an exchange in one call:
 
 ```python
 from exchange_router_client import ExchangeRouterClient
@@ -255,7 +289,7 @@ all_markets[:5]
 f"Total spot markets: {len(all_markets)}"
 # 'Total spot markets: 517'
 
-# Fetch 1 000 daily candles for all of them, 5 requests at a time
+# Fetch 1000 daily candles for all of them, 5 requests at a time
 data_map = await client.fetch_multi_candles(
     exchange="binance",
     market_type="spot",
@@ -276,5 +310,3 @@ data_map["BTCUSDT"].tail()
 
 await client.close()
 ```
-
-<small>Full method reference in the <a href=".Documentation/Python_SDK.md">Python SDK</a> doc.</small>
