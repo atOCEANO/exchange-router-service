@@ -48,7 +48,9 @@ uvicorn src.main:app --reload --port 8040
 
 The `--reload` flag restarts the worker whenever a file under `src/` changes. Pair it with the test suite running in another terminal for a tight edit-test loop.
 
-When something breaks, it helps to bypass FastAPI entirely. Instantiate the adapter in a Python REPL and call its methods directly. The stack trace is cleaner, and you can poke at intermediate state without routing a request end to end.
+When something breaks, it helps to bypass FastAPI entirely. Instantiate the adapter in a Python REPL and call its methods directly. The stack trace is cleaner, and you can inspect intermediate state without routing a request end to end.
+
+When iterating without `--reload`, set `--port` on the uvicorn command line directly; the `EXCHANGE_ROUTER_SERVICE_PORT` env var is only consumed by `docker-compose.yml` and is not read by the Python service.
 
 <br>
 <br>
@@ -65,6 +67,7 @@ All adapters must inherit from `BaseExchange` in `src/exchanges/base.py`. The fo
 - [ ] **Symbol Normalization:** Implement `get_model_symbol(api_symbol, market_type)` to translate raw exchange symbols to normalized form (e.g. `BTCUSD_PERP` → `BTCUSDT`), and `get_api_symbol(symbol, market_type)` to reverse the translation when constructing upstream requests. Normalized symbols must be bare pairs with no suffixes.
 - [ ] **Perpetuals Filter:** For `linear` and `inverse` markets, `get_exchange_info` must exclude dated and quarterly contracts. Only perpetual instruments should appear in `/markets` and `/info`.
 - [ ] **`native_symbol` Field:** Populate `native_symbol` on every `SymbolInfo` object with the raw exchange symbol before normalization.
+- [ ] **Backward-anchored pagination:** Every method that takes `start_time` must treat it as an inclusive backward-walking upper bound. Route the call through `_paginate_backwards` (or equivalent) seeded with `start_time` on the first iteration, so the result contains records with `ts <= start_time`. This is the universal contract; do not introduce forward-walking from `start_time`.
 - [ ] **Registry Registration:** Add an `__init__.py` that imports the adapter class (e.g., `from .adapter import KrakenAdapter`). The auto-loader relies on this import to discover subclasses of `BaseExchange`.
 
 <br>
@@ -157,7 +160,7 @@ Do not add adapter-specific fields under a generic name, and do not return raw d
 * **No hand-rolled retry logic at the call site.** `_make_request` (or the adapter's equivalent) handles retries and backoff. Per-call retry loops fight the rate limiter.
 * **Logging via `logging.getLogger("<adapter>_adapter")`.** Keep each adapter's logs isolated so they can be filtered independently.
 
-For exchange-specific behaviors (rate limit tiers, symbol translation quirks, API version notes) see [Exchange Notes](Exchange_Notes.md).
+For exchange-specific behaviors (rate limit tiers, symbol translation quirks, API version notes) see [Exchange Notes](Exchange_Notes.md). For internal mechanics that adapter authors need but users do not, see [Adapter Internals](#adapter-internals) below.
 
 <br>
 <br>
@@ -178,12 +181,20 @@ WebSocket tests open a connection and listen for the declared duration (default 
 # Point the test suite at the running router (default port 8040)
 export API_URL=http://localhost:8040
 
-# Run the suite
+# Run the suite (all registered exchanges)
 python tests/verify_routes.py
+
+# Test a specific adapter
+python tests/verify_routes.py okx
+
+# Test multiple specific adapters
+python tests/verify_routes.py binance bybit
 
 # Run with extended WebSocket observation window (seconds)
 WS_TEST_DURATION=300 python tests/verify_routes.py
 ```
+
+When iterating on a single adapter, scoping the run to that exchange cuts the loop time considerably and keeps the output focused. With no positional arguments the suite runs against every exchange the router reports under `/exchanges`.
 
 <br>
 <br>
@@ -197,3 +208,69 @@ For reference, the router uses a FastAPI lifespan manager (`@asynccontextmanager
 Contributors rarely need to touch this layer. The only thing an adapter owes the lifecycle is a correct `shutdown()` implementation that closes every client it opened in `__init__`.
 
 Once `shutdown()` is correct and `verify_routes.py` passes cleanly, the adapter is ready for review.
+
+<br>
+<br>
+
+---
+
+### Adapter Internals
+
+These are conventions adapter authors follow that are not visible from the user-facing schema. They live here, not in Exchange Notes, because callers do not need them.
+
+#### `_paginate_backwards` helper
+
+Every method that accepts `start_time` should route through `_paginate_backwards` (or its equivalent in the adapter), seeded with `start_time` on the first iteration. The helper collects forward-sorted batches, walks the response back by setting the upstream end-anchored parameter to one less than the oldest record's timestamp, and stops when no new records arrive or `max_requests` is reached. The user-facing contract is "inclusive backward-walking upper bound"; this is how that contract is implemented.
+
+#### Upstream pagination parameters
+
+| Exchange | Native param | Inclusive? | Adapter handling |
+| :--- | :--- | :--- | :--- |
+| Binance | `endTime` | yes | direct passthrough |
+| Bybit | `endTime` (`end` on klines) | yes | direct passthrough |
+| OKX | `after` (REST), `end` (rubik) | `after` is exclusive, `end` is inclusive | for `after`, send `start + 1` to make it inclusive |
+| Kraken | `since`, `from` | forward-only | compute `synthetic_since = start - limit * interval`, fetch forward, truncate to `ts <= start`, tail to `limit` |
+
+#### Perpetuals filter
+
+| Exchange | Mechanism |
+| :--- | :--- |
+| Binance | filter `contractType == "PERPETUAL"` on `/dapi/v1/exchangeInfo` and `/fapi/v1/exchangeInfo` |
+| Bybit | pass `contractType=LinearPerpetual` or `InversePerpetual`; also re-check on the response |
+| Kraken | check `type` plus instrument prefix: `PI_*` and `PF_*` are perpetuals, `FI_*` and `FF_*` are dated |
+| OKX | filter `ctType == "linear"` or `"inverse"` plus `state == "live"` on `instType=SWAP` |
+
+#### Symbol round-trip
+
+Adapters implement `get_api_symbol(symbol, market_type)` and `get_model_symbol(api_symbol, market_type)`. The two must compose: `get_model_symbol(get_api_symbol(s, m), m) == s` for every supported `(s, m)`. `get_api_symbol` reattaches whatever suffix or separator the upstream needs (Binance `_PERP`, Kraken `PI_`/`PF_`, OKX `-` and `-SWAP`).
+
+#### Rate limit headers and proactive backoff
+
+Adapters inspect response headers on every call and update a shared `_backoff_until` timestamp before the upstream starts rejecting requests.
+
+| Exchange | Header(s) | Trigger |
+| :--- | :--- | :--- |
+| Binance | `x-mbx-used-weight-1m` | back off 2s if used weight > 1150/1200 |
+| Bybit | `X-Bapi-Limit-Status`, `X-Bapi-Limit-Reset-Timestamp` | back off until reset if remaining < 10 |
+| OKX | none | reactive only on HTTP 429 |
+| Kraken | none | reactive only on `error` field or HTTP 429 |
+
+Reactive backoffs (HTTP 429, soft codes like Bybit's `retCode: 10006`, Kraken's `Too many requests` body string) all funnel into the same `_backoff_until` mechanism. If the remaining backoff exceeds 30 seconds when a request arrives, the adapter fails fast rather than making the caller wait.
+
+#### Subscription payload quirks
+
+Documented here so future adapter authors know what to look for when wrapping a new exchange.
+
+- **Binance.** Standard JSON `{"method": "SUBSCRIBE", "params": [...], "id": ...}`. No client keepalive needed; reconnect on disconnect with exponential backoff.
+- **Bybit.** Standard JSON `{"op": "subscribe", "args": [...]}`. Send `{"op": "ping"}` every 20 seconds.
+- **Kraken spot.** Use the v2 WebSocket protocol on `wss://ws.kraken.com/v2`. Translate `XBT`/`XDG` to `BTC`/`DOGE` when constructing subscription payloads. The `ticker` channel needs `event_trigger: "bbo"` to emit BBO updates without trade activity. The `trade` channel needs `"snapshot": true` to emit recent trades on connect.
+- **Kraken futures.** Use the v1 WebSocket protocol on a separate URL (`wss://futures.kraken.com/ws/v1`); message shapes differ from v2 spot.
+- **OKX.** OKX closes idle connections after 30 seconds. Send a raw `"ping"` (not JSON) every 25 seconds; the server replies with raw `"pong"`.
+
+#### Internal endpoints behind `open_interest` and `long_short_ratio`
+
+For adapter authors hitting these surfaces:
+
+- **OKX OI** comes from `/api/v5/rubik/stat/contracts/open-interest-history`. The history endpoint returns `[ts, oi (contracts), oiCcy (coin units), oiUsd (USD notional)]`; the adapter maps `oiCcy` to `open_interest` and `oiUsd` to `value_usd`.
+- **OKX L/S** comes from `/api/v5/rubik/stat/contracts/long-short-account-ratio`, parameterized by `ccy` (currency), not `instId`.
+- **Kraken OI and L/S** come from the Kraken Futures chart analytics API (`https://futures.kraken.com/api/charts/v1/analytics/{symbol}/{type}`). The adapter uses the close value of each OHLC-style bucket as the representative.

@@ -23,7 +23,7 @@
 
 ## System Architecture
 
-The sections below cover the router's core contract, the two request paths (REST and WebSocket), how rate limiting and failures are handled, and the deployment and security constraints that shape how the service should be operated in practice.
+The sections below cover the router's core contract and the two request paths (REST and WebSocket). They also cover how rate limiting and failures are handled, plus the deployment and security constraints that shape how the service should be operated in practice.
 
 <br>
 <br>
@@ -82,7 +82,7 @@ This is also why re-subscribing on the same connection is not supported. Each co
 
 The router manages request weight per adapter to avoid upstream IP bans. Each adapter holds a dedicated `asyncio.Lock()` and a shared `_backoff_until` timestamp, combining them in two layers:
 
-- **Proactive.** Every response is inspected for rate limit headers (`X-Bapi-Limit-Status`, `x-mbx-used-weight`, and similar). If remaining weight drops below a threshold, the adapter sets a backoff timestamp and stalls pending tasks before the upstream starts rejecting anything.
+- **Proactive.** Every response is inspected for rate limit headers where the upstream provides them. If remaining weight drops below a threshold, the adapter sets a backoff timestamp and stalls pending tasks before the upstream starts rejecting anything.
 - **Reactive.** Exchange-specific: Bybit uses HTTP 403 for IP bans (not 429), which sets a 10-minute backoff and fails the triggering request immediately. A `retCode: 10006` inside a 200 response signals a soft per-endpoint limit and triggers a short backoff with a retry. Binance and Kraken use standard HTTP 429. All cases update the shared `_backoff_until` timestamp.
 
 If the remaining backoff exceeds 30 seconds when a request arrives, the adapter fails it immediately with a clear error rather than making the caller wait. All requests to the same exchange share a single budget and serialize behind the same lock.
@@ -111,7 +111,7 @@ The route layer adds two more responses that adapters never raise themselves:
 Two more conditions do not correspond to exception types at all:
 
 * **Upstream HTTP failures** (5xx from the exchange, connection errors, timeouts) are retried with backoff inside `_make_request`. If retries are exhausted, the request surfaces as `500 Internal Server Error`.
-* **Upstream rate limiting** (429 or 418, or proactive detection via response headers) causes the adapter to pause all in-flight tasks and wait for the declared backoff window. The client-facing request is not failed, only delayed.
+* **Upstream rate limiting** (429 or 418, or proactive detection via response headers) causes the adapter to pause all in-flight tasks and wait for the declared backoff window. The client request is delayed, not rejected.
 
 The `detail` field in error responses always carries the underlying exception message, whether it came from the adapter or the upstream exchange. Nothing is rewritten or swallowed.
 
@@ -127,7 +127,7 @@ The router is designed to run as a single container per exchange IP. A few conse
 * **Rate limit state is in-memory.** Each router instance tracks its own backoff timestamps and per-adapter locks. Running two router instances behind a load balancer that both hit the same exchange from the same IP will double-count request weight and risk an IP ban. If you need horizontal scaling, shard exchanges across instances rather than replicating them.
 * **No persistence.** The service holds no database, no cache, no on-disk state. Historical data is always pulled from upstream on demand. A restart loses only in-flight requests and WebSocket sessions.
 * **No built-in observability.** The router logs to stdout via Python's `logging` module. Metrics and traces are not emitted. If you need them, wrap the service at the edge (reverse proxy, sidecar) or add them directly to the adapter layer.
-* **CORS is open.** `allow_origins=["*"]` is set for local research convenience. If you expose the router beyond localhost, put it behind a proxy that enforces origin checks.
+* **CORS is open.** `allow_origins=["*"]` is set so any local client can talk to the router during development. If you expose the router beyond localhost, put it behind a proxy that enforces origin checks.
 
 These are intentional constraints that keep the service stateless and straightforward to restart. Understand them before pointing real traffic at the service.
 
@@ -140,8 +140,10 @@ These are intentional constraints that keep the service stateless and straightfo
 
 The router is designed to run on localhost or inside a trusted network. It does not ship with any of the pieces you would need to safely expose it to the public internet, and the intro's "stateless and keyless" framing is meant to narrow the threat model, not eliminate it.
 
-Concretely, the service has no authentication, no rate limiting on the inbound side (only on upstream calls), no request signing, no TLS termination, and no origin enforcement. Anyone who can reach the port can issue any request the adapters support. Because every response is public market data pulled from public APIs, a compromised router cannot leak private information or move funds, but an exposed instance can still be abused as an open proxy to hammer upstream exchanges from your IP, which is how IP bans happen.
+Concretely, the service has no authentication, no rate limiting on the inbound side (only on upstream calls), no request signing, no TLS termination, and no origin enforcement. Anyone who can reach the port can issue any request the adapters support.
+
+Every response is public market data pulled from public APIs, so a compromised router cannot leak private information or move funds. The risk is different. An exposed instance can be abused as an open proxy to hammer upstream exchanges from your IP. That is how IP bans happen.
 
 If you need to run the router outside a trusted network, put it behind a reverse proxy that adds the pieces the service deliberately omits: TLS, an allowlist or origin check, and an inbound rate limit tight enough that a single misbehaving client cannot exhaust the upstream budget the router is carefully managing on your behalf. A minimal nginx or Caddy config in front of the container is usually enough. Anything more ambitious (per-client quotas, audit logging, API keys) belongs in that proxy layer, not in the router itself.
 
-One deployment pattern worth calling out: if you are running multiple Oceano services behind the same proxy, give the router its own subpath or hostname and keep the port private. The router's CORS wildcard means a browser app served from any origin can talk to it, which is useful during local research and dangerous in any shared environment.
+One deployment pattern worth calling out: if you are running multiple Oceano services behind the same proxy, give the router its own subpath or hostname and keep the port private. The router's CORS wildcard means a browser app served from any origin can talk to it, which is convenient during local development and dangerous in any shared environment.

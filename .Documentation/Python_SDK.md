@@ -23,7 +23,9 @@
 
 ## Python SDK
 
-The Python SDK is a thin async client over the router's REST and WebSocket interfaces. Market data methods return `pandas.DataFrame` objects indexed by datetime, ready for use in research workflows. Discovery methods return plain dicts or lists.
+The Python SDK is a thin async client over the router's REST and WebSocket interfaces. Historical and time-series methods (candles, agg trades, funding rate, open interest, liquidations, long/short ratio) return `pandas.DataFrame` objects indexed by datetime. Point-in-time snapshots (ticker, book ticker, orderbook, mark price) return plain dicts. Discovery methods return dicts or lists of strings.
+
+The client supports `async with` for guaranteed cleanup, or you can call `await client.close()` manually.
 
 <br>
 <br>
@@ -52,16 +54,17 @@ pip install -e .
 
 ### Quick Start
 
-The SDK works well in Jupyter environments using top-level `await`.
+The SDK is async. The examples below use top-level `await`, which works in Jupyter and Python 3.10+ REPLs. In a normal `.py` script, wrap calls in `asyncio.run(...)` or use `async with`.
 
 ```python
 from exchange_router_client import ExchangeRouterClient
 
-client = ExchangeRouterClient(base_url="http://localhost:8040")
-
-df = await client.get_candles(exchange="binance", market_type="spot", symbol="BTCUSDT", interval="1h", limit=100)
-print(df.head())
+async with ExchangeRouterClient(base_url="http://localhost:8040") as client:
+    df = await client.get_candles(exchange="binance", market_type="spot", symbol="BTCUSDT", interval="1h", limit=100)
+    print(df.head())
 ```
+
+The `start` parameter, where applicable, is an inclusive backward-walking upper bound. To paginate backward through history, pass `start` as the oldest timestamp you already have. The response returns up to `limit` records with `ts <= start`, sorted oldest-first. See the [API Reference](API_Reference.md#pagination-semantics) for the full specification.
 
 <br>
 <br>
@@ -70,7 +73,7 @@ print(df.head())
 
 ### Reference
 
-The client holds persistent network connections. Always call `await client.close()` when done to release resources.
+The client holds persistent network connections. Use `async with`, or call `await client.close()` when done to release resources.
 
 <br>
 
@@ -82,7 +85,7 @@ The client raises three exception types depending on where the failure happens:
 * `ConnectionError` when a request keeps failing after `max_retries` attempts. 5xx responses and connection-level errors are retried with linear backoff before this is raised.
 * `RuntimeError` for anything unexpected that is not an HTTP or connection error.
 
-`fetch_multi_candles` is the one exception to this rule. It logs failures per symbol and returns only the symbols that succeeded, so an unknown ticker in a batch will not break the whole call.
+`fetch_multi_candles` is the one exception to this rule. It logs failures per symbol and returns only the symbols that succeeded, so a single failed symbol does not abort the entire batch.
 
 <br>
 
@@ -103,7 +106,7 @@ Market data methods that return a `pd.DataFrame` follow the same conventions:
 #### Discovery Methods
 
 **`get_status`**
-Returns service health and the list of active exchange adapters.
+Returns a small dict with the service health: `{"status": "ok", "service": "exchange-router-service"}`. For the list of active adapters, use `get_exchanges`.
 
 ```python
 await client.get_status()
@@ -150,7 +153,7 @@ await client.get_capabilities(exchange: str)
 * `exchange` *(str)*: Adapter name.
 
 **`get_markets`**
-Returns all tradable perpetual symbols for a given market type as a list of strings.
+Returns all tradable symbols for a given market type as a list of strings. On `linear` and `inverse`, only perpetuals are included; dated and quarterly futures are excluded. On `spot`, every active spot pair is returned.
 
 ```python
 await client.get_markets(exchange: str, market_type: str)
@@ -212,7 +215,7 @@ await client.get_book_ticker(exchange: str, market_type: str, symbol: str)
 #### Trades
 
 **`get_trades`**
-Returns recent public trade executions.
+Returns recent public trade executions as a DataFrame. Does not accept `start`; the upstream `/trades` endpoints across all supported exchanges return only the most recent N executions.
 
 ```python
 await client.get_trades(exchange: str, market_type: str, symbol: str, limit: int = 100)
@@ -223,6 +226,8 @@ await client.get_trades(exchange: str, market_type: str, symbol: str, limit: int
 * `market_type` *(str)*: Market category.
 * `symbol` *(str)*: Trading pair.
 * `limit` *(int)*: Number of trades to return.
+
+**Returns:** `pd.DataFrame` indexed by datetime.
 
 **`get_agg_trades`**
 Returns aggregated trade data.
@@ -235,8 +240,10 @@ await client.get_agg_trades(exchange: str, market_type: str, symbol: str, start:
 * `exchange` *(str)*: Adapter name.
 * `market_type` *(str)*: Market category.
 * `symbol` *(str)*: Trading pair.
-* `start` *(int)*: Optional start timestamp.
+* `start` *(int)*: Optional inclusive upper bound (Unix ms). Returns records with `ts <= start`, walking back. Omit for the most recent.
 * `limit` *(int)*: Number of results to return.
+
+**Returns:** `pd.DataFrame` indexed by datetime.
 
 <br>
 <br>
@@ -278,7 +285,7 @@ await client.get_candles(exchange: str, market_type: str, symbol: str, interval:
 * `symbol` *(str)*: Trading pair (e.g., `"BTCUSDT"`).
 * `interval` *(str)*: Timeframe (e.g., `"1m"`, `"5m"`, `"1h"`, `"1d"`).
 * `limit` *(int)*: Number of candles to return (default: 100).
-* `start` *(int)*: Optional Unix millisecond start timestamp.
+* `start` *(int)*: Optional inclusive upper bound (Unix ms). Returns candles with `ts <= start`, walking back. Omit for the most recent.
 
 **`fetch_multi_candles`**
 Batch variant of `get_candles`. Fetches OHLCV for many symbols concurrently, with a semaphore capping parallel requests.
@@ -290,6 +297,7 @@ results = await client.fetch_multi_candles(
     symbols: List[str],
     interval: str = "1h",
     limit: int = 1000,
+    start: Optional[int] = None,
     max_concurrent: int = 4
 )
 ```
@@ -300,6 +308,7 @@ results = await client.fetch_multi_candles(
 * `symbols` *(List[str])*: List of trading pairs to fetch.
 * `interval` *(str)*: Timeframe (default: `"1h"`).
 * `limit` *(int)*: Candles per symbol (default: 1000).
+* `start` *(int)*: Optional inclusive upper bound (Unix ms), applied to every symbol. Omit for the most recent candles per symbol.
 * `max_concurrent` *(int)*: Max simultaneous requests (default: 4).
 
 **Returns:** `Dict[str, pd.DataFrame]` keyed by symbol. Symbols that fail are omitted, so always iterate `results.items()` instead of assuming all input symbols are present.
@@ -341,23 +350,27 @@ await client.get_funding_rate(exchange: str, market_type: str, symbol: str, star
 * `exchange` *(str)*: Adapter name.
 * `market_type` *(str)*: `"linear"` or `"inverse"`.
 * `symbol` *(str)*: Trading pair.
-* `start` *(int)*: Optional start timestamp.
+* `start` *(int)*: Optional inclusive upper bound (Unix ms). Returns records with `ts <= start`, walking back. Omit for the most recent.
 * `limit` *(int)*: Number of results to return.
 
+**Returns:** `pd.DataFrame` indexed by datetime.
+
 **`get_open_interest`**
-Returns open interest history.
+Returns open interest history. See [Unit semantics](Exchange_Notes.md#unit-semantics) for what the `open_interest` and `value_usd` fields mean per exchange.
 
 ```python
-await client.get_open_interest(exchange: str, market_type: str, symbol: str, period: str = "1h", start: Optional[int] = None, limit: int = 100)
+await client.get_open_interest(exchange: str, market_type: str, symbol: str, period: str = "1h", start: Optional[int] = None, limit: int = 30)
 ```
 
 **Parameters:**
 * `exchange` *(str)*: Adapter name.
 * `market_type` *(str)*: `"linear"` or `"inverse"`.
 * `symbol` *(str)*: Trading pair.
-* `period` *(str)*: Accumulation interval (e.g., `"1h"`).
-* `start` *(int)*: Optional start timestamp.
-* `limit` *(int)*: Number of results to return.
+* `period` *(str)*: Data interval (e.g., `"1h"`).
+* `start` *(int)*: Optional inclusive upper bound (Unix ms). Returns records with `ts <= start`, walking back. Omit for the most recent.
+* `limit` *(int)*: Number of results to return (default: 30).
+
+**Returns:** `pd.DataFrame` indexed by datetime.
 
 **`get_liquidations`**
 Returns recent forced liquidation events.
@@ -370,11 +383,13 @@ await client.get_liquidations(exchange: str, market_type: str, symbol: str, star
 * `exchange` *(str)*: Adapter name.
 * `market_type` *(str)*: `"linear"` or `"inverse"`.
 * `symbol` *(str)*: Trading pair.
-* `start` *(int)*: Optional start timestamp.
+* `start` *(int)*: Optional inclusive upper bound (Unix ms). Returns records with `ts <= start`, walking back. Omit for the most recent.
 * `limit` *(int)*: Number of results to return.
 
+**Returns:** `pd.DataFrame` indexed by datetime.
+
 **`get_long_short_ratio`**
-Returns global long/short account ratio history.
+Returns global long/short account ratio history. Bybit ignores `start` (upstream limitation); see [Exchange Notes](Exchange_Notes.md#bybit) for details.
 
 ```python
 await client.get_long_short_ratio(exchange: str, market_type: str, symbol: str, period: str = "5m", start: Optional[int] = None, limit: int = 30)
@@ -385,7 +400,10 @@ await client.get_long_short_ratio(exchange: str, market_type: str, symbol: str, 
 * `market_type` *(str)*: `"linear"` or `"inverse"`.
 * `symbol` *(str)*: Trading pair.
 * `period` *(str)*: Data interval (e.g., `"5m"`, `"1h"`).
+* `start` *(int)*: Optional inclusive upper bound (Unix ms). Returns records with `ts <= start`, walking back. Omit for the most recent.
 * `limit` *(int)*: Number of data points (default: 30).
+
+**Returns:** `pd.DataFrame` indexed by datetime.
 
 <br>
 <br>
