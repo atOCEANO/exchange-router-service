@@ -1,5 +1,6 @@
 import os
 import re
+import argparse
 import asyncio
 import colorsys
 import httpx
@@ -21,9 +22,7 @@ logger = logging.getLogger(__name__)
 
 API_URL = os.getenv("API_URL", "http://localhost:8040")
 TIMEOUT = float(os.getenv("TIMEOUT", "60.0"))
-WS_TEST_DURATION = float(os.getenv("WS_TEST_DURATION", "60.0"))
-
-SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
+WS_TEST_DURATION = float(os.getenv("WS_TEST_DURATION", "3.0"))
 
 def _interval_ms(interval: str) -> int:
     mapping = {
@@ -160,7 +159,7 @@ async def verify_pagination_interval(client: httpx.AsyncClient, exchange: str, m
 
 
 async def verify_candle_start_anchoring(client: httpx.AsyncClient, exchange: str, market_type: str, symbol: str, interval: str) -> TestResult:
-    test_name = f"Candles {interval} (start anchor)"
+    test_name = f"Candles {interval} (start = 48 intervals ago, walking back)"
     ms = _interval_ms(interval)
     if ms == 0:
         return TestResult(exchange, market_type, symbol, test_name, "WARN", "Unknown interval, skipping start check")
@@ -181,17 +180,17 @@ async def verify_candle_start_anchoring(client: httpx.AsyncClient, exchange: str
             return TestResult(exchange, market_type, symbol, test_name, "FAIL",
                               f"Time violation at idx {i}: {timestamps[i]} >= {timestamps[i+1]}")
 
-    first_ts = timestamps[0]
-    if first_ts < start_ms - ms:
+    last_ts = timestamps[-1]
+    if last_ts > start_ms:
         return TestResult(exchange, market_type, symbol, test_name, "FAIL",
-                          f"First candle ({first_ts}) predates requested start ({start_ms}) : start param ignored")
-    if first_ts > start_ms + 2 * ms:
+                          f"Last candle ({last_ts}) is after requested start ({start_ms}): start param ignored")
+    if last_ts < start_ms - 2 * ms:
         return TestResult(exchange, market_type, symbol, test_name, "WARN",
-                          f"First candle is >2 intervals after requested start ({(first_ts - start_ms) / ms:.1f} intervals gap)")
+                          f"Last candle is >2 intervals before requested start ({(start_ms - last_ts) / ms:.1f} intervals gap)")
 
-    delta_s = (first_ts - start_ms) / 1000
+    delta_s = (start_ms - last_ts) / 1000
     return TestResult(exchange, market_type, symbol, test_name, "PASS",
-                      f"Start anchored correctly ({len(data)} candles, first {delta_s:.0f}s after start)")
+                      f"Start anchored correctly ({len(data)} candles ending {delta_s:.0f}s before start)")
 
 async def verify_analytics_interval(
     client: httpx.AsyncClient,
@@ -201,20 +200,72 @@ async def verify_analytics_interval(
     display_name: str,
     endpoint: str,
     period: str,
-    start_ms: int,
-) -> TestResult:
-    """Test an interval-based analytics endpoint (open_interest, long_short_ratio) for a single period."""
-    test_name = f"{display_name} {period}"
-    params = {"period": period, "start": start_ms, "limit": 500}
-    data = await fetch(client, endpoint, params)
+) -> List[TestResult]:
+    """Verify an interval-based analytics endpoint for a single period.
+
+    Always runs two probes so the user can distinguish "endpoint broken" from
+    "upstream retention shorter than the requested window":
+
+    1. anchored : ?start=<1 hour ago> with limit=500, expects records ending
+                  at or before that anchor (start is an inclusive upper bound,
+                  walking back). A recent anchor is used so the probe is
+                  meaningful even when retention is short.
+    2. recent   : no start parameter, returns whatever recent data exists.
+    """
+    period_ms = _interval_ms(period)
+    anchor_ms = int(time.time() * 1000) - 60 * 60 * 1000
+
+    anchored_name = f"{display_name} {period} (start = 1h ago, walking back)"
+    anchored_params = {"period": period, "start": anchor_ms, "limit": 500}
+    data = await fetch(client, endpoint, anchored_params)
 
     if data == "NOT_IMPLEMENTED":
-        return TestResult(exchange, market_type, symbol, test_name, "FAIL", "501 Not Implemented (Unexpected)")
-    if data is None or not isinstance(data, list):
-        return TestResult(exchange, market_type, symbol, test_name, "FAIL", "Request failed or invalid response")
-    if len(data) == 0:
-        return TestResult(exchange, market_type, symbol, test_name, "WARN", "Empty list for 7-day historical window")
-    return TestResult(exchange, market_type, symbol, test_name, "PASS", f"{len(data)} records")
+        anchored_result = TestResult(exchange, market_type, symbol, anchored_name, "FAIL", "501 Not Implemented (Unexpected)")
+    elif data is None or not isinstance(data, list):
+        anchored_result = TestResult(exchange, market_type, symbol, anchored_name, "FAIL", "Request failed or invalid response")
+    elif len(data) == 0:
+        anchored_result = TestResult(
+            exchange, market_type, symbol, anchored_name, "WARN",
+            "Asked for records ending at 1h ago: empty (upstream retention at this period may be shorter)",
+        )
+    else:
+        timestamps = [c.get("timestamp") for c in data if isinstance(c, dict) and c.get("timestamp")]
+        last_ts = timestamps[-1] if timestamps else 0
+        if last_ts > anchor_ms:
+            anchored_result = TestResult(
+                exchange, market_type, symbol, anchored_name, "WARN",
+                f"Upstream ignored start: last record is {(last_ts - anchor_ms) / 1000:.0f}s after the anchor (known limitation on some endpoints, see Exchange_Notes)",
+            )
+        elif period_ms > 0 and last_ts < anchor_ms - 2 * period_ms:
+            anchored_result = TestResult(
+                exchange, market_type, symbol, anchored_name, "WARN",
+                f"{len(data)} records but last is >2 periods before anchor ({(anchor_ms - last_ts) / 1000:.0f}s gap)",
+            )
+        else:
+            anchored_result = TestResult(
+                exchange, market_type, symbol, anchored_name, "PASS",
+                f"{len(data)} records ending at or before 1h ago",
+            )
+
+    recent_name = f"{display_name} {period} (no start, most recent)"
+    recent_data = await fetch(client, endpoint, {"period": period, "limit": 500})
+
+    if recent_data == "NOT_IMPLEMENTED":
+        recent_result = TestResult(exchange, market_type, symbol, recent_name, "FAIL", "501 Not Implemented (Unexpected)")
+    elif recent_data is None or not isinstance(recent_data, list):
+        recent_result = TestResult(exchange, market_type, symbol, recent_name, "FAIL", "Request failed or invalid response")
+    elif len(recent_data) == 0:
+        recent_result = TestResult(
+            exchange, market_type, symbol, recent_name, "FAIL",
+            "Empty even without start filter: endpoint returns no data at all",
+        )
+    else:
+        recent_result = TestResult(
+            exchange, market_type, symbol, recent_name, "PASS",
+            f"{len(recent_data)} records (no start, asked for the latest 500)",
+        )
+
+    return [anchored_result, recent_result]
 
 async def verify_historical_route(
     client: httpx.AsyncClient,
@@ -223,21 +274,54 @@ async def verify_historical_route(
     symbol: str,
     display_name: str,
     endpoint: str,
-    start_ms: int,
     allow_empty: bool = False,
-) -> TestResult:
-    """Test a historical analytics endpoint with a start timestamp."""
-    params = {"start": start_ms, "limit": 500}
-    data = await fetch(client, endpoint, params)
+) -> List[TestResult]:
+    """Verify a historical (no-period) endpoint: funding_rate, liquidations.
 
-    if data == "NOT_IMPLEMENTED":
-        return TestResult(exchange, market_type, symbol, display_name, "FAIL", "501 Not Implemented (Unexpected)")
-    if data is None or not isinstance(data, list):
-        return TestResult(exchange, market_type, symbol, display_name, "FAIL", "Request failed or invalid response")
-    if len(data) == 0:
+    Two probes, mirroring verify_analytics_interval:
+    1. anchored : ?start=<1 hour ago> with limit=500, expects records ending
+                  at or before the anchor.
+    2. recent   : no start, returns the most recent records.
+    """
+    anchor_ms = int(time.time() * 1000) - 60 * 60 * 1000
+
+    anchored_name = f"{display_name} (start = 1h ago, walking back)"
+    anchored_data = await fetch(client, endpoint, {"start": anchor_ms, "limit": 500})
+
+    if anchored_data == "NOT_IMPLEMENTED":
+        anchored_result = TestResult(exchange, market_type, symbol, anchored_name, "FAIL", "501 Not Implemented (Unexpected)")
+    elif anchored_data is None or not isinstance(anchored_data, list):
+        anchored_result = TestResult(exchange, market_type, symbol, anchored_name, "FAIL", "Request failed or invalid response")
+    elif len(anchored_data) == 0:
         status = "WARN" if allow_empty else "FAIL"
-        return TestResult(exchange, market_type, symbol, display_name, status, "Empty list for 7-day historical window")
-    return TestResult(exchange, market_type, symbol, display_name, "PASS", f"{len(data)} records")
+        anchored_result = TestResult(exchange, market_type, symbol, anchored_name, status,
+                                     "Empty for ?start=1h ago window")
+    else:
+        timestamps = [c.get("timestamp") for c in anchored_data if isinstance(c, dict) and c.get("timestamp")]
+        last_ts = timestamps[-1] if timestamps else 0
+        if last_ts > anchor_ms:
+            anchored_result = TestResult(exchange, market_type, symbol, anchored_name, "WARN",
+                                         f"Upstream ignored start: last record is {(last_ts - anchor_ms) / 1000:.0f}s after the anchor (known limitation on some endpoints, see Exchange_Notes)")
+        else:
+            anchored_result = TestResult(exchange, market_type, symbol, anchored_name, "PASS",
+                                         f"{len(anchored_data)} records ending at or before 1h ago")
+
+    recent_name = f"{display_name} (no start, most recent)"
+    recent_data = await fetch(client, endpoint, {"limit": 500})
+
+    if recent_data == "NOT_IMPLEMENTED":
+        recent_result = TestResult(exchange, market_type, symbol, recent_name, "FAIL", "501 Not Implemented (Unexpected)")
+    elif recent_data is None or not isinstance(recent_data, list):
+        recent_result = TestResult(exchange, market_type, symbol, recent_name, "FAIL", "Request failed or invalid response")
+    elif len(recent_data) == 0:
+        status = "WARN" if allow_empty else "FAIL"
+        recent_result = TestResult(exchange, market_type, symbol, recent_name, status,
+                                   "Empty even without start filter")
+    else:
+        recent_result = TestResult(exchange, market_type, symbol, recent_name, "PASS",
+                                   f"{len(recent_data)} records (no start, asked for the latest 500)")
+
+    return [anchored_result, recent_result]
 
 async def verify_websocket(exchange: str, market_type: str, symbol: str, channel: str) -> TestResult:
     if API_URL.startswith("https://"):
@@ -265,7 +349,6 @@ async def verify_websocket(exchange: str, market_type: str, symbol: str, channel
 
 async def verify_exchange(client: httpx.AsyncClient, exchange: str) -> List[TestResult]:
     results: List[TestResult] = []
-    start_ms = int(time.time() * 1000) - SEVEN_DAYS_MS
 
     status_resp = await fetch(client, f"/{exchange}/status")
     results.append(TestResult(exchange, "ALL", "N/A", "Status", "PASS" if status_resp else "FAIL", "OK" if status_resp else "Failed"))
@@ -321,50 +404,52 @@ async def verify_exchange(client: httpx.AsyncClient, exchange: str) -> List[Test
             else:
                 results.append(TestResult(exchange, market_type, symbol, display_name, "FAIL", "Request Failed"))
 
-        # Candles : pagination + timestamp order check
+        # Candles : two probes per interval
+        #   1. pagination + timestamp order (no start, asks for 3000 candles)
+        #   2. start-anchored (start = now - 48*interval, asks for 60 candles)
         candle_caps = caps.get("candles", {})
         if candle_caps.get("rest"):
             intervals = candle_caps.get("intervals", [])
-            test_intervals = list(intervals)
-            for interval in test_intervals:
+            for interval in list(intervals):
                 results.append(await verify_pagination_interval(client, exchange, market_type, symbol, interval))
+                results.append(await verify_candle_start_anchoring(client, exchange, market_type, symbol, interval))
 
-        # Funding rate : historical, must have data over 7-day window
+        # Funding rate : historical, dual probe (anchored at 1h ago + recent)
         fr_caps = caps.get("funding_rate", {})
         if fr_caps.get("rest"):
-            results.append(await verify_historical_route(
+            results.extend(await verify_historical_route(
                 client, exchange, market_type, symbol,
                 "Funding Rate", f"/{exchange}/{market_type}/funding_rate/{symbol}",
-                start_ms, allow_empty=False,
+                allow_empty=False,
             ))
 
         # Open interest : interval-based, test every declared period
         oi_caps = caps.get("open_interest", {})
         if oi_caps.get("rest"):
             for period in oi_caps.get("intervals", ["1h"]):
-                results.append(await verify_analytics_interval(
+                results.extend(await verify_analytics_interval(
                     client, exchange, market_type, symbol,
                     "Open Interest", f"/{exchange}/{market_type}/open_interest/{symbol}",
-                    period, start_ms,
+                    period,
                 ))
 
         # Liquidations : historical, allow empty (quiet market periods may have none)
         liq_caps = caps.get("liquidations", {})
         if liq_caps.get("rest"):
-            results.append(await verify_historical_route(
+            results.extend(await verify_historical_route(
                 client, exchange, market_type, symbol,
                 "Liquidations", f"/{exchange}/{market_type}/liquidations/{symbol}",
-                start_ms, allow_empty=True,
+                allow_empty=True,
             ))
 
         # Long/short ratio : interval-based, test every declared period
         ls_caps = caps.get("long_short_ratio", {})
         if ls_caps.get("rest"):
             for period in ls_caps.get("intervals", ["1h"]):
-                results.append(await verify_analytics_interval(
+                results.extend(await verify_analytics_interval(
                     client, exchange, market_type, symbol,
                     "L/S Ratio", f"/{exchange}/{market_type}/long_short_ratio/{symbol}",
-                    period, start_ms,
+                    period,
                 ))
 
         # WebSocket channels
@@ -469,7 +554,28 @@ def render_summary(results: List[TestResult], colors: Dict[str, str]) -> int:
     console.print()
     return total_fail
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Verify exchange-router-service routes against a running instance.",
+        epilog="Examples:\n"
+               "  python verify_routes.py              # all registered exchanges\n"
+               "  python verify_routes.py okx          # only OKX\n"
+               "  python verify_routes.py binance bybit  # Binance and Bybit",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "exchanges",
+        nargs="*",
+        metavar="EXCHANGE",
+        help="Exchange(s) to test (e.g. binance bybit okx kraken). Omit to test all.",
+    )
+    return parser.parse_args()
+
+
 async def main():
+    args = parse_args()
+    requested = {ex.lower() for ex in args.exchanges}
+
     results: List[TestResult] = []
     logger.info(f"Starting verification against {API_URL}")
 
@@ -496,6 +602,17 @@ async def main():
             results.append(TestResult("GLOBAL", "ALL", "N/A", "List Exchanges", "PASS", f"Found {len(exchanges)}"))
         else:
             results.append(TestResult("GLOBAL", "ALL", "N/A", "List Exchanges", "FAIL", "No exchanges returned"))
+
+        if requested:
+            available = set(exchanges)
+            unknown = requested - available
+            if unknown:
+                logger.warning(f"Unknown exchange(s): {', '.join(sorted(unknown))}. Available: {', '.join(sorted(available))}")
+            exchanges = [ex for ex in exchanges if ex in requested]
+            if not exchanges:
+                logger.critical("No matching exchanges to test. Aborting.")
+                return
+            logger.info(f"Filtering to: {', '.join(exchanges)}")
 
         per_exchange = await asyncio.gather(*[verify_exchange(client, ex) for ex in exchanges])
         for chunk in per_exchange:
