@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 API_URL = os.getenv("API_URL", "http://localhost:8040")
 TIMEOUT = float(os.getenv("TIMEOUT", "60.0"))
-WS_TEST_DURATION = float(os.getenv("WS_TEST_DURATION", "3.0"))
+WS_TEST_DURATION = float(os.getenv("WS_TEST_DURATION", "180.0"))
 
 def _interval_ms(interval: str) -> int:
     mapping = {
