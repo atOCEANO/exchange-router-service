@@ -138,7 +138,10 @@ async def get_trades(exchange: str, market_type: MarketType, symbol: str, limit:
 @app.get("/{exchange}/{market_type}/agg_trades/{symbol}")
 async def get_agg_trades(exchange: str, market_type: MarketType, symbol: str, start: Optional[int] = None, limit: int = Query(500, ge=1, le=10000)):
     adapter = validate_request(exchange, market_type)
-    return await adapter.get_agg_trades(market_type, symbol, start, limit)
+    try:
+        return await adapter.get_agg_trades(market_type, symbol, start, limit)
+    except NotImplementedError as e:
+        raise HTTPException(status_code=501, detail=str(e))
 
 
 @app.get("/{exchange}/{market_type}/candles/{symbol}")
