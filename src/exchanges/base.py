@@ -7,6 +7,7 @@ from src.models import (
 )
 
 
+
 class BaseExchange(ABC):
     def __init__(self):
         pass
