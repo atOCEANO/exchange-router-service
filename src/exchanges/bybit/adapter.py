@@ -11,29 +11,263 @@ from src.models import (
     MarketType, SymbolInfo, OpenInterest, FundingRate, Liquidation, LongShortRatio
 )
 
-logger = logging.getLogger("bybit_adapter")
 
-CANDLE_INTERVALS  = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w", "1M"]
-METRICS_INTERVALS = ["5m", "15m", "30m", "1h", "4h", "1d"]
+logger = logging.getLogger("bybit_adapter")
 
 
 class BybitAdapter(BaseExchange):
     def __init__(self):
         super().__init__()
         self.http_client = httpx.AsyncClient(timeout=30.0)
-        
+
         self._backoff_until = 0.0
         self._backoff_lock = asyncio.Lock()
-        
+
         self.rest_url = "https://api.bybit.com"
         self.ws_urls = {
-            MarketType.SPOT: "wss://stream.bybit.com/v5/public/spot",
-            MarketType.LINEAR: "wss://stream.bybit.com/v5/public/linear",
-            MarketType.INVERSE: "wss://stream.bybit.com/v5/public/inverse"
+            MarketType.SPOT:    "wss://stream.bybit.com/v5/public/spot",
+            MarketType.LINEAR:  "wss://stream.bybit.com/v5/public/linear",
+            MarketType.INVERSE: "wss://stream.bybit.com/v5/public/inverse",
         }
+
+        self._capabilities = self._build_capabilities()
+
 
     async def shutdown(self):
         await self.http_client.aclose()
+
+
+    @property
+    def name(self) -> str:
+        return "bybit"
+
+
+    @property
+    def supported_market_types(self) -> List[MarketType]:
+        return [MarketType.SPOT, MarketType.LINEAR, MarketType.INVERSE]
+
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        return self._capabilities
+
+
+    def _build_capabilities(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "markets": {
+                MarketType.SPOT: {
+                    "ticker": {
+                        "rest": True,
+                        "ws":   True,
+                    },
+                    "book_ticker": {
+                        "rest": True,
+                        "ws":   True,
+                    },
+                    "orderbook": {
+                        "rest":      True,
+                        "ws":        True,
+                        "depths":    [50, 200],
+                        "max_depth": 200,
+                    },
+                    "trades": {
+                        "rest":      True,
+                        "ws":        True,
+                        "max_limit": 60,
+                    },
+                    "agg_trades": {
+                        "rest":         False,
+                        "ws":           False,
+                        "paginated":    False,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                    },
+                    "candles": {
+                        "rest":         True,
+                        "ws":           False,
+                        "paginated":    True,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                        "intervals":    ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w", "1M"],
+                    },
+                    "mark_price": {
+                        "rest": False,
+                        "ws":   False,
+                    },
+                    "funding_rate": {
+                        "rest":         False,
+                        "ws":           False,
+                        "paginated":    False,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                    },
+                    "open_interest": {
+                        "rest":         False,
+                        "ws":           False,
+                        "paginated":    False,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                        "intervals":    None,
+                    },
+                    "liquidations": {
+                        "rest":         False,
+                        "ws":           False,
+                        "paginated":    False,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                    },
+                    "long_short_ratio": {
+                        "rest":         False,
+                        "ws":           False,
+                        "paginated":    False,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                        "intervals":    None,
+                    },
+                },
+                MarketType.LINEAR: {
+                    "ticker": {
+                        "rest": True,
+                        "ws":   True,
+                    },
+                    "book_ticker": {
+                        "rest": True,
+                        "ws":   True,
+                    },
+                    "orderbook": {
+                        "rest":      True,
+                        "ws":        True,
+                        "depths":    [50, 200, 500],
+                        "max_depth": 500,
+                    },
+                    "trades": {
+                        "rest":      True,
+                        "ws":        True,
+                        "max_limit": 1000,
+                    },
+                    "agg_trades": {
+                        "rest":         False,
+                        "ws":           False,
+                        "paginated":    False,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                    },
+                    "candles": {
+                        "rest":         True,
+                        "ws":           False,
+                        "paginated":    True,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                        "intervals":    ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w", "1M"],
+                    },
+                    "mark_price": {
+                        "rest": True,
+                        "ws":   False,
+                    },
+                    "funding_rate": {
+                        "rest":         True,
+                        "ws":           False,
+                        "paginated":    True,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                    },
+                    "open_interest": {
+                        "rest":         True,
+                        "ws":           False,
+                        "paginated":    True,
+                        "max_limit":    None,
+                        "retention_ms": 30 * 24 * 60 * 60 * 1000,
+                        "intervals":    ["5m", "15m", "30m", "1h", "4h", "1d"],
+                    },
+                    "liquidations": {
+                        "rest":         False,
+                        "ws":           True,
+                        "paginated":    False,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                    },
+                    "long_short_ratio": {
+                        "rest":         True,
+                        "ws":           False,
+                        "paginated":    False,
+                        "max_limit":    500,
+                        "retention_ms": 30 * 24 * 60 * 60 * 1000,
+                        "intervals":    ["5m", "15m", "30m", "1h", "4h", "1d"],
+                    },
+                },
+                MarketType.INVERSE: {
+                    "ticker": {
+                        "rest": True,
+                        "ws":   True,
+                    },
+                    "book_ticker": {
+                        "rest": True,
+                        "ws":   True,
+                    },
+                    "orderbook": {
+                        "rest":      True,
+                        "ws":        True,
+                        "depths":    [50, 200, 500],
+                        "max_depth": 500,
+                    },
+                    "trades": {
+                        "rest":      True,
+                        "ws":        True,
+                        "max_limit": 1000,
+                    },
+                    "agg_trades": {
+                        "rest":         False,
+                        "ws":           False,
+                        "paginated":    False,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                    },
+                    "candles": {
+                        "rest":         True,
+                        "ws":           False,
+                        "paginated":    True,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                        "intervals":    ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w", "1M"],
+                    },
+                    "mark_price": {
+                        "rest": True,
+                        "ws":   False,
+                    },
+                    "funding_rate": {
+                        "rest":         True,
+                        "ws":           False,
+                        "paginated":    True,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                    },
+                    "open_interest": {
+                        "rest":         True,
+                        "ws":           False,
+                        "paginated":    True,
+                        "max_limit":    None,
+                        "retention_ms": 30 * 24 * 60 * 60 * 1000,
+                        "intervals":    ["5m", "15m", "30m", "1h", "4h", "1d"],
+                    },
+                    "liquidations": {
+                        "rest":         False,
+                        "ws":           True,
+                        "paginated":    False,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                    },
+                    "long_short_ratio": {
+                        "rest":         True,
+                        "ws":           False,
+                        "paginated":    False,
+                        "max_limit":    500,
+                        "retention_ms": 30 * 24 * 60 * 60 * 1000,
+                        "intervals":    ["5m", "15m", "30m", "1h", "4h", "1d"],
+                    },
+                },
+            },
+        }
+
 
     def normalize_timestamp(self, ts: Any) -> int:
         try:
@@ -44,16 +278,10 @@ class BybitAdapter(BaseExchange):
         except (ValueError, TypeError):
             raise ValueError(f"Invalid Bybit timestamp: {ts}")
 
-    @property
-    def name(self) -> str:
-        return "bybit"
-
-    @property
-    def supported_market_types(self) -> List[MarketType]:
-        return [MarketType.SPOT, MarketType.LINEAR, MarketType.INVERSE]
 
     def normalize_symbol(self, symbol: str) -> str:
         return symbol.upper()
+
 
     def get_api_symbol(self, symbol: str, market_type: MarketType) -> str:
         s = self.normalize_symbol(symbol)
@@ -61,33 +289,41 @@ class BybitAdapter(BaseExchange):
             return s.replace("_PERP", "")
         return s
 
+
     def get_model_symbol(self, api_symbol: str, market_type: MarketType) -> str:
         s = api_symbol.upper()
         if s.endswith("_PERP"):
             s = s[:-5]
         return s
 
+
     def _get_category(self, market_type: MarketType) -> str:
-        if market_type == MarketType.SPOT: return "spot"
-        if market_type == MarketType.LINEAR: return "linear"
-        if market_type == MarketType.INVERSE: return "inverse"
+        if market_type == MarketType.SPOT:
+            return "spot"
+        if market_type == MarketType.LINEAR:
+            return "linear"
+        if market_type == MarketType.INVERSE:
+            return "inverse"
         raise ValueError(f"Unknown market type: {market_type}")
 
+
     def _interval_to_ms(self, interval: str) -> int:
-        if not interval: return 0
+        if not interval:
+            return 0
         unit = interval[-1]
         try:
             val = int(interval[:-1])
         except (ValueError, TypeError):
             return 0
-        
-        if unit == 'm': return val * 60 * 1000
-        if unit == 'h': return val * 60 * 60 * 1000
-        if unit == 'd': return val * 24 * 60 * 60 * 1000
-        if unit == 'w': return val * 7 * 24 * 60 * 60 * 1000
-        if unit == 'M': return val * 30 * 24 * 60 * 60 * 1000
-        
+
+        if unit == "m": return val * 60 * 1000
+        if unit == "h": return val * 60 * 60 * 1000
+        if unit == "d": return val * 24 * 60 * 60 * 1000
+        if unit == "w": return val * 7 * 24 * 60 * 60 * 1000
+        if unit == "M": return val * 30 * 24 * 60 * 60 * 1000
+
         return 0
+
 
     def _map_candle_interval(self, interval: str) -> str:
         if interval == "1d": return "D"
@@ -97,55 +333,12 @@ class BybitAdapter(BaseExchange):
         if interval.endswith("h"): return str(int(interval[:-1]) * 60)
         return interval
 
+
     def _map_metric_interval(self, interval: str) -> str:
-        if interval.endswith("m"): return f"{interval[:-1]}min"
+        if interval.endswith("m"):
+            return f"{interval[:-1]}min"
         return interval
 
-    def get_capabilities(self) -> Dict[str, Any]:
-        return {
-            "name": self.name,
-            "markets": {
-                MarketType.SPOT: {
-                    "candles":          {"rest": True,  "ws": False, "intervals": CANDLE_INTERVALS},
-                    "ticker":           {"rest": True,  "ws": True},
-                    "book_ticker":      {"rest": True,  "ws": True},
-                    "trades":           {"rest": True,  "ws": True},
-                    "agg_trades":       {"rest": False, "ws": False},
-                    "orderbook":        {"rest": True,  "ws": True},
-                    "mark_price":       {"rest": False, "ws": False},
-                    "open_interest":    {"rest": False, "ws": False},
-                    "funding_rate":     {"rest": False, "ws": False},
-                    "long_short_ratio": {"rest": False, "ws": False},
-                    "liquidations":     {"rest": False, "ws": False},
-                },
-                MarketType.LINEAR: {
-                    "candles":          {"rest": True, "ws": False, "intervals": CANDLE_INTERVALS},
-                    "ticker":           {"rest": True, "ws": True},
-                    "book_ticker":      {"rest": True, "ws": True},
-                    "trades":           {"rest": True, "ws": True},
-                    "agg_trades":       {"rest": False, "ws": False},
-                    "orderbook":        {"rest": True, "ws": True},
-                    "mark_price":       {"rest": True, "ws": False},
-                    "open_interest":    {"rest": True, "ws": False, "intervals": METRICS_INTERVALS},
-                    "funding_rate":     {"rest": True, "ws": False},
-                    "long_short_ratio": {"rest": True, "ws": False, "intervals": METRICS_INTERVALS},
-                    "liquidations":     {"rest": False, "ws": True},
-                },
-                MarketType.INVERSE: {
-                    "candles":          {"rest": True, "ws": False, "intervals": CANDLE_INTERVALS},
-                    "ticker":           {"rest": True, "ws": True},
-                    "book_ticker":      {"rest": True, "ws": True},
-                    "trades":           {"rest": True, "ws": True},
-                    "agg_trades":       {"rest": False, "ws": False},
-                    "orderbook":        {"rest": True, "ws": True},
-                    "mark_price":       {"rest": True, "ws": False},
-                    "open_interest":    {"rest": True, "ws": False, "intervals": METRICS_INTERVALS},
-                    "funding_rate":     {"rest": True, "ws": False},
-                    "long_short_ratio": {"rest": True, "ws": False, "intervals": METRICS_INTERVALS},
-                    "liquidations":     {"rest": False, "ws": True},
-                },
-            }
-        }
 
     async def _make_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Any:
         url = f"{self.rest_url}{endpoint}"
@@ -201,19 +394,21 @@ class BybitAdapter(BaseExchange):
                 logger.error(f"HTTP Error: {e}")
                 raise e
             except Exception as e:
-                if isinstance(e, ValueError): raise e
+                if isinstance(e, ValueError):
+                    raise e
                 logger.error(f"Request Error: {e}")
                 retries -= 1
                 await asyncio.sleep(1)
 
         raise Exception(f"Max retries exceeded for {url}")
 
+
     async def _paginate_backwards(self, fetch_func_by_end: Callable, total_limit: int, limit_per_req: int) -> List[Any]:
         chunks = []
         seen = set()
         collected_count = 0
         current_end = None
-        max_requests = 50
+        max_requests = 100
         request_count = 0
 
         while collected_count < total_limit and request_count < max_requests:
@@ -223,31 +418,43 @@ class BybitAdapter(BaseExchange):
             except (httpx.HTTPStatusError, ValueError):
                 break
 
-            if not batch: break
+            if not batch:
+                break
 
             batch.sort(key=lambda x: x.timestamp)
-            new_items = [x for x in batch if x.timestamp not in seen]
-            if not new_items: break
-            for x in new_items: seen.add(x.timestamp)
+            new_items = []
+            for x in batch:
+                key = x.model_dump_json()
+                if key not in seen:
+                    seen.add(key)
+                    new_items.append(x)
+            if not new_items:
+                break
 
             chunks.append(new_items)
             collected_count += len(new_items)
             request_count += 1
 
-            if not hasattr(batch[0], 'timestamp'): break
+            if not hasattr(batch[0], "timestamp"):
+                break
             next_end = batch[0].timestamp - 1
-            if next_end <= 0 or (current_end is not None and next_end >= current_end): break
+            if next_end <= 0 or (current_end is not None and next_end >= current_end):
+                break
             current_end = next_end
+
+        if request_count >= max_requests and collected_count < total_limit:
+            logger.warning(f"Bybit pagination hit {max_requests}-page safety cap with {collected_count}/{total_limit} records; result truncated")
 
         chunks.reverse()
         final_results = [item for chunk in chunks for item in chunk]
         final_results.sort(key=lambda x: x.timestamp)
         return final_results[-total_limit:]
 
+
     async def _ws_connect(self, market_type: MarketType, topics: list) -> AsyncGenerator[Dict, None]:
         url = self.ws_urls[market_type]
         reconnect_delay = 1
-        
+
         while True:
             try:
                 async with websockets.connect(url) as ws:
@@ -268,14 +475,230 @@ class BybitAdapter(BaseExchange):
                                 logger.error(f"Sub failed: {data}")
                             if "topic" in data:
                                 yield data
-                        except json.JSONDecodeError: pass
-                            
+                        except json.JSONDecodeError:
+                            pass
+
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.warning(f"WS Disconnected ({e}). Reconnecting in {reconnect_delay}s...")
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(reconnect_delay * 2, 30)
+
+
+    async def get_ticker(self, market_type: MarketType, symbol: str) -> Ticker:
+        cat = self._get_category(market_type)
+        api_symbol = self.get_api_symbol(symbol, market_type)
+
+        data = await self._make_request("GET", "/v5/market/tickers", {"category": cat, "symbol": api_symbol})
+        if not data["list"]:
+            raise ValueError(f"Symbol {api_symbol} not found")
+        t = data["list"][0]
+
+        return Ticker(
+            symbol=self.get_model_symbol(t["symbol"], market_type),
+            price=float(t["lastPrice"]),
+            open_24h=float(t["prevPrice24h"]),
+            high_24h=float(t["highPrice24h"]),
+            low_24h=float(t["lowPrice24h"]),
+            volume_24h=float(t["volume24h"]),
+            quote_volume_24h=float(t["turnover24h"]),
+            price_change_percent=float(t["price24hPcnt"]) * 100,
+            timestamp=self.normalize_timestamp(t.get("ts") or int(time.time() * 1000)),
+        )
+
+
+    async def get_book_ticker(self, market_type: MarketType, symbol: str) -> BookTicker:
+        cat = self._get_category(market_type)
+        api_symbol = self.get_api_symbol(symbol, market_type)
+
+        data = await self._make_request("GET", "/v5/market/tickers", {"category": cat, "symbol": api_symbol})
+        t = data["list"][0]
+
+        return BookTicker(
+            symbol=self.get_model_symbol(t["symbol"], market_type),
+            bid_price=float(t.get("bid1Price", 0)),
+            bid_qty=float(t.get("bid1Size", 0)),
+            ask_price=float(t.get("ask1Price", 0)),
+            ask_qty=float(t.get("ask1Size", 0)),
+            timestamp=int(time.time() * 1000),
+        )
+
+
+    async def get_orderbook(self, market_type: MarketType, symbol: str, depth: int = 20) -> OrderBook:
+        cat = self._get_category(market_type)
+        api_symbol = self.get_api_symbol(symbol, market_type)
+
+        ob_caps = self.get_capabilities()["markets"][market_type]["orderbook"]
+        discrete_depth_bucket = next((d for d in ob_caps["depths"] if d >= depth), ob_caps["max_depth"])
+
+        data = await self._make_request("GET", "/v5/market/orderbook", {"category": cat, "symbol": api_symbol, "limit": discrete_depth_bucket})
+
+        return OrderBook(
+            symbol=self.get_model_symbol(data["s"], market_type),
+            bids=[[float(p), float(q)] for p, q in data["b"][:depth]],
+            asks=[[float(p), float(q)] for p, q in data["a"][:depth]],
+            timestamp=self.normalize_timestamp(data["ts"]),
+        )
+
+
+    async def get_trades(self, market_type: MarketType, symbol: str, limit: int = 100) -> List[Trade]:
+        cat = self._get_category(market_type)
+        api_symbol = self.get_api_symbol(symbol, market_type)
+
+        max_limit = self.get_capabilities()["markets"][market_type]["trades"]["max_limit"]
+        req_limit = min(limit, max_limit)
+
+        data = await self._make_request("GET", "/v5/market/recent-trade", {"category": cat, "symbol": api_symbol, "limit": req_limit})
+
+        trades = [Trade(
+            id=t["execId"],
+            price=float(t["price"]),
+            qty=float(t["size"]),
+            side=t["side"].lower(),
+            timestamp=self.normalize_timestamp(t["time"]),
+        ) for t in data["list"]]
+        trades.sort(key=lambda t: t.timestamp)
+
+        return trades[-limit:]
+
+
+    async def get_agg_trades(self, market_type: MarketType, symbol: str, start_time: Optional[int] = None, limit: int = 500) -> List[AggTrade]:
+        raise NotImplementedError(f"{self.name} does not support agg_trades for {market_type.value}")
+
+
+    async def get_candles(self, market_type: MarketType, symbol: str, interval: str, start_time: Optional[int] = None, limit: int = 100) -> List[Candle]:
+        cat = self._get_category(market_type)
+        api_symbol = self.get_api_symbol(symbol, market_type)
+
+        bybit_interval = self._map_candle_interval(interval)
+
+        max_per_req = 1000
+
+        async def fetch_by_end(end_ts, l):
+            anchor = end_ts if end_ts is not None else start_time
+            p = {"category": cat, "symbol": api_symbol, "interval": bybit_interval, "limit": min(l, max_per_req)}
+            if anchor:
+                p["end"] = anchor
+            data = await self._make_request("GET", "/v5/market/kline", p)
+            if not data["list"]:
+                return []
+
+            parsed = [Candle(
+                timestamp=self.normalize_timestamp(k[0]),
+                open=float(k[1]),
+                high=float(k[2]),
+                low=float(k[3]),
+                close=float(k[4]),
+                volume=float(k[5]),
+            ) for k in data["list"]]
+
+            return sorted(parsed, key=lambda x: x.timestamp)
+
+        if start_time is not None or limit > max_per_req:
+            return await self._paginate_backwards(fetch_by_end, limit, max_per_req)
+        return await fetch_by_end(None, limit)
+
+
+    async def get_mark_price(self, market_type: MarketType, symbol: str) -> MarkPrice:
+        if market_type == MarketType.SPOT:
+            raise NotImplementedError(f"{self.name} does not support mark_price for {market_type.value}")
+        cat = self._get_category(market_type)
+        api_symbol = self.get_api_symbol(symbol, market_type)
+
+        data = await self._make_request("GET", "/v5/market/tickers", {"category": cat, "symbol": api_symbol})
+        t = data["list"][0]
+
+        return MarkPrice(
+            symbol=self.get_model_symbol(t["symbol"], market_type),
+            mark_price=float(t["markPrice"]),
+            index_price=float(t["indexPrice"]),
+            funding_rate=float(t.get("fundingRate", 0)),
+            next_funding_time=int(t.get("nextFundingTime", 0)),
+            timestamp=self.normalize_timestamp(t.get("ts") or int(time.time() * 1000)),
+        )
+
+
+    async def get_funding_rate(self, market_type: MarketType, symbol: str, start_time: Optional[int] = None, limit: int = 100) -> List[FundingRate]:
+        if market_type == MarketType.SPOT:
+            raise NotImplementedError(f"{self.name} does not support funding_rate for {market_type.value}")
+        cat = self._get_category(market_type)
+        api_symbol = self.get_api_symbol(symbol, market_type)
+
+        max_per_req = 200
+
+        async def fetch_backwards(end_ts, l):
+            anchor = end_ts if end_ts is not None else start_time
+            p = {"category": cat, "symbol": api_symbol, "limit": min(l, max_per_req)}
+            if anchor:
+                p["endTime"] = anchor
+            data = await self._make_request("GET", "/v5/market/funding/history", p)
+
+            parsed = [FundingRate(
+                symbol=self.get_model_symbol(api_symbol, market_type),
+                rate=float(i["fundingRate"]),
+                timestamp=self.normalize_timestamp(i["fundingRateTimestamp"]),
+            ) for i in data.get("list", [])]
+            return sorted(parsed, key=lambda x: x.timestamp)
+
+        return await self._paginate_backwards(fetch_backwards, limit, max_per_req)
+
+
+    async def get_open_interest(self, market_type: MarketType, symbol: str, period: str = "1h", start_time: Optional[int] = None, limit: int = 30) -> List[OpenInterest]:
+        if market_type == MarketType.SPOT:
+            raise NotImplementedError(f"{self.name} does not support open_interest for {market_type.value}")
+        cat = self._get_category(market_type)
+        api_symbol = self.get_api_symbol(symbol, market_type)
+
+        interval = self._map_metric_interval(period)
+        max_per_req = 200
+
+        async def fetch_backwards(end_ts, l):
+            anchor = end_ts if end_ts is not None else start_time
+            p = {"category": cat, "symbol": api_symbol, "intervalTime": interval, "limit": min(l, max_per_req)}
+            if anchor:
+                p["endTime"] = anchor
+
+            data = await self._make_request("GET", "/v5/market/open-interest", p)
+
+            res_list = [OpenInterest(
+                symbol=self.get_model_symbol(api_symbol, market_type),
+                open_interest=float(i["openInterest"]),
+                value_usd=0.0,
+                timestamp=self.normalize_timestamp(i["timestamp"]),
+            ) for i in data["list"]]
+
+            return sorted(res_list, key=lambda x: x.timestamp)
+
+        return await self._paginate_backwards(fetch_backwards, limit, max_per_req)
+
+
+    async def get_long_short_ratio(self, market_type: MarketType, symbol: str, period: str = "5m", start_time: Optional[int] = None, limit: int = 30) -> List[LongShortRatio]:
+        if market_type == MarketType.SPOT:
+            raise NotImplementedError(f"{self.name} does not support long_short_ratio for {market_type.value}")
+        cat = self._get_category(market_type)
+        api_symbol = self.get_api_symbol(symbol, market_type)
+        interval = self._map_metric_interval(period)
+
+        if start_time:
+            logger.warning("Bybit /v5/market/account-ratio does not support a time anchor; returning most recent data only.")
+
+        max_limit = self.get_capabilities()["markets"][market_type]["long_short_ratio"]["max_limit"]
+        req_limit = min(limit, max_limit)
+        p = {"category": cat, "symbol": api_symbol, "period": interval, "limit": req_limit}
+
+        data = await self._make_request("GET", "/v5/market/account-ratio", p)
+
+        results = [LongShortRatio(
+            symbol=self.get_model_symbol(api_symbol, market_type),
+            ratio=float(i["buyRatio"]) / float(i["sellRatio"]) if float(i["sellRatio"]) > 0 else 0,
+            long_account=float(i["buyRatio"]),
+            short_account=float(i["sellRatio"]),
+            timestamp=self.normalize_timestamp(i["timestamp"]),
+        ) for i in data["list"]]
+
+        return sorted(results, key=lambda x: x.timestamp)
+
 
     async def get_exchange_info(self, market_type: MarketType) -> List[SymbolInfo]:
         cat = self._get_category(market_type)
@@ -284,12 +707,17 @@ class BybitAdapter(BaseExchange):
             params["contractType"] = "LinearPerpetual"
         elif market_type == MarketType.INVERSE:
             params["contractType"] = "InversePerpetual"
+
         data = await self._make_request("GET", "/v5/market/instruments-info", params)
+
         results = []
         for s in data["list"]:
-            if s["status"] != "Trading": continue
-            if market_type == MarketType.LINEAR and s.get("contractType") != "LinearPerpetual": continue
-            if market_type == MarketType.INVERSE and s.get("contractType") != "InversePerpetual": continue
+            if s["status"] != "Trading":
+                continue
+            if market_type == MarketType.LINEAR and s.get("contractType") != "LinearPerpetual":
+                continue
+            if market_type == MarketType.INVERSE and s.get("contractType") != "InversePerpetual":
+                continue
             min_qty, max_qty, min_notional = 0.0, 0.0, 0.0
             if "lotSizeFilter" in s:
                 min_qty = float(s["lotSizeFilter"].get("minOrderQty", 0))
@@ -302,198 +730,22 @@ class BybitAdapter(BaseExchange):
                 quote_asset=s["quoteCoin"],
                 price_precision=int(len(s.get("priceFilter", {}).get("tickSize", "0.01").split(".")[-1])),
                 quantity_precision=int(len(s.get("lotSizeFilter", {}).get("qtyStep", "0.001").split(".")[-1])),
-                min_qty=min_qty, max_qty=max_qty, min_notional=min_notional,
+                min_qty=min_qty,
+                max_qty=max_qty,
+                min_notional=min_notional,
             ))
         return results
+
 
     async def get_markets(self, market_type: MarketType) -> List[str]:
         info = await self.get_exchange_info(market_type)
         return [s.symbol for s in info]
 
-    async def get_ticker(self, market_type: MarketType, symbol: str) -> Ticker:
-        cat = self._get_category(market_type)
-        api_symbol = self.get_api_symbol(symbol, market_type)
-        
-        data = await self._make_request("GET", "/v5/market/tickers", {"category": cat, "symbol": api_symbol})
-        if not data["list"]: raise ValueError(f"Symbol {api_symbol} not found")
-        t = data["list"][0]
-        
-        return Ticker(
-            symbol=self.get_model_symbol(t["symbol"], market_type),
-            price=float(t["lastPrice"]),
-            open_24h=float(t["prevPrice24h"]),
-            high_24h=float(t["highPrice24h"]),
-            low_24h=float(t["lowPrice24h"]),
-            volume_24h=float(t["volume24h"]),
-            quote_volume_24h=float(t["turnover24h"]),
-            price_change_percent=float(t["price24hPcnt"]) * 100,
-            timestamp=self.normalize_timestamp(t.get("ts") or int(time.time() * 1000))
-        )
-
-    async def get_book_ticker(self, market_type: MarketType, symbol: str) -> BookTicker:
-        cat = self._get_category(market_type)
-        api_symbol = self.get_api_symbol(symbol, market_type)
-        
-        data = await self._make_request("GET", "/v5/market/tickers", {"category": cat, "symbol": api_symbol})
-        t = data["list"][0]
-        return BookTicker(
-            symbol=self.get_model_symbol(t["symbol"], market_type),
-            bid_price=float(t.get("bid1Price", 0)),
-            bid_qty=float(t.get("bid1Size", 0)),
-            ask_price=float(t.get("ask1Price", 0)),
-            ask_qty=float(t.get("ask1Size", 0)),
-            timestamp=int(time.time() * 1000)
-        )
-
-    async def get_mark_price(self, market_type: MarketType, symbol: str) -> MarkPrice:
-        if market_type == MarketType.SPOT: raise NotImplementedError("Spot has no mark price")
-        cat = self._get_category(market_type)
-        api_symbol = self.get_api_symbol(symbol, market_type)
-        
-        data = await self._make_request("GET", "/v5/market/tickers", {"category": cat, "symbol": api_symbol})
-        t = data["list"][0]
-        return MarkPrice(
-            symbol=self.get_model_symbol(t["symbol"], market_type),
-            mark_price=float(t["markPrice"]),
-            index_price=float(t["indexPrice"]),
-            funding_rate=float(t.get("fundingRate", 0)),
-            next_funding_time=int(t.get("nextFundingTime", 0)),
-            timestamp=self.normalize_timestamp(t.get("ts") or int(time.time() * 1000))
-        )
-
-    async def get_orderbook(self, market_type: MarketType, symbol: str, depth: int = 20) -> OrderBook:
-        cat = self._get_category(market_type)
-        api_symbol = self.get_api_symbol(symbol, market_type)
-        
-        valid_limit = 50
-        if depth <= 1: valid_limit = 1
-        elif depth <= 50: valid_limit = 50
-        elif depth <= 200: valid_limit = 200
-        elif market_type != MarketType.SPOT and depth <= 500: valid_limit = 500
-        
-        data = await self._make_request("GET", "/v5/market/orderbook", {"category": cat, "symbol": api_symbol, "limit": valid_limit})
-        return OrderBook(
-            symbol=self.get_model_symbol(data["s"], market_type),
-            bids=[[float(p), float(q)] for p, q in data["b"]],
-            asks=[[float(p), float(q)] for p, q in data["a"]],
-            timestamp=self.normalize_timestamp(data["ts"])
-        )
-
-    async def get_trades(self, market_type: MarketType, symbol: str, limit: int = 100) -> List[Trade]:
-        cat = self._get_category(market_type)
-        api_symbol = self.get_api_symbol(symbol, market_type)
-        
-        req_limit = min(limit, 60 if market_type == MarketType.SPOT else 1000)
-        data = await self._make_request("GET", "/v5/market/recent-trade", {"category": cat, "symbol": api_symbol, "limit": req_limit})
-        return [Trade(
-            id=t["execId"],
-            price=float(t["price"]),
-            qty=float(t["size"]),
-            side=t["side"].lower(),
-            timestamp=self.normalize_timestamp(t["time"])
-        ) for t in data["list"]]
-
-    async def get_agg_trades(self, market_type: MarketType, symbol: str, start_time: Optional[int] = None, limit: int = 500) -> List[AggTrade]:
-        raise NotImplementedError("Bybit does not expose aggregated trade history; use get_trades for raw executions.")
-
-    async def get_candles(self, market_type: MarketType, symbol: str, interval: str, start_time: Optional[int] = None, limit: int = 100) -> List[Candle]:
-        cat = self._get_category(market_type)
-        api_symbol = self.get_api_symbol(symbol, market_type)
-
-        bybit_interval = self._map_candle_interval(interval)
-
-        MAX_PER_REQ = 1000
-
-        async def fetch_by_end(end_ts, l):
-            anchor = end_ts if end_ts is not None else start_time
-            p = {"category": cat, "symbol": api_symbol, "interval": bybit_interval, "limit": min(l, MAX_PER_REQ)}
-            if anchor: p["end"] = anchor
-            data = await self._make_request("GET", "/v5/market/kline", p)
-            if not data["list"]: return []
-
-            parsed = [Candle(
-                timestamp=self.normalize_timestamp(k[0]),
-                open=float(k[1]), high=float(k[2]), low=float(k[3]), close=float(k[4]), volume=float(k[5])
-            ) for k in data["list"]]
-
-            return sorted(parsed, key=lambda x: x.timestamp)
-
-        if start_time is not None or limit > MAX_PER_REQ:
-            return await self._paginate_backwards(fetch_by_end, limit, MAX_PER_REQ)
-        return await fetch_by_end(None, limit)
-
-    async def get_open_interest(self, market_type: MarketType, symbol: str, period: str = "1h", start_time: Optional[int] = None, limit: int = 30) -> List[OpenInterest]:
-        if market_type == MarketType.SPOT: raise NotImplementedError()
-        cat = self._get_category(market_type)
-        api_symbol = self.get_api_symbol(symbol, market_type)
-
-        interval = self._map_metric_interval(period)
-
-        async def fetch_backwards(end_ts, l):
-            anchor = end_ts if end_ts is not None else start_time
-            p = {"category": cat, "symbol": api_symbol, "intervalTime": interval, "limit": min(l, 200)}
-            if anchor: p["endTime"] = anchor
-
-            data = await self._make_request("GET", "/v5/market/open-interest", p)
-
-            res_list = [OpenInterest(
-                symbol=self.get_model_symbol(api_symbol, market_type),
-                open_interest=float(i["openInterest"]),
-                value_usd=0.0,
-                timestamp=self.normalize_timestamp(i["timestamp"])
-            ) for i in data["list"]]
-
-            return sorted(res_list, key=lambda x: x.timestamp)
-
-        return await self._paginate_backwards(fetch_backwards, limit, 200)
-
-    async def get_funding_rate(self, market_type: MarketType, symbol: str, start_time: Optional[int] = None, limit: int = 100) -> List[FundingRate]:
-        if market_type == MarketType.SPOT: raise NotImplementedError()
-        cat = self._get_category(market_type)
-        api_symbol = self.get_api_symbol(symbol, market_type)
-
-        async def fetch_backwards(end_ts, l):
-            anchor = end_ts if end_ts is not None else start_time
-            p = {"category": cat, "symbol": api_symbol, "limit": min(l, 200)}
-            if anchor: p["endTime"] = anchor
-            data = await self._make_request("GET", "/v5/market/funding/history", p)
-
-            parsed = [FundingRate(
-                symbol=self.get_model_symbol(api_symbol, market_type),
-                rate=float(i["fundingRate"]),
-                timestamp=self.normalize_timestamp(i["fundingRateTimestamp"])
-            ) for i in data.get("list", [])]
-            return sorted(parsed, key=lambda x: x.timestamp)
-
-        return await self._paginate_backwards(fetch_backwards, limit, 200)
-
-    async def get_long_short_ratio(self, market_type: MarketType, symbol: str, period: str = "5m", start_time: Optional[int] = None, limit: int = 30) -> List[LongShortRatio]:
-        if market_type == MarketType.SPOT: raise NotImplementedError()
-        cat = self._get_category(market_type)
-        api_symbol = self.get_api_symbol(symbol, market_type)
-        interval = self._map_metric_interval(period)
-
-        if start_time:
-            logger.warning("Bybit /v5/market/account-ratio does not support a time anchor; returning most recent data only.")
-
-        req_limit = min(limit, 500)
-        p = {"category": cat, "symbol": api_symbol, "period": interval, "limit": req_limit}
-        
-        data = await self._make_request("GET", "/v5/market/account-ratio", p)
-        
-        results = [LongShortRatio(
-            symbol=self.get_model_symbol(api_symbol, market_type),
-            ratio=float(i["buyRatio"]) / float(i["sellRatio"]) if float(i["sellRatio"]) > 0 else 0,
-            long_account=float(i["buyRatio"]),
-            short_account=float(i["sellRatio"]),
-            timestamp=self.normalize_timestamp(i["timestamp"])
-        ) for i in data["list"]]
-        
-        return sorted(results, key=lambda x: x.timestamp)
 
     async def stream_ticker(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Ticker, None]:
         api_symbol = self.get_api_symbol(symbol, market_type)
         topic = f"tickers.{api_symbol}"
+
         async for msg in self._ws_connect(market_type, [topic]):
             d = msg["data"]
             yield Ticker(
@@ -505,29 +757,57 @@ class BybitAdapter(BaseExchange):
                 volume_24h=float(d.get("volume24h", 0)),
                 quote_volume_24h=float(d.get("turnover24h", 0)),
                 price_change_percent=float(d.get("price24hPcnt", 0)) * 100,
-                timestamp=self.normalize_timestamp(msg.get("ts", time.time()))
+                timestamp=self.normalize_timestamp(msg.get("ts", time.time())),
             )
+
 
     async def stream_book_ticker(self, market_type: MarketType, symbol: str) -> AsyncGenerator[BookTicker, None]:
         api_symbol = self.get_api_symbol(symbol, market_type)
         topic = f"orderbook.1.{api_symbol}"
+
         async for msg in self._ws_connect(market_type, [topic]):
             d = msg["data"]
             bids = d.get("b", [])
             asks = d.get("a", [])
-            if not bids or not asks: continue
+            if not bids or not asks:
+                continue
             yield BookTicker(
                 symbol=self.get_model_symbol(d.get("s", api_symbol), market_type),
                 bid_price=float(bids[0][0]),
                 bid_qty=float(bids[0][1]),
                 ask_price=float(asks[0][0]),
                 ask_qty=float(asks[0][1]),
-                timestamp=self.normalize_timestamp(msg.get("ts"))
+                timestamp=self.normalize_timestamp(msg.get("ts")),
             )
+
+
+    async def stream_orderbook(self, market_type: MarketType, symbol: str, depth: int = 20, update_speed: str = "100ms") -> AsyncGenerator[OrderBook, None]:
+        api_symbol = self.get_api_symbol(symbol, market_type)
+
+        if depth <= 1:
+            lvl = 1
+        elif depth <= 50:
+            lvl = 50
+        elif depth <= 200:
+            lvl = 200
+        else:
+            lvl = 500
+        topic = f"orderbook.{lvl}.{api_symbol}"
+
+        async for msg in self._ws_connect(market_type, [topic]):
+            d = msg["data"]
+            yield OrderBook(
+                symbol=self.get_model_symbol(d.get("s", api_symbol), market_type),
+                bids=[[float(p), float(q)] for p, q in d.get("b", [])],
+                asks=[[float(p), float(q)] for p, q in d.get("a", [])],
+                timestamp=self.normalize_timestamp(msg.get("ts")),
+            )
+
 
     async def stream_trades(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Trade, None]:
         api_symbol = self.get_api_symbol(symbol, market_type)
         topic = f"publicTrade.{api_symbol}"
+
         async for msg in self._ws_connect(market_type, [topic]):
             for t in msg.get("data", []):
                 yield Trade(
@@ -535,30 +815,16 @@ class BybitAdapter(BaseExchange):
                     price=float(t["p"]),
                     qty=float(t["v"]),
                     side=t["S"].lower(),
-                    timestamp=self.normalize_timestamp(t["T"])
+                    timestamp=self.normalize_timestamp(t["T"]),
                 )
 
-    async def stream_orderbook(self, market_type: MarketType, symbol: str, depth: int = 20, update_speed: str = "100ms") -> AsyncGenerator[OrderBook, None]:
-        api_symbol = self.get_api_symbol(symbol, market_type)
-        lvl = 50
-        if depth <= 1: lvl = 1
-        elif depth <= 50: lvl = 50
-        elif depth <= 200: lvl = 200
-        else: lvl = 500
-        topic = f"orderbook.{lvl}.{api_symbol}"
-        async for msg in self._ws_connect(market_type, [topic]):
-            d = msg["data"]
-            yield OrderBook(
-                symbol=self.get_model_symbol(d.get("s", api_symbol), market_type),
-                bids=[[float(p), float(q)] for p, q in d.get("b", [])],
-                asks=[[float(p), float(q)] for p, q in d.get("a", [])],
-                timestamp=self.normalize_timestamp(msg.get("ts"))
-            )
 
     async def stream_liquidations(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Liquidation, None]:
-        if market_type == MarketType.SPOT: raise NotImplementedError()
+        if market_type == MarketType.SPOT:
+            raise NotImplementedError(f"{self.name} does not support stream_liquidations for {market_type.value}")
         api_symbol = self.get_api_symbol(symbol, market_type)
         topic = f"allLiquidation.{api_symbol}"
+
         async for msg in self._ws_connect(market_type, [topic]):
             for d in msg.get("data", []):
                 yield Liquidation(
@@ -566,5 +832,5 @@ class BybitAdapter(BaseExchange):
                     side=d.get("S", "").lower(),
                     price=float(d.get("p", 0)),
                     qty=float(d.get("v", 0)),
-                    timestamp=self.normalize_timestamp(d.get("T", msg.get("ts")))
+                    timestamp=self.normalize_timestamp(d.get("T", msg.get("ts"))),
                 )
