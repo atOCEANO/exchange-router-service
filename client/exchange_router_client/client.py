@@ -51,9 +51,9 @@ class ExchangeRouterClient:
                 logger.warning(f"Server Error {e.response.status_code}. Retrying ({attempt+1}/{self.max_retries})...")
                 attempt += 1
                 await asyncio.sleep(1 * attempt)
-            except (httpx.ConnectError, httpx.ReadTimeout) as e:
+            except httpx.TransportError as e:
                 last_error = f"{type(e).__name__}: {e}"
-                logger.warning(f"Connection Error: {e}. Retrying ({attempt+1}/{self.max_retries})...")
+                logger.warning(f"Transport Error: {e}. Retrying ({attempt+1}/{self.max_retries})...")
                 attempt += 1
                 await asyncio.sleep(1 * attempt)
             except Exception as e:
