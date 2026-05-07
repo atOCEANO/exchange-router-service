@@ -11,24 +11,27 @@ class StreamManager:
     def __init__(self):
         self.active_streams: Dict[str, Dict[uuid.UUID, WebSocket]] = {}
         self.upstream_tasks: Dict[str, asyncio.Task] = {}
+        self._lock = asyncio.Lock()
 
     async def subscribe(self, key: str, websocket: WebSocket, adapter, market_type, channel, symbol) -> uuid.UUID:
         client_id = uuid.uuid4()
-        if key not in self.active_streams:
-            self.active_streams[key] = {}
-            self.upstream_tasks[key] = asyncio.create_task(
-                self._upstream_handler(key, adapter, market_type, channel, symbol)
-            )
-        self.active_streams[key][client_id] = websocket
+        async with self._lock:
+            if key not in self.active_streams:
+                self.active_streams[key] = {}
+                self.upstream_tasks[key] = asyncio.create_task(
+                    self._upstream_handler(key, adapter, market_type, channel, symbol)
+                )
+            self.active_streams[key][client_id] = websocket
         return client_id
 
     async def unsubscribe(self, key: str, client_id: uuid.UUID):
-        if key in self.active_streams:
-            self.active_streams[key].pop(client_id, None)
-            if not self.active_streams[key]:
-                self.upstream_tasks[key].cancel()
-                self.upstream_tasks.pop(key, None)
-                self.active_streams.pop(key, None)
+        async with self._lock:
+            if key in self.active_streams:
+                self.active_streams[key].pop(client_id, None)
+                if not self.active_streams[key]:
+                    self.upstream_tasks[key].cancel()
+                    self.upstream_tasks.pop(key, None)
+                    self.active_streams.pop(key, None)
 
     async def shutdown(self):
         for task in self.upstream_tasks.values():

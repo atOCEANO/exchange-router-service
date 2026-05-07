@@ -14,7 +14,9 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s:     %(name)s - %(
 
 stream_manager = StreamManager()
 
-SERVICE_VERSION = "1.0.3"
+SERVICE_VERSION = "1.0.4"
+
+KNOWN_WS_CHANNELS = {"ticker", "book_ticker", "mark_price", "agg_trades", "trades", "orderbook", "liquidations"}
 
 
 @asynccontextmanager
@@ -45,6 +47,14 @@ async def value_error_exception_handler(_request: Request, exc: ValueError):
     return JSONResponse(
         status_code=400,
         content={"error": "Invalid Request", "detail": str(exc)},
+    )
+
+
+@app.exception_handler(NotImplementedError)
+async def not_implemented_exception_handler(_request: Request, exc: NotImplementedError):
+    return JSONResponse(
+        status_code=501,
+        content={"error": "Not Implemented", "detail": str(exc)},
     )
 
 
@@ -117,73 +127,55 @@ async def get_book_ticker(exchange: str, market_type: MarketType, symbol: str):
 @app.get("/{exchange}/{market_type}/mark_price/{symbol}")
 async def get_mark_price(exchange: str, market_type: MarketType, symbol: str):
     adapter = validate_request(exchange, market_type)
-    try:
-        return await adapter.get_mark_price(market_type, symbol)
-    except NotImplementedError as e:
-        raise HTTPException(status_code=501, detail=str(e))
+    return await adapter.get_mark_price(market_type, symbol)
 
 
 @app.get("/{exchange}/{market_type}/orderbook/{symbol}")
-async def get_orderbook(exchange: str, market_type: MarketType, symbol: str, depth: int = Query(20, ge=1, le=100)):
+async def get_orderbook(exchange: str, market_type: MarketType, symbol: str, depth: int = Query(20, ge=1)):
     adapter = validate_request(exchange, market_type)
     return await adapter.get_orderbook(market_type, symbol, depth)
 
 
 @app.get("/{exchange}/{market_type}/trades/{symbol}")
-async def get_trades(exchange: str, market_type: MarketType, symbol: str, limit: int = Query(100, ge=1, le=1000)):
+async def get_trades(exchange: str, market_type: MarketType, symbol: str, limit: int = Query(100, ge=1)):
     adapter = validate_request(exchange, market_type)
     return await adapter.get_trades(market_type, symbol, limit)
 
 
 @app.get("/{exchange}/{market_type}/agg_trades/{symbol}")
-async def get_agg_trades(exchange: str, market_type: MarketType, symbol: str, start: Optional[int] = None, limit: int = Query(500, ge=1, le=10000)):
+async def get_agg_trades(exchange: str, market_type: MarketType, symbol: str, start: Optional[int] = None, limit: int = Query(500, ge=1)):
     adapter = validate_request(exchange, market_type)
-    try:
-        return await adapter.get_agg_trades(market_type, symbol, start, limit)
-    except NotImplementedError as e:
-        raise HTTPException(status_code=501, detail=str(e))
+    return await adapter.get_agg_trades(market_type, symbol, start, limit)
 
 
 @app.get("/{exchange}/{market_type}/candles/{symbol}")
-async def get_candles(exchange: str, market_type: MarketType, symbol: str, interval: str = "1h", start: Optional[int] = None, limit: int = Query(100, ge=1, le=10000)):
+async def get_candles(exchange: str, market_type: MarketType, symbol: str, interval: str = "1h", start: Optional[int] = None, limit: int = Query(100, ge=1)):
     adapter = validate_request(exchange, market_type)
     return await adapter.get_candles(market_type, symbol, interval, start, limit)
 
 
 @app.get("/{exchange}/{market_type}/open_interest/{symbol}")
-async def get_open_interest(exchange: str, market_type: MarketType, symbol: str, period: str = Query("1h"), start: Optional[int] = None, limit: int = Query(30, ge=1, le=5000)):
+async def get_open_interest(exchange: str, market_type: MarketType, symbol: str, period: str = Query("1h"), start: Optional[int] = None, limit: int = Query(30, ge=1)):
     adapter = validate_request(exchange, market_type)
-    try:
-        return await adapter.get_open_interest(market_type, symbol, period, start, limit)
-    except NotImplementedError as e:
-        raise HTTPException(status_code=501, detail=str(e))
+    return await adapter.get_open_interest(market_type, symbol, period, start, limit)
 
 
 @app.get("/{exchange}/{market_type}/funding_rate/{symbol}")
-async def get_funding_rate(exchange: str, market_type: MarketType, symbol: str, start: Optional[int] = None, limit: int = Query(100, ge=1, le=5000)):
+async def get_funding_rate(exchange: str, market_type: MarketType, symbol: str, start: Optional[int] = None, limit: int = Query(100, ge=1)):
     adapter = validate_request(exchange, market_type)
-    try:
-        return await adapter.get_funding_rate(market_type, symbol, start, limit)
-    except NotImplementedError as e:
-        raise HTTPException(status_code=501, detail=str(e))
+    return await adapter.get_funding_rate(market_type, symbol, start, limit)
 
 
 @app.get("/{exchange}/{market_type}/liquidations/{symbol}")
-async def get_liquidations(exchange: str, market_type: MarketType, symbol: str, start: Optional[int] = None, limit: int = Query(100, ge=1, le=1000)):
+async def get_liquidations(exchange: str, market_type: MarketType, symbol: str, start: Optional[int] = None, limit: int = Query(100, ge=1)):
     adapter = validate_request(exchange, market_type)
-    try:
-        return await adapter.get_liquidations(market_type, symbol, start, limit)
-    except NotImplementedError as e:
-        raise HTTPException(status_code=501, detail=str(e))
+    return await adapter.get_liquidations(market_type, symbol, start, limit)
 
 
 @app.get("/{exchange}/{market_type}/long_short_ratio/{symbol}")
-async def get_long_short_ratio(exchange: str, market_type: MarketType, symbol: str, period: str = Query("5m"), start: Optional[int] = None, limit: int = Query(30, ge=1, le=5000)):
+async def get_long_short_ratio(exchange: str, market_type: MarketType, symbol: str, period: str = Query("5m"), start: Optional[int] = None, limit: int = Query(30, ge=1)):
     adapter = validate_request(exchange, market_type)
-    try:
-        return await adapter.get_long_short_ratio(market_type, symbol, period, start, limit)
-    except NotImplementedError as e:
-        raise HTTPException(status_code=501, detail=str(e))
+    return await adapter.get_long_short_ratio(market_type, symbol, period, start, limit)
 
 
 @app.websocket("/ws/{exchange}/{market_type}")
@@ -202,6 +194,9 @@ async def websocket_endpoint(websocket: WebSocket, exchange: str, market_type: M
         data = await websocket.receive_json()
         channel, symbol = data.get("channel"), data.get("symbol")
         if not channel or not symbol:
+            await websocket.close(code=1003)
+            return
+        if channel not in KNOWN_WS_CHANNELS:
             await websocket.close(code=1003)
             return
 
