@@ -11,8 +11,9 @@
   <a href="../README.md">Introduction</a> &nbsp;•&nbsp; 
   <b>API Reference</b> &nbsp;•&nbsp; 
   <a href="Python_SDK.md">Python SDK</a> &nbsp;•&nbsp; 
-  <a href="System_Architecture.md">System Architecture</a> &nbsp;•&nbsp; 
   <a href="Exchange_Notes.md">Exchange Notes</a> &nbsp;•&nbsp; 
+  <a href="System_Architecture.md">System Architecture</a> &nbsp;•&nbsp; 
+  <a href="Validator_Guide.md">Validator Guide</a> &nbsp;•&nbsp; 
   <a href="Contributor_Guide.md">Contributor Guide</a>
 </sub>
 
@@ -28,10 +29,6 @@ The router exposes two interfaces on the same port. REST is request/response; We
 *   **REST Base URI:** `http://localhost:8040`
 *   **WebSocket Base URI:** `ws://localhost:8040/ws/{exchange}/{market_type}`
 
-<br>
-<br>
-
----
 
 ### Path Variables
 
@@ -48,9 +45,6 @@ The router exposes two interfaces on the same port. REST is request/response; We
 The REST interface covers everything that is request/response based: service discovery, capability maps, historical data pulls, and point-in-time snapshots. Every endpoint returns a normalized JSON payload matching one of the schemas documented in Response Shapes below, regardless of which upstream exchange served the request.
 
 <br>
-<br>
-
----
 
 ### Endpoints
 
@@ -105,9 +99,6 @@ The REST interface covers everything that is request/response based: service dis
 | `GET` | `/{exchange}/{market_type}/long_short_ratio/{symbol}` | Long/short account distribution. | `period`, `start`, `limit` |
 
 <br>
-<br>
-
----
 
 ### Pagination Semantics
 
@@ -120,29 +111,6 @@ Every endpoint that accepts a `start` query parameter (candles, agg_trades, fund
 The natural pagination loop for "load older" is therefore: pass the oldest timestamp you already have as the new `start`, request the next page, prepend to your view.
 
 <br>
-<br>
-
----
-
-### Parameter Bounds
-
-All `limit` and `depth` values are validated server-side. Requests outside these bounds return `400`.
-
-| Parameter | Min | Max | Default |
-| :--- | ---: | ---: | ---: |
-| `depth` (orderbook) | 1 | 100 | 20 |
-| `limit` (trades) | 1 | 1000 | 100 |
-| `limit` (agg_trades) | 1 | 10000 | 500 |
-| `limit` (candles) | 1 | 10000 | 100 |
-| `limit` (open_interest) | 1 | 5000 | 30 |
-| `limit` (funding_rate) | 1 | 5000 | 100 |
-| `limit` (liquidations) | 1 | 1000 | 100 |
-| `limit` (long_short_ratio) | 1 | 5000 | 30 |
-
-<br>
-<br>
-
----
 
 ### Response Shapes
 
@@ -299,20 +267,17 @@ Only tradeable symbols appear in `/info` and `/markets`. Paused, halted, and off
 ```
 
 <br>
-<br>
-
----
 
 ### HTTP Status Codes
 
 | Code | Status | Meaning |
 | :--- | :--- | :--- |
 | **200** | Success | Request succeeded and the payload was normalized. |
-| **400** | Bad Request | Invalid parameter or upstream rejection. |
-| **404** | Not Found | Exchange or resource not found. |
-| **429** | Too Many Requests | Rate limit exceeded. |
-| **500** | Internal Error | Upstream connection failure or unhandled error. |
-| **501** | Not Implemented | Feature not supported by the target adapter. |
+| **400** | Bad Request | Invalid parameter, unsupported market type, or upstream rejection. |
+| **404** | Not Found | Exchange not registered. |
+| **422** | Unprocessable Entity | Path or query parameter failed validation (e.g. an unrecognised `market_type` value). |
+| **500** | Internal Error | Upstream connection failure after retries, or unhandled error. |
+| **501** | Not Implemented | Route not supported by the target adapter on this market type. |
 
 <br>
 
@@ -333,8 +298,6 @@ The router never masks upstream error detail. If the underlying exchange returns
 <br>
 <br>
 
----
-
 ## WebSocket
 
 The WebSocket interface covers everything REST does not. It carries real-time streams from the exchange pushed through without polling. The two interfaces share a port and a schema, so a `ticker` WebSocket message looks identical to a `GET /ticker/{symbol}` response body, and you can pick whichever fits the workload.
@@ -342,9 +305,6 @@ The WebSocket interface covers everything REST does not. It carries real-time st
 Connect to `ws://localhost:8040/ws/{exchange}/{market_type}` and send a JSON subscription payload. The server starts streaming as soon as the upstream exchange connection is established. There is no acknowledgement message, just data.
 
 <br>
-<br>
-
----
 
 ### Protocol Rules
 
@@ -355,9 +315,6 @@ Connect to `ws://localhost:8040/ws/{exchange}/{market_type}` and send a JSON sub
 * **Availability is not uniform.** Not every channel is available on every exchange or market type. Check `GET /{exchange}/capabilities` before subscribing.
 
 <br>
-<br>
-
----
 
 ### Channels
 
@@ -372,9 +329,6 @@ Connect to `ws://localhost:8040/ws/{exchange}/{market_type}` and send a JSON sub
 | `liquidations` | Real-time liquidation events. | `{"channel": "liquidations", "symbol": "BTCUSDT"}` |
 
 <br>
-<br>
-
----
 
 ### Close Codes
 
@@ -387,11 +341,9 @@ Connect to `ws://localhost:8040/ws/{exchange}/{market_type}` and send a JSON sub
 <br>
 <br>
 
----
-
 ## Examples
 
-The examples below cover the most common request patterns. For the full parameter reference, see the endpoint and bounds tables above.
+The examples below cover the most common request patterns. For full parameter details see the endpoint tables and the Parameter defaults section.
 
 REST, with `curl`:
 
@@ -420,3 +372,23 @@ wscat -c ws://localhost:8040/ws/binance/spot
 ```
 
 Trade events stream immediately after the payload is sent.
+
+<br>
+<br>
+
+## Parameter defaults
+
+Default values applied when the caller omits the query parameter. There is no router-side maximum: the cap, where one exists, is per-exchange and lives in the `/capabilities` map.
+
+| Parameter | Min | Max | Default |
+| :--- | ---: | ---: | ---: |
+| `depth` (orderbook) | 1 | * | 20 |
+| `limit` (trades) | 1 | * | 100 |
+| `limit` (agg_trades) | 1 | * | 500 |
+| `limit` (candles) | 1 | * | 100 |
+| `limit` (open_interest) | 1 | * | 30 |
+| `limit` (funding_rate) | 1 | * | 100 |
+| `limit` (liquidations) | 1 | * | 100 |
+| `limit` (long_short_ratio) | 1 | * | 30 |
+
+`*` Determined by the capabilities map for each exchange and route. Paginated routes (`candles`, `agg_trades`, `funding_rate`, `open_interest`, `liquidations`, `long_short_ratio`) have no router-side ceiling: the adapter walks back through history bounded by upstream retention. Non-paginated routes (`trades`, `orderbook`) clamp to the per-exchange `max_limit` (`max_depth` for orderbook) declared in capabilities.

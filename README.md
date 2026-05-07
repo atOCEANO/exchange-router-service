@@ -11,8 +11,9 @@
   <b>Introduction</b> &nbsp;•&nbsp; 
   <a href=".Documentation/API_Reference.md">API Reference</a> &nbsp;•&nbsp; 
   <a href=".Documentation/Python_SDK.md">Python SDK</a> &nbsp;•&nbsp; 
-  <a href=".Documentation/System_Architecture.md">System Architecture</a> &nbsp;•&nbsp; 
   <a href=".Documentation/Exchange_Notes.md">Exchange Notes</a> &nbsp;•&nbsp; 
+  <a href=".Documentation/System_Architecture.md">System Architecture</a> &nbsp;•&nbsp; 
+  <a href=".Documentation/Validator_Guide.md">Validator Guide</a> &nbsp;•&nbsp; 
   <a href=".Documentation/Contributor_Guide.md">Contributor Guide</a>
 </sub>
 
@@ -38,14 +39,12 @@ The service handles the parts that every exchange integration ends up needing: p
 
 <br>
 
-Clients talk to one endpoint, the router routes requests to the right exchange adapter, and the adapter normalizes the response into a schema that is identical across exchanges. REST and WebSocket both sit on the same port, and the same adapter instance serves both, so a client written against Binance spot works against Bybit linear with a single path change. The schema is uniform; some unit semantics are not. See the [Unit semantics](.Documentation/Exchange_Notes.md#unit-semantics) note in Exchange Notes before comparing values across markets.
+Clients talk to one endpoint, the router routes requests to the right exchange adapter, and the adapter normalizes the response into a schema that is identical across exchanges. REST and WebSocket both sit on the same port, and the same adapter instance serves both, so a client written against Binance spot works against Bybit linear with a single path change. The schema is uniform; some unit semantics are not. See [Exchange Notes](.Documentation/Exchange_Notes.md) before comparing values across markets; each exchange's section calls out the fields whose units differ.
 
 <br>
 <br>
 
----
-
-### Supported Exchanges
+## Supported Exchanges
 
 <table style="width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 0.9em;">
   <thead>
@@ -188,7 +187,7 @@ Clients talk to one endpoint, the router routes requests to the right exchange a
       <td style="padding: 8px; text-align: center;">[x]</td>
       <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook, Mark Price, Liquidations</td>
     </tr>
-    <tr style="border-bottom: 1px solid #30363d;">
+    <tr style="border-bottom: 2px solid #30363d;">
       <td style="padding: 8px 12px; opacity: 0.8;">Inverse</td>
       <td style="padding: 8px; text-align: center;">[x]</td>
       <td style="padding: 8px; text-align: center;">[x]</td>
@@ -198,6 +197,40 @@ Clients talk to one endpoint, the router routes requests to the right exchange a
       <td style="padding: 8px; text-align: center;">[x]</td>
       <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook, Mark Price, Liquidations</td>
     </tr>
+    <!-- KuCoin -->
+    <tr style="border-bottom: 1px solid #30363d;">
+      <td rowspan="3" style="padding: 12px; vertical-align: middle; text-align: left; border-right: 1px solid #30363d;">
+        <img src=".Documentation/imgs/exchanges/kucoin_logo.png" height="24" />
+      </td>
+      <td style="padding: 8px 12px; opacity: 0.8;">Spot</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook</td>
+    </tr>
+    <tr style="border-bottom: 1px solid #30363d;">
+      <td style="padding: 8px 12px; opacity: 0.8;">Linear</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook, Mark Price</td>
+    </tr>
+    <tr style="border-bottom: 1px solid #30363d;">
+      <td style="padding: 8px 12px; opacity: 0.8;">Inverse</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook, Mark Price</td>
+    </tr>
   </tbody>
 </table>
 
@@ -206,9 +239,7 @@ Clients talk to one endpoint, the router routes requests to the right exchange a
 <br>
 <br>
 
----
-
-### Quick Start
+## Quick Start
 
 The service runs as a stateless Docker container.
 
@@ -231,13 +262,8 @@ curl http://localhost:8040/binance/spot/ticker/BTCUSDT
 ```
 
 <br>
-<br>
 
----
-
-### Configuration
-
-The service is deliberately thin on configuration. Everything it needs at runtime is baked into the adapters themselves, and the only knob a typical user will touch is the host port.
+The only knob exposed at deploy time is the host port:
 
 | Variable | Required | Default | Purpose |
 | :--- | :--- | :--- | :--- |
@@ -245,18 +271,14 @@ The service is deliberately thin on configuration. Everything it needs at runtim
 
 <br>
 
-The variable lives in `.env` and is consumed by `docker-compose.yml` in the `ports` mapping.
-
-There is no configuration file for adapters, upstream URLs, timeouts, or rate limit thresholds. Those are defined in code, per adapter, and changing them means editing the adapter and rebuilding the container. This is intentional. The router ships as a single immutable image and should behave identically across deployments.
+This variable lives in `.env` and is consumed by `docker-compose.yml` in the `ports` mapping. There is no configuration file for adapters, upstream URLs, timeouts, or rate-limit thresholds. Those are defined in code, per adapter, and changing them means editing the adapter and rebuilding the container. This is intentional, the router ships as a single immutable image and should behave identically across deployments.
 
 <br>
 <br>
 
----
+## Python SDK
 
-### Python SDK
-
-A thin async client over the router's REST and WebSocket interfaces. Historical and time-series methods return `pandas.DataFrame` objects indexed by datetime; point-in-time snapshots (ticker, book ticker, orderbook, mark price) return plain dicts. See [Unit semantics](.Documentation/Exchange_Notes.md#unit-semantics) for fields whose units vary across exchanges.
+A thin async client over the router's REST and WebSocket interfaces. Historical and time-series methods return `pandas.DataFrame` objects indexed by datetime; point-in-time snapshots (ticker, book ticker, orderbook, mark price) return plain dicts. See [Exchange Notes](.Documentation/Exchange_Notes.md) for fields whose units vary across exchanges.
 
 ```bash
 pip install git+https://github.com/atOCEANO/exchange-router-service.git#subdirectory=client

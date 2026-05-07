@@ -11,8 +11,9 @@
   <a href="../README.md">Introduction</a> &nbsp;•&nbsp; 
   <a href="API_Reference.md">API Reference</a> &nbsp;•&nbsp; 
   <a href="Python_SDK.md">Python SDK</a> &nbsp;•&nbsp; 
-  <b>System Architecture</b> &nbsp;•&nbsp; 
   <a href="Exchange_Notes.md">Exchange Notes</a> &nbsp;•&nbsp; 
+  <b>System Architecture</b> &nbsp;•&nbsp; 
+  <a href="Validator_Guide.md">Validator Guide</a> &nbsp;•&nbsp; 
   <a href="Contributor_Guide.md">Contributor Guide</a>
 </sub>
 
@@ -23,44 +24,32 @@
 
 ## System Architecture
 
-The sections below cover the router's core contract and the two request paths (REST and WebSocket). They also cover how rate limiting and failures are handled, plus the deployment and security constraints that shape how the service should be operated in practice.
+The router's core contract, the REST and WebSocket request paths, rate-limit handling, error handling, and the deployment and security constraints that shape how the service should be operated.
 
 <br>
 <br>
 
----
+## Core Design
 
-### Core Design
+The router is built around an abstract base contract (`BaseExchange`). Each exchange is an isolated adapter that implements it; the routing core never needs to know which exchange it is talking to. The loader in `src/exchanges/__init__.py` scans the directory at startup, instantiates every `BaseExchange` subclass it finds, and registers them in `EXCHANGE_REGISTRY`. Adding a new exchange is a matter of dropping a compliant adapter into that directory and restarting.
 
-The router is built around an abstract base contract (`BaseExchange`). Each exchange is an isolated adapter that implements this contract. The core routing logic never needs to know which exchange it is talking to.
-
-Adapters are discovered automatically. On startup, the loader in `src/exchanges/__init__.py` scans the `src/exchanges/` directory, finds every valid `BaseExchange` subclass, instantiates it, and registers it in the `EXCHANGE_REGISTRY`. Adding a new exchange is a matter of dropping a compliant adapter into that directory and restarting the service.
-
-For exposure constraints and what this service deliberately omits, see [Security and Exposure](#security-and-exposure) before deploying outside localhost.
+Before deploying outside localhost, see [Security and Exposure](#security-and-exposure).
 
 <br>
 <br>
 
----
+## Request Lifecycle
 
-### Request Lifecycle
+Every REST request follows the same path:
 
-Every request follows the same path, regardless of exchange or data type:
+`Client -> FastAPI Route -> Adapter -> Upstream Exchange -> Normalisation -> Response`
 
-`Client -> FastAPI Route -> Adapter -> Upstream Exchange -> Normalization -> Response`
-
-1. **Client request:** Inbound REST or WebSocket call hits a FastAPI route.
-2. **Adapter lookup:** The router resolves the exchange name to the registered adapter instance.
-3. **Upstream call:** The adapter makes an async request to the exchange API.
-4. **Normalization:** The raw JSON response is mapped to a Pydantic model defined in `src/models.py`.
-5. **Response:** The validated model is returned to the client. Raw dicts are never passed through.
+The route resolves the exchange name to its registered adapter, the adapter makes an async upstream call, and the raw JSON is mapped to a Pydantic model from `src/models.py` before returning. Raw dicts never cross the boundary.
 
 <br>
 <br>
 
----
-
-### WebSocket Lifecycle
+## WebSocket Lifecycle
 
 WebSocket streams do not follow the same path as REST. The `StreamManager` in `src/stream_manager.py` sits between clients and the adapter's streaming methods.
 
@@ -76,51 +65,41 @@ This is also why re-subscribing on the same connection is not supported. Each co
 <br>
 <br>
 
----
+## Rate Limiting
 
-### Rate Limiting
+Each adapter holds a dedicated `asyncio.Lock()` and a shared `_backoff_until` timestamp. All requests to the same exchange share a single budget and serialise behind that lock. If the remaining backoff exceeds 30 seconds when a request arrives, the adapter fails the request immediately with a clear error rather than making the caller wait.
 
-The router manages request weight per adapter to avoid upstream IP bans. Each adapter holds a dedicated `asyncio.Lock()` and a shared `_backoff_until` timestamp, combining them in two layers:
-
-- **Proactive.** Every response is inspected for rate limit headers where the upstream provides them. If remaining weight drops below a threshold, the adapter sets a backoff timestamp and stalls pending tasks before the upstream starts rejecting anything.
-- **Reactive.** Exchange-specific: Bybit uses HTTP 403 for IP bans (not 429), which sets a 10-minute backoff and fails the triggering request immediately. A `retCode: 10006` inside a 200 response signals a soft per-endpoint limit and triggers a short backoff with a retry. Binance and Kraken use standard HTTP 429. All cases update the shared `_backoff_until` timestamp.
-
-If the remaining backoff exceeds 30 seconds when a request arrives, the adapter fails it immediately with a clear error rather than making the caller wait. All requests to the same exchange share a single budget and serialize behind the same lock.
-
-For detailed per-exchange behavior, see the [Exchange Notes](Exchange_Notes.md).
+The user-facing patterns (header-driven proactive backoff, reactive backoff on rejection, proactive minimum-spacing) and per-exchange specifics live in [Exchange Notes → Rate-limit and ban protection](Exchange_Notes.md#rate-limit-and-ban-protection). The implementation details (header names, code paths, Kraken's layered retry strategy) live in [Contributor Guide → Rate limit headers and proactive backoff](Contributor_Guide.md#rate-limit-headers-and-proactive-backoff).
 
 <br>
 <br>
 
----
-
-### Error Handling
+## Error Handling
 
 The router normalizes failures into a small set of HTTP responses. It helps to separate what adapters raise from what the route layer emits, because adapter authors only need to worry about the first list.
 
-Adapters raise exactly two exception types:
+Adapters raise three exception types:
 
-* **`ValueError`** for bad input or upstream validation failures (unknown symbol, out-of-range limit, malformed interval, adapter-side parameter rejections). A global exception handler in `main.py` converts these into `400 Bad Request`, preserving the message in `detail`.
+* **`ValueError`** for bad input or upstream validation failures (unknown symbol, out-of-range limit, malformed interval, adapter-side parameter rejections, requests arriving while an active backoff window has more than 30 seconds remaining). A global exception handler in `main.py` converts these into `400 Bad Request`, preserving the message in `detail`. Kraken also uses `ValueError` for exhausted retries on throttling, so callers see `400` with an actionable message rather than an opaque 500.
 * **`NotImplementedError`** when the adapter does not implement a method for a given market type. The base class raises this by default, and the route layer catches it and returns `501 Not Implemented`.
+* **plain `Exception`** when retries on upstream HTTP failures (5xx, connection errors, timeouts) are exhausted on Binance, Bybit, KuCoin, or OKX. The message is `"Max retries exceeded for {url}"`. Not caught explicitly, so FastAPI's default handler returns `500 Internal Server Error`.
 
-The route layer adds two more responses that adapters never raise themselves:
+The route layer adds three more responses that adapters never raise themselves:
 
 * **`404 Not Found`** when the exchange name is not in `EXCHANGE_REGISTRY`. Raised directly by `validate_request` before the adapter is ever called.
 * **`400 Bad Request`** when the market type is known but the adapter does not declare support for it. Also raised by `validate_request`, checked against each adapter's `supported_market_types` list.
+* **`422 Unprocessable Entity`** when a path or query parameter fails FastAPI's pydantic validation (for example, an unrecognised `market_type` enum value). Raised by FastAPI before the route handler runs.
 
-Two more conditions do not correspond to exception types at all:
+One more condition does not correspond to an exception type at all:
 
-* **Upstream HTTP failures** (5xx from the exchange, connection errors, timeouts) are retried with backoff inside `_make_request`. If retries are exhausted, the request surfaces as `500 Internal Server Error`.
-* **Upstream rate limiting** (429 or 418, or proactive detection via response headers) causes the adapter to pause all in-flight tasks and wait for the declared backoff window. The client request is delayed, not rejected.
+* **Upstream rate limiting** (429 or 418, or proactive detection via response headers) causes the adapter to pause all in-flight tasks and wait for the declared backoff window. The client request is delayed, not rejected. When the wait exceeds 30 seconds, the adapter raises `ValueError` instead, which falls under the first bullet above.
 
 The `detail` field in error responses always carries the underlying exception message, whether it came from the adapter or the upstream exchange. Nothing is rewritten or swallowed.
 
 <br>
 <br>
 
----
-
-### Deployment Notes
+## Deployment Notes
 
 The router is designed to run as a single container per exchange IP. A few consequences follow from that.
 
@@ -134,16 +113,10 @@ These are intentional constraints that keep the service stateless and straightfo
 <br>
 <br>
 
----
+## Security and Exposure
 
-### Security and Exposure
+The router is designed for localhost or a trusted network. It ships without authentication, inbound rate limiting (only outbound), request signing, TLS termination, or origin enforcement. Anyone who can reach the port can issue any request the adapters support.
 
-The router is designed to run on localhost or inside a trusted network. It does not ship with any of the pieces you would need to safely expose it to the public internet, and the intro's "stateless and keyless" framing is meant to narrow the threat model, not eliminate it.
+Every response is public market data, so a compromised router cannot leak private information or move funds. The real risk is being abused as an open proxy: a misbehaving caller hammering upstream exchanges from your IP. That is how IP bans happen.
 
-Concretely, the service has no authentication, no rate limiting on the inbound side (only on upstream calls), no request signing, no TLS termination, and no origin enforcement. Anyone who can reach the port can issue any request the adapters support.
-
-Every response is public market data pulled from public APIs, so a compromised router cannot leak private information or move funds. The risk is different. An exposed instance can be abused as an open proxy to hammer upstream exchanges from your IP. That is how IP bans happen.
-
-If you need to run the router outside a trusted network, put it behind a reverse proxy that adds the pieces the service deliberately omits: TLS, an allowlist or origin check, and an inbound rate limit tight enough that a single misbehaving client cannot exhaust the upstream budget the router is carefully managing on your behalf. A minimal nginx or Caddy config in front of the container is usually enough. Anything more ambitious (per-client quotas, audit logging, API keys) belongs in that proxy layer, not in the router itself.
-
-One deployment pattern worth calling out: if you are running multiple Oceano services behind the same proxy, give the router its own subpath or hostname and keep the port private. The router's CORS wildcard means a browser app served from any origin can talk to it, which is convenient during local development and dangerous in any shared environment.
+If you run the router outside a trusted network, put it behind a reverse proxy that adds TLS, an allowlist or origin check, and an inbound rate limit tight enough that one misbehaving client cannot exhaust the upstream budget. A minimal nginx or Caddy config is enough. Per-client quotas, audit logging, and API keys belong in that proxy layer, not in the router. If you run multiple Oceano services behind the same proxy, give the router its own subpath or hostname and keep the port private; CORS is wildcard-open by design for local development.
