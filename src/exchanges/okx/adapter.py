@@ -1,6 +1,7 @@
 import httpx
-import json
+import orjson
 import asyncio
+import random
 import time
 import websockets
 import logging
@@ -388,7 +389,7 @@ class OkxAdapter(BaseExchange):
                 wait_time = self._backoff_until - now
                 if wait_time > 30:
                     raise ValueError(f"OKX backoff active. Retry in {wait_time:.0f}s.")
-                await asyncio.sleep(wait_time + 0.1)
+                await asyncio.sleep(wait_time + random.uniform(0.05, 1.0))
 
             try:
                 resp = await self.http_client.request(method, url, params=params)
@@ -451,7 +452,7 @@ class OkxAdapter(BaseExchange):
             chunks.append(new_items)
             collected += len(new_items)
             req_count += 1
-            next_end = batch[0].timestamp - 1
+            next_end = batch[0].timestamp
             if next_end <= 0 or (current_end is not None and next_end >= current_end):
                 break
             current_end = next_end
@@ -471,7 +472,7 @@ class OkxAdapter(BaseExchange):
             try:
                 async with websockets.connect(self.ws_url, ping_interval=None) as ws:
                     logger.info(f"OKX WS connected: {args}")
-                    await ws.send(json.dumps({"op": "subscribe", "args": args}))
+                    await ws.send(orjson.dumps({"op": "subscribe", "args": args}).decode())
                     last_ping = time.time()
                     reconnect_delay = 1
 
@@ -487,8 +488,8 @@ class OkxAdapter(BaseExchange):
                             continue
 
                         try:
-                            data = json.loads(msg)
-                        except json.JSONDecodeError:
+                            data = orjson.loads(msg)
+                        except orjson.JSONDecodeError:
                             continue
 
                         if data.get("event") == "error":
