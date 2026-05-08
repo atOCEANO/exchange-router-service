@@ -1,6 +1,7 @@
 import httpx
-import json
+import orjson
 import asyncio
+import random
 import time
 import websockets
 import logging
@@ -345,7 +346,7 @@ class BinanceAdapter(BaseExchange):
         while retries > 0:
             now = time.time()
             if now < self._backoff_until:
-                wait_time = self._backoff_until - now + 0.1
+                wait_time = self._backoff_until - now + random.uniform(0.05, 1.0)
                 await asyncio.sleep(wait_time)
 
             try:
@@ -429,7 +430,7 @@ class BinanceAdapter(BaseExchange):
 
             if not hasattr(batch[0], "timestamp"):
                 break
-            next_end = batch[0].timestamp - 1
+            next_end = batch[0].timestamp
             if next_end <= 0 or (current_end is not None and next_end >= current_end):
                 break
             current_end = next_end
@@ -454,14 +455,14 @@ class BinanceAdapter(BaseExchange):
         while True:
             try:
                 logger.info(f"Connecting to Binance ({market_type}) WS: {url}")
-                async with websockets.connect(url) as ws:
+                async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
                     logger.info(f"Binance ({market_type}) WS Connected.")
-                    await ws.send(json.dumps({"method": "SUBSCRIBE", "params": params, "id": 1}))
+                    await ws.send(orjson.dumps({"method": "SUBSCRIBE", "params": params, "id": 1}).decode())
 
                     reconnect_delay = 1
 
                     async for msg in ws:
-                        data = json.loads(msg)
+                        data = orjson.loads(msg)
                         if "result" in data:
                             continue
                         yield data
