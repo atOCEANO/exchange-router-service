@@ -1,5 +1,5 @@
 import httpx
-import json
+import orjson
 import asyncio
 import random
 import time
@@ -467,7 +467,7 @@ class KrakenAdapter(BaseExchange):
             wait = max(delays) if delays else 0.0
 
         if wait > 0:
-            await asyncio.sleep(wait + 0.05)
+            await asyncio.sleep(wait + random.uniform(0.05, 1.0))
 
 
     async def _record_request(self, url: str, params: Optional[Dict]) -> None:
@@ -523,8 +523,8 @@ class KrakenAdapter(BaseExchange):
 
                 if resp.status_code == 200:
                     try:
-                        data = resp.json()
-                    except json.JSONDecodeError:
+                        data = orjson.loads(resp.content)
+                    except orjson.JSONDecodeError:
                         last_body_error = "JSONDecodeError"
                         wait = await self._set_backoff(attempt, None, strong=False)
                         logger.warning(f"Kraken {url} non-JSON body, backing off {wait:.1f}s (attempt {attempt + 1}/{max_retries})")
@@ -566,10 +566,10 @@ class KrakenAdapter(BaseExchange):
         while True:
             try:
                 async with websockets.connect(url) as ws:
-                    await ws.send(json.dumps(payload))
+                    await ws.send(orjson.dumps(payload).decode())
                     reconnect_delay = 1
                     async for msg in ws:
-                        data = json.loads(msg)
+                        data = orjson.loads(msg)
                         if data.get("method") == "subscribe" and data.get("success") is False:
                             err = data.get("error") or data.get("result") or data
                             logger.error(f"Kraken spot WS subscribe failed for {payload}: {err}")
