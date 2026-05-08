@@ -52,9 +52,25 @@ class StreamManager:
 
             async for item in stream:
                 data = item.model_dump_json()
-                if key in self.active_streams:
-                    clients = list(self.active_streams[key].values())
-                    await asyncio.gather(*[client.send_text(data) for client in clients], return_exceptions=True)
+                bucket = self.active_streams.get(key)
+                if not bucket:
+                    break
+                client_items = list(bucket.items())
+                results = await asyncio.gather(
+                    *[client.send_text(data) for _, client in client_items],
+                    return_exceptions=True,
+                )
+                dead = [cid for (cid, _), res in zip(client_items, results) if isinstance(res, BaseException)]
+                if dead:
+                    async with self._lock:
+                        current = self.active_streams.get(key)
+                        if current is not None:
+                            for cid in dead:
+                                current.pop(cid, None)
+                            if not current:
+                                self.active_streams.pop(key, None)
+                                self.upstream_tasks.pop(key, None)
+                                break
         except asyncio.CancelledError:
             pass
         except Exception as e:
