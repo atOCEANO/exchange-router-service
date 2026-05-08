@@ -1,6 +1,7 @@
 import httpx
-import json
+import orjson
 import asyncio
+import random
 import time
 import uuid
 import websockets
@@ -413,7 +414,7 @@ class KucoinAdapter(BaseExchange):
                 wait_time = self._backoff_until - now
                 if wait_time > 30:
                     raise ValueError(f"KuCoin backoff active. Retry in {wait_time:.0f}s.")
-                await asyncio.sleep(wait_time + 0.1)
+                await asyncio.sleep(wait_time + random.uniform(0.05, 1.0))
 
             try:
                 resp = await self.http_client.request(method, url, params=params)
@@ -476,7 +477,7 @@ class KucoinAdapter(BaseExchange):
             chunks.append(new_items)
             collected += len(new_items)
             req_count += 1
-            next_end = batch[0].timestamp - 1
+            next_end = batch[0].timestamp
             if next_end <= 0 or (current_end is not None and next_end >= current_end):
                 break
             current_end = next_end
@@ -516,13 +517,13 @@ class KucoinAdapter(BaseExchange):
                     await asyncio.wait_for(ws.recv(), timeout=10)
 
                     sub_id = str(int(time.time() * 1000))
-                    await ws.send(json.dumps({
+                    await ws.send(orjson.dumps({
                         "id": sub_id,
                         "type": "subscribe",
                         "topic": topic,
                         "privateChannel": False,
                         "response": True,
-                    }))
+                    }).decode())
                     last_ping = time.time()
                     reconnect_delay = 1
 
@@ -530,13 +531,13 @@ class KucoinAdapter(BaseExchange):
                         try:
                             msg = await asyncio.wait_for(ws.recv(), timeout=ping_secs)
                         except asyncio.TimeoutError:
-                            await ws.send(json.dumps({"id": sub_id, "type": "ping"}))
+                            await ws.send(orjson.dumps({"id": sub_id, "type": "ping"}).decode())
                             last_ping = time.time()
                             continue
 
                         try:
-                            data = json.loads(msg)
-                        except json.JSONDecodeError:
+                            data = orjson.loads(msg)
+                        except orjson.JSONDecodeError:
                             continue
 
                         t = data.get("type")
@@ -549,7 +550,7 @@ class KucoinAdapter(BaseExchange):
                             yield data
 
                         if time.time() - last_ping > ping_secs:
-                            await ws.send(json.dumps({"id": sub_id, "type": "ping"}))
+                            await ws.send(orjson.dumps({"id": sub_id, "type": "ping"}).decode())
                             last_ping = time.time()
 
             except asyncio.CancelledError:
