@@ -1,12 +1,11 @@
 import httpx
-import orjson
 import asyncio
 import random
 import time
 import websockets
 import logging
 from typing import List, AsyncGenerator, Dict, Any, Optional, Callable
-from src.exchanges.base import BaseExchange
+from src.exchanges.base import BaseExchange, StreamHub
 from src.models import (
     Ticker, BookTicker, MarkPrice, OrderBook, Candle, Trade, AggTrade,
     MarketType, SymbolInfo, OpenInterest, FundingRate, Liquidation, LongShortRatio
@@ -34,11 +33,55 @@ class OkxAdapter(BaseExchange):
         self._spot_symbol_map_lock = asyncio.Lock()
         self._learned_quotes: List[str] = []
 
+        self._hub: Optional[StreamHub] = None
+        self._hub_lock = asyncio.Lock()
+        self._topic_args: Dict[str, Dict[str, Any]] = {}
+
         self._capabilities = self._build_capabilities()
 
 
     async def shutdown(self):
+        if self._hub is not None:
+            await self._hub.close()
+            self._hub = None
         await self.http_client.aclose()
+
+
+    @staticmethod
+    def _topic_key_for_arg(arg: Dict[str, Any]) -> str:
+        ch = arg.get("channel", "")
+        val = arg.get("instId") or arg.get("instType") or ""
+        return f"{ch}:{val}"
+
+
+    async def _get_hub(self) -> StreamHub:
+        async with self._hub_lock:
+            if self._hub is None:
+                async def _connect():
+                    return await websockets.connect(self.ws_url, ping_interval=None)
+                def _sub(topics: List[str]):
+                    args = [self._topic_args[t] for t in topics if t in self._topic_args]
+                    return [{"op": "subscribe", "args": args}] if args else []
+                def _unsub(topics: List[str]):
+                    args = [self._topic_args[t] for t in topics if t in self._topic_args]
+                    return [{"op": "unsubscribe", "args": args}] if args else []
+                def _route(msg):
+                    if not isinstance(msg, dict):
+                        return None
+                    arg = msg.get("arg")
+                    if not isinstance(arg, dict) or "data" not in msg:
+                        return None
+                    return self._topic_key_for_arg(arg)
+                self._hub = StreamHub(
+                    name="okx_public",
+                    connect=_connect,
+                    subscribe_payload=_sub,
+                    unsubscribe_payload=_unsub,
+                    route=_route,
+                    keepalive_payload="ping",
+                    keepalive_interval=25.0,
+                )
+            return self._hub
 
 
     @property
@@ -467,47 +510,18 @@ class OkxAdapter(BaseExchange):
 
 
     async def _ws_connect(self, args: list) -> AsyncGenerator[Dict, None]:
-        reconnect_delay = 1
-        while True:
-            try:
-                async with websockets.connect(self.ws_url, ping_interval=None) as ws:
-                    logger.info(f"OKX WS connected: {args}")
-                    await ws.send(orjson.dumps({"op": "subscribe", "args": args}).decode())
-                    last_ping = time.time()
-                    reconnect_delay = 1
+        arg = args[0]
+        topic = self._topic_key_for_arg(arg)
+        self._topic_args[topic] = arg
 
-                    while True:
-                        try:
-                            msg = await asyncio.wait_for(ws.recv(), timeout=25)
-                        except asyncio.TimeoutError:
-                            await ws.send("ping")
-                            last_ping = time.time()
-                            continue
-
-                        if msg == "pong":
-                            continue
-
-                        try:
-                            data = orjson.loads(msg)
-                        except orjson.JSONDecodeError:
-                            continue
-
-                        if data.get("event") == "error":
-                            logger.error(f"OKX WS error: {data}")
-                            continue
-                        if "data" in data:
-                            yield data
-
-                        if time.time() - last_ping > 25:
-                            await ws.send("ping")
-                            last_ping = time.time()
-
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.warning(f"OKX WS disconnected ({e}). Reconnecting in {reconnect_delay}s...")
-                await asyncio.sleep(reconnect_delay)
-                reconnect_delay = min(reconnect_delay * 2, 30)
+        hub = await self._get_hub()
+        q = await hub.subscribe(topic)
+        try:
+            while True:
+                msg = await q.get()
+                yield msg
+        finally:
+            await hub.unsubscribe(topic, q)
 
 
     async def get_ticker(self, market_type: MarketType, symbol: str) -> Ticker:
