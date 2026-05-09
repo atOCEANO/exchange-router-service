@@ -1,5 +1,4 @@
 import httpx
-import orjson
 import asyncio
 import random
 import time
@@ -7,7 +6,7 @@ import uuid
 import websockets
 import logging
 from typing import List, AsyncGenerator, Dict, Any, Optional, Callable, Tuple
-from src.exchanges.base import BaseExchange
+from src.exchanges.base import BaseExchange, StreamHub
 from src.models import (
     Ticker, BookTicker, MarkPrice, OrderBook, Candle, Trade, AggTrade,
     MarketType, SymbolInfo, OpenInterest, FundingRate
@@ -35,10 +34,16 @@ class KucoinAdapter(BaseExchange):
         self._spot_symbol_map_lock = asyncio.Lock()
         self._learned_quotes: List[str] = []
 
+        self._hubs: Dict[MarketType, StreamHub] = {}
+        self._hubs_lock = asyncio.Lock()
+
         self._capabilities = self._build_capabilities()
 
 
     async def shutdown(self):
+        for hub in list(self._hubs.values()):
+            await hub.close()
+        self._hubs.clear()
         await self.http_client.aclose()
 
 
@@ -503,62 +508,49 @@ class KucoinAdapter(BaseExchange):
         return server["endpoint"], data["token"], int(server.get("pingInterval", 18000))
 
 
+    async def _get_hub(self, market_type: MarketType) -> StreamHub:
+        async with self._hubs_lock:
+            hub = self._hubs.get(market_type)
+            if hub is None:
+                async def _connect():
+                    endpoint, token, _ping_ms = await self._get_bullet(market_type)
+                    connect_id = str(uuid.uuid4())
+                    url = f"{endpoint}?token={token}&connectId={connect_id}"
+                    ws = await websockets.connect(url, ping_interval=None)
+                    await asyncio.wait_for(ws.recv(), timeout=10)   # welcome frame
+                    return ws
+                def _sub(topics: List[str]):
+                    return [{"id": str(int(time.time() * 1000)), "type": "subscribe",   "topic": t, "privateChannel": False, "response": False} for t in topics]
+                def _unsub(topics: List[str]):
+                    return [{"id": str(int(time.time() * 1000)), "type": "unsubscribe", "topic": t, "privateChannel": False, "response": False} for t in topics]
+                def _route(msg):
+                    if not isinstance(msg, dict):
+                        return None
+                    if msg.get("type") != "message":
+                        return None
+                    return msg.get("topic")
+                hub = StreamHub(
+                    name=f"kucoin_{market_type.value}",
+                    connect=_connect,
+                    subscribe_payload=_sub,
+                    unsubscribe_payload=_unsub,
+                    route=_route,
+                    keepalive_payload={"id": "keepalive", "type": "ping"},
+                    keepalive_interval=15.0,
+                )
+                self._hubs[market_type] = hub
+            return hub
+
+
     async def _ws_connect(self, market_type: MarketType, topic: str) -> AsyncGenerator[Dict, None]:
-        reconnect_delay = 1
-        while True:
-            try:
-                endpoint, token, ping_interval_ms = await self._get_bullet(market_type)
-                connect_id = str(uuid.uuid4())
-                url = f"{endpoint}?token={token}&connectId={connect_id}"
-                ping_secs = max(ping_interval_ms / 1000 - 2, 5)
-
-                async with websockets.connect(url, ping_interval=None) as ws:
-                    logger.info(f"KuCoin WS connected ({market_type.value}): {topic}")
-                    await asyncio.wait_for(ws.recv(), timeout=10)
-
-                    sub_id = str(int(time.time() * 1000))
-                    await ws.send(orjson.dumps({
-                        "id": sub_id,
-                        "type": "subscribe",
-                        "topic": topic,
-                        "privateChannel": False,
-                        "response": True,
-                    }).decode())
-                    last_ping = time.time()
-                    reconnect_delay = 1
-
-                    while True:
-                        try:
-                            msg = await asyncio.wait_for(ws.recv(), timeout=ping_secs)
-                        except asyncio.TimeoutError:
-                            await ws.send(orjson.dumps({"id": sub_id, "type": "ping"}).decode())
-                            last_ping = time.time()
-                            continue
-
-                        try:
-                            data = orjson.loads(msg)
-                        except orjson.JSONDecodeError:
-                            continue
-
-                        t = data.get("type")
-                        if t in ("pong", "ack", "welcome"):
-                            continue
-                        if t == "error":
-                            logger.error(f"KuCoin WS error: {data}")
-                            continue
-                        if t == "message" and "data" in data:
-                            yield data
-
-                        if time.time() - last_ping > ping_secs:
-                            await ws.send(orjson.dumps({"id": sub_id, "type": "ping"}).decode())
-                            last_ping = time.time()
-
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.warning(f"KuCoin WS disconnected ({e}). Reconnecting in {reconnect_delay}s...")
-                await asyncio.sleep(reconnect_delay)
-                reconnect_delay = min(reconnect_delay * 2, 30)
+        hub = await self._get_hub(market_type)
+        q = await hub.subscribe(topic)
+        try:
+            while True:
+                msg = await q.get()
+                yield msg
+        finally:
+            await hub.unsubscribe(topic, q)
 
 
     async def get_ticker(self, market_type: MarketType, symbol: str) -> Ticker:
