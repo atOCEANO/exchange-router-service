@@ -6,7 +6,7 @@ import time
 import websockets
 import logging
 from typing import List, AsyncGenerator, Dict, Any, Optional, Tuple
-from src.exchanges.base import BaseExchange
+from src.exchanges.base import BaseExchange, StreamHub
 from src.models import (
     Ticker, BookTicker, MarkPrice, OrderBook, Candle, Trade, AggTrade,
     MarketType, SymbolInfo, OpenInterest, FundingRate, Liquidation, LongShortRatio
@@ -39,10 +39,17 @@ class KrakenAdapter(BaseExchange):
         self._spot_ws_map: Dict[str, str] = {}
         self._spot_ws_map_lock = asyncio.Lock()
 
+        self._hubs: Dict[str, StreamHub] = {}
+        self._hubs_lock = asyncio.Lock()
+        self._topic_payloads: Dict[str, Dict[str, Any]] = {}
+
         self._capabilities = self._build_capabilities()
 
 
     async def shutdown(self):
+        for hub in list(self._hubs.values()):
+            await hub.close()
+        self._hubs.clear()
         await self.http_client.aclose()
 
 
@@ -561,30 +568,117 @@ class KrakenAdapter(BaseExchange):
         raise ValueError(f"Kraken throttled or unavailable: {url} (last_status={last_status}, last_body_error={last_body_error})")
 
 
+    @staticmethod
+    def _hub_key(url: str, payload: dict) -> str:
+        if "/v2" in url:
+            params = payload.get("params") or {}
+            return "spot:" + ":".join([
+                str(params.get("channel", "")),
+                str(params.get("event_trigger", "")),
+                str(params.get("depth", "")),
+                str(params.get("snapshot", "")),
+            ])
+        return f"fut:{payload.get('feed', '')}"
+
+
+    @staticmethod
+    def _topic_key(url: str, payload: dict) -> str:
+        if "/v2" in url:
+            params = payload.get("params") or {}
+            ch = params.get("channel", "")
+            sym = (params.get("symbol") or [""])[0]
+            return f"{ch}:{sym}"
+        feed = payload.get("feed", "")
+        pid = (payload.get("product_ids") or [""])[0]
+        return f"{feed}:{pid}"
+
+
+    async def _get_kraken_hub(self, url: str, payload: dict) -> StreamHub:
+        hub_key = self._hub_key(url, payload)
+        async with self._hubs_lock:
+            hub = self._hubs.get(hub_key)
+            if hub is not None:
+                return hub
+
+            is_spot = "/v2" in url
+            async def _connect():
+                return await websockets.connect(url)
+
+            if is_spot:
+                def _sub(topics: List[str]):
+                    out = []
+                    for t in topics:
+                        p = self._topic_payloads.get(t)
+                        if p is not None:
+                            out.append(p)
+                    return out
+                def _unsub(topics: List[str]):
+                    out = []
+                    for t in topics:
+                        p = self._topic_payloads.get(t)
+                        if p is None:
+                            continue
+                        unsub_p = {"method": "unsubscribe", "params": dict(p.get("params") or {})}
+                        out.append(unsub_p)
+                    return out
+                def _route(msg):
+                    if not isinstance(msg, dict):
+                        return None
+                    ch = msg.get("channel")
+                    data = msg.get("data")
+                    if not ch or not isinstance(data, list) or not data:
+                        return None
+                    sym = data[0].get("symbol") if isinstance(data[0], dict) else None
+                    if not sym:
+                        return None
+                    return f"{ch}:{sym}"
+            else:
+                def _sub(topics: List[str]):
+                    out = []
+                    for t in topics:
+                        p = self._topic_payloads.get(t)
+                        if p is not None:
+                            out.append(p)
+                    return out
+                def _unsub(topics: List[str]):
+                    out = []
+                    for t in topics:
+                        p = self._topic_payloads.get(t)
+                        if p is None:
+                            continue
+                        out.append({"event": "unsubscribe", "feed": p.get("feed"), "product_ids": p.get("product_ids")})
+                    return out
+                def _route(msg):
+                    if not isinstance(msg, dict):
+                        return None
+                    feed = msg.get("feed")
+                    pid = msg.get("product_id")
+                    if not feed or not pid:
+                        return None
+                    return f"{feed}:{pid}"
+
+            hub = StreamHub(
+                name=f"kraken_{hub_key}",
+                connect=_connect,
+                subscribe_payload=_sub,
+                unsubscribe_payload=_unsub,
+                route=_route,
+            )
+            self._hubs[hub_key] = hub
+            return hub
+
+
     async def _ws_connect(self, url: str, payload: dict) -> AsyncGenerator[Dict, None]:
-        reconnect_delay = 1
-        while True:
-            try:
-                async with websockets.connect(url) as ws:
-                    await ws.send(orjson.dumps(payload).decode())
-                    reconnect_delay = 1
-                    async for msg in ws:
-                        data = orjson.loads(msg)
-                        if data.get("method") == "subscribe" and data.get("success") is False:
-                            err = data.get("error") or data.get("result") or data
-                            logger.error(f"Kraken spot WS subscribe failed for {payload}: {err}")
-                            raise RuntimeError(f"Kraken spot WS subscribe rejected: {err}")
-                        if data.get("event") in ("alert", "error"):
-                            msg_text = data.get("message") or data
-                            logger.error(f"Kraken futures WS error for {payload}: {msg_text}")
-                            raise RuntimeError(f"Kraken futures WS error: {msg_text}")
-                        yield data
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.warning(f"Kraken WS Disconnected ({url}): {e}. Reconnecting in {reconnect_delay}s...")
-                await asyncio.sleep(reconnect_delay)
-                reconnect_delay = min(reconnect_delay * 2, 30)
+        topic = self._topic_key(url, payload)
+        self._topic_payloads[topic] = payload
+        hub = await self._get_kraken_hub(url, payload)
+        q = await hub.subscribe(topic)
+        try:
+            while True:
+                msg = await q.get()
+                yield msg
+        finally:
+            await hub.unsubscribe(topic, q)
 
 
     async def get_ticker(self, market_type: MarketType, symbol: str) -> Ticker:
@@ -635,7 +729,7 @@ class KrakenAdapter(BaseExchange):
                         volume_24h=vol,
                         quote_volume_24h=q_vol,
                         price_change_percent=pc,
-                        timestamp=self.normalize_timestamp(t.get("lastTime", time.time())),
+                        timestamp=int(time.time() * 1000),
                     )
             raise ValueError(f"Symbol {api_symbol} not found")
 
@@ -667,7 +761,7 @@ class KrakenAdapter(BaseExchange):
                         bid_qty=float(t.get("bidSize", 0)),
                         ask_price=float(t.get("ask", 0)),
                         ask_qty=float(t.get("askSize", 0)),
-                        timestamp=self.normalize_timestamp(t.get("lastTime", time.time())),
+                        timestamp=int(time.time() * 1000),
                     )
             raise ValueError(f"Symbol {api_symbol} not found")
 
@@ -835,7 +929,7 @@ class KrakenAdapter(BaseExchange):
                     index_price=float(t.get("indexPrice", mark)),
                     funding_rate=float(t.get("fundingRate", 0)),
                     next_funding_time=0,
-                    timestamp=self.normalize_timestamp(t.get("lastTime", time.time())),
+                    timestamp=int(time.time() * 1000),
                 )
         raise ValueError(f"Symbol {api_symbol} not found")
 
@@ -935,8 +1029,6 @@ class KrakenAdapter(BaseExchange):
                     continue
                 wsname = v.get("wsname", "/")
                 base, quote = wsname.split("/") if "/" in wsname else (v.get("base", ""), v.get("quote", ""))
-                base = self._to_v2_wsname(base)
-                quote = self._to_v2_wsname(quote)
 
                 results.append(SymbolInfo(
                     symbol=self.get_model_symbol(v.get("altname", k), market_type),
@@ -968,8 +1060,8 @@ class KrakenAdapter(BaseExchange):
                 results.append(SymbolInfo(
                     symbol=self.get_model_symbol(v["symbol"], market_type),
                     native_symbol=v["symbol"],
-                    base_asset=self._to_v2_wsname(v.get("baseCurrency", "")),
-                    quote_asset=self._to_v2_wsname(v.get("quoteCurrency", "")),
+                    base_asset=v.get("baseCurrency", "").upper(),
+                    quote_asset=v.get("quoteCurrency", "").upper(),
                     price_precision=self._decimal_places(tick),
                     quantity_precision=self._decimal_places(min_size),
                     min_qty=min_size,
