@@ -1,12 +1,11 @@
 import httpx
-import orjson
 import asyncio
 import random
 import time
 import websockets
 import logging
 from typing import List, AsyncGenerator, Dict, Any, Optional, Callable
-from src.exchanges.base import BaseExchange
+from src.exchanges.base import BaseExchange, StreamHub
 from src.models import (
     Ticker, BookTicker, MarkPrice, OrderBook, Candle, Trade, AggTrade,
     MarketType, SymbolInfo, OpenInterest, FundingRate, Liquidation, LongShortRatio
@@ -51,14 +50,20 @@ class BinanceAdapter(BaseExchange):
             MarketType.INVERSE: "https://dapi.binance.com",
         }
         self.ws_urls = {
-            MarketType.SPOT:    "wss://stream.binance.com:9443/ws",
-            MarketType.INVERSE: "wss://dstream.binance.com/ws",
+            MarketType.SPOT:    "wss://stream.binance.com:9443/stream",
+            MarketType.INVERSE: "wss://dstream.binance.com/stream",
         }
+
+        self._hubs: Dict[str, StreamHub] = {}
+        self._hubs_lock = asyncio.Lock()
 
         self._capabilities = self._build_capabilities()
 
 
     async def shutdown(self):
+        for hub in list(self._hubs.values()):
+            await hub.close()
+        self._hubs.clear()
         await self.http_client.aclose()
 
 
@@ -444,36 +449,51 @@ class BinanceAdapter(BaseExchange):
         return final_results[-total_limit:]
 
 
-    async def _ws_connect(self, market_type: MarketType, params: list) -> AsyncGenerator[Dict, None]:
+    def _hub_key(self, market_type: MarketType, topic: str) -> str:
         if market_type == MarketType.LINEAR:
-            bucket = self._usdm_bucket_for_topic(params[0]) if params else "public"
-            url = f"wss://fstream.binance.com/{bucket}/ws"
-        else:
-            url = self.ws_urls[market_type]
-        reconnect_delay = 1
+            return f"{market_type.value}:{self._usdm_bucket_for_topic(topic)}"
+        return market_type.value
 
-        while True:
-            try:
-                logger.info(f"Connecting to Binance ({market_type}) WS: {url}")
-                async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
-                    logger.info(f"Binance ({market_type}) WS Connected.")
-                    await ws.send(orjson.dumps({"method": "SUBSCRIBE", "params": params, "id": 1}).decode())
 
-                    reconnect_delay = 1
+    def _hub_url(self, market_type: MarketType, topic: str) -> str:
+        if market_type == MarketType.LINEAR:
+            bucket = self._usdm_bucket_for_topic(topic)
+            return f"wss://fstream.binance.com/{bucket}/stream"
+        return self.ws_urls[market_type]
 
-                    async for msg in ws:
-                        data = orjson.loads(msg)
-                        if "result" in data:
-                            continue
-                        yield data
 
-            except asyncio.CancelledError:
-                logger.info(f"WS connection cancelled for {market_type}")
-                break
-            except Exception as e:
-                logger.warning(f"WS Disconnected ({market_type}): {e}. Reconnecting in {reconnect_delay}s...")
-                await asyncio.sleep(reconnect_delay)
-                reconnect_delay = min(reconnect_delay * 2, 30)
+    async def _get_hub(self, market_type: MarketType, topic: str) -> StreamHub:
+        key = self._hub_key(market_type, topic)
+        async with self._hubs_lock:
+            hub = self._hubs.get(key)
+            if hub is None:
+                url = self._hub_url(market_type, topic)
+                async def _connect():
+                    return await websockets.connect(url, ping_interval=20, ping_timeout=20)
+                hub = StreamHub(
+                    name=f"binance_{key}",
+                    connect=_connect,
+                    subscribe_payload=lambda ts: [{"method": "SUBSCRIBE",   "params": ts, "id": int(time.time() * 1000)}],
+                    unsubscribe_payload=lambda ts: [{"method": "UNSUBSCRIBE", "params": ts, "id": int(time.time() * 1000)}],
+                    route=lambda msg: msg.get("stream") if isinstance(msg, dict) else None,
+                )
+                self._hubs[key] = hub
+            return hub
+
+
+    async def _ws_connect(self, market_type: MarketType, params: list) -> AsyncGenerator[Dict, None]:
+        topic = params[0]
+        hub = await self._get_hub(market_type, topic)
+        q = await hub.subscribe(topic)
+        try:
+            while True:
+                msg = await q.get()
+                data = msg.get("data") if isinstance(msg, dict) else None
+                if data is None:
+                    continue
+                yield data
+        finally:
+            await hub.unsubscribe(topic, q)
 
 
     async def get_ticker(self, market_type: MarketType, symbol: str) -> Ticker:
@@ -771,13 +791,20 @@ class BinanceAdapter(BaseExchange):
                 if f["filterType"] in ["MIN_NOTIONAL", "NOTIONAL"]:
                     min_notional = float(f.get("minNotional", 0) or f.get("notional", 0))
 
+            if market_type == MarketType.SPOT:
+                price_prec    = s.get("quotePrecision", 8)
+                quantity_prec = s.get("baseAssetPrecision", 8)
+            else:
+                price_prec    = s.get("pricePrecision", 8)
+                quantity_prec = s.get("quantityPrecision", 8)
+
             results.append(SymbolInfo(
                 symbol=self.get_model_symbol(s["symbol"], market_type),
                 native_symbol=s["symbol"],
                 base_asset=s["baseAsset"],
                 quote_asset=s["quoteAsset"],
-                price_precision=s.get("quotePrecision", 8),
-                quantity_precision=s.get("baseAssetPrecision", 8),
+                price_precision=price_prec,
+                quantity_precision=quantity_prec,
                 min_qty=min_qty,
                 max_qty=max_qty,
                 min_notional=min_notional,
