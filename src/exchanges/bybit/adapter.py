@@ -1,12 +1,11 @@
 import httpx
-import orjson
 import asyncio
 import random
 import time
 import websockets
 import logging
 from typing import List, AsyncGenerator, Dict, Any, Optional, Callable
-from src.exchanges.base import BaseExchange
+from src.exchanges.base import BaseExchange, StreamHub
 from src.models import (
     Ticker, BookTicker, MarkPrice, OrderBook, Candle, Trade, AggTrade,
     MarketType, SymbolInfo, OpenInterest, FundingRate, Liquidation, LongShortRatio
@@ -31,10 +30,16 @@ class BybitAdapter(BaseExchange):
             MarketType.INVERSE: "wss://stream.bybit.com/v5/public/inverse",
         }
 
+        self._hubs: Dict[MarketType, StreamHub] = {}
+        self._hubs_lock = asyncio.Lock()
+
         self._capabilities = self._build_capabilities()
 
 
     async def shutdown(self):
+        for hub in list(self._hubs.values()):
+            await hub.close()
+        self._hubs.clear()
         await self.http_client.aclose()
 
 
@@ -452,46 +457,36 @@ class BybitAdapter(BaseExchange):
         return final_results[-total_limit:]
 
 
+    async def _get_hub(self, market_type: MarketType) -> StreamHub:
+        async with self._hubs_lock:
+            hub = self._hubs.get(market_type)
+            if hub is None:
+                url = self.ws_urls[market_type]
+                async def _connect():
+                    return await websockets.connect(url, ping_interval=20, ping_timeout=20)
+                hub = StreamHub(
+                    name=f"bybit_{market_type.value}",
+                    connect=_connect,
+                    subscribe_payload=lambda ts: [{"op": "subscribe",   "args": ts, "req_id": f"sub-{int(time.time() * 1000)}"}],
+                    unsubscribe_payload=lambda ts: [{"op": "unsubscribe", "args": ts, "req_id": f"unsub-{int(time.time() * 1000)}"}],
+                    route=lambda msg: msg.get("topic") if isinstance(msg, dict) else None,
+                    keepalive_payload={"op": "ping"},
+                    keepalive_interval=20.0,
+                )
+                self._hubs[market_type] = hub
+            return hub
+
+
     async def _ws_connect(self, market_type: MarketType, topics: list) -> AsyncGenerator[Dict, None]:
-        url = self.ws_urls[market_type]
-        reconnect_delay = 1
-
-        while True:
-            try:
-                async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
-                    logger.info(f"WS Connected: {market_type} - {topics}")
-                    req_id = f"sub-{int(time.time())}"
-                    await ws.send(orjson.dumps({"op": "subscribe", "args": topics, "req_id": req_id}).decode())
-                    last_ping = time.time()
-                    reconnect_delay = 1
-
-                    while True:
-                        try:
-                            msg = await asyncio.wait_for(ws.recv(), timeout=20)
-                        except asyncio.TimeoutError:
-                            await ws.send(orjson.dumps({"op": "ping"}).decode())
-                            last_ping = time.time()
-                            continue
-
-                        if time.time() - last_ping > 20:
-                            await ws.send(orjson.dumps({"op": "ping"}).decode())
-                            last_ping = time.time()
-
-                        try:
-                            data = orjson.loads(msg)
-                        except orjson.JSONDecodeError:
-                            continue
-                        if data.get("op") == "subscribe" and not data.get("success"):
-                            logger.error(f"Sub failed: {data}")
-                        if "topic" in data:
-                            yield data
-
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.warning(f"WS Disconnected ({e}). Reconnecting in {reconnect_delay}s...")
-                await asyncio.sleep(reconnect_delay)
-                reconnect_delay = min(reconnect_delay * 2, 30)
+        topic = topics[0]
+        hub = await self._get_hub(market_type)
+        q = await hub.subscribe(topic)
+        try:
+            while True:
+                msg = await q.get()
+                yield msg
+        finally:
+            await hub.unsubscribe(topic, q)
 
 
     async def get_ticker(self, market_type: MarketType, symbol: str) -> Ticker:
