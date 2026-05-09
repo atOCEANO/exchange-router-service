@@ -58,6 +58,15 @@ async def not_implemented_exception_handler(_request: Request, exc: NotImplement
     )
 
 
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_request: Request, exc: Exception):
+    logging.exception("Unhandled error")
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal Server Error", "detail": str(exc)},
+    )
+
+
 def validate_request(exchange: str, market_type: MarketType = None):
     adapter = get_adapter(exchange)
     if not adapter:
