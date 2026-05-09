@@ -416,16 +416,36 @@ When all retries are exhausted, `_make_request` raises `ValueError(f"Kraken thro
 
 If a future contributor finds these knobs incorrect for a specific Kraken behavior, the doc reference is `https://docs.kraken.com/api/docs/guides/spot-rest-ratelimits` and `https://support.kraken.com/articles/206548367-what-are-the-api-rate-limits-`.
 
+### WebSocket multiplexing via `StreamHub`
+
+Every adapter's `_ws_connect` is implemented on top of `StreamHub` (in [src/exchanges/base.py](../src/exchanges/base.py)). Each hub owns exactly **one** persistent upstream WebSocket and fans incoming messages out to per-topic queues. Multiple subscribers acquire a queue per topic via `hub.subscribe(topic)` and release it via `hub.unsubscribe(topic, q)`. The hub sends `SUBSCRIBE` upstream when a topic's refcount transitions from 0 to 1 and `UNSUBSCRIBE` when it drops back to 0; on reconnect it re-subscribes every topic that still has subscribers.
+
+This is the difference between "1000 subscribed symbols open 1000 sockets to Binance" (banned in minutes under Binance's 300 conn / IP / 5 min cap) and "1000 subscribed symbols share one socket carrying 1000 SUBSCRIBE messages".
+
+A `StreamHub` is a tiny adapter-agnostic shell driven by five callbacks:
+
+| Callback | Returns | Purpose |
+| :--- | :--- | :--- |
+| `connect()` | connected websocket | Open the upstream WS. Adapter handles bullet tokens, welcome frames, etc. inside this coroutine. |
+| `subscribe_payload(topics)` | iterable of payloads | One or more JSON dicts (or raw strings) to send to subscribe to the listed topics. Adapter decides whether to batch or send one-per-topic. |
+| `unsubscribe_payload(topics)` | iterable of payloads | Same shape, for unsubscribe. |
+| `route(msg)` | topic str or `None` | Given a parsed inbound message, return the topic it belongs to. Returning `None` drops the message (welcome frames, pongs, subscribe acks). |
+| `keepalive_payload` (optional) | static payload | Sent every `keepalive_interval` seconds. Use for OKX's raw `"ping"`, Bybit's `{"op": "ping"}`, KuCoin's `{"id": ..., "type": "ping"}`. Set to `None` if the `websockets` library's own `ping_interval` handles it (Binance, Kraken). |
+
+The adapter owns a small `_hubs` dict keyed by whatever distinguishes upstream connections for that exchange (typically `MarketType`, sometimes `(MarketType, bucket)` for Binance USDM, sometimes a synthetic key for Kraken spot's per-payload-shape hubs). `_ws_connect` looks up or lazily creates the right hub, calls `subscribe`, yields from the queue, and unsubscribes in `finally`. `shutdown()` calls `await hub.close()` on every hub it created.
+
+When adding a new exchange, the work is: identify the upstream's subscribe / unsubscribe / keepalive shape, write the four (or five) callbacks, and let the hub do the rest.
+
 ### Subscription payload quirks
 
 Documented here so future adapter authors know what to look for when wrapping a new exchange.
 
-- **Binance.** Standard JSON `{"method": "SUBSCRIBE", "params": [...], "id": ...}`. No client keepalive needed; reconnect on disconnect with exponential backoff.
-- **Bybit.** Standard JSON `{"op": "subscribe", "args": [...]}`. Send `{"op": "ping"}` every 20 seconds.
-- **Kraken spot.** Use the v2 WebSocket protocol on `wss://ws.kraken.com/v2`. Translate `XBT`/`XDG` to `BTC`/`DOGE` when constructing subscription payloads. The `ticker` channel needs `event_trigger: "bbo"` to emit BBO updates without trade activity. The `trade` channel needs `"snapshot": true` to emit recent trades on connect.
-- **Kraken futures.** Use the v1 WebSocket protocol on a separate URL (`wss://futures.kraken.com/ws/v1`); message shapes differ from v2 spot.
-- **KuCoin.** Two-step handshake. `POST /api/v1/bullet-public` against the spot or futures host returns `{token, instanceServers: [{endpoint, pingInterval, ...}]}`. Connect to `endpoint?token=...&connectId=<uuid>`, wait for the welcome frame, then send `{"id": ..., "type": "subscribe", "topic": "/market/ticker:BTC-USDT", "privateChannel": false, "response": true}`. Reply to the server's heartbeat by sending `{"type": "ping"}` slightly before `pingInterval` elapses. Spot and futures use different bullet endpoints and topic prefixes (`/market/`, `/spotMarket/` vs `/contractMarket/`, `/contract/`).
-- **OKX.** OKX closes idle connections after 30 seconds. Send a raw `"ping"` (not JSON) every 25 seconds; the server replies with raw `"pong"`.
+- **Binance.** Standard JSON `{"method": "SUBSCRIBE", "params": [...], "id": ...}`. Connect to the **combined-stream** URL (`/stream`, not `/ws`); responses arrive wrapped as `{"stream": "...", "data": {...}}` so routing is just `msg["stream"]`. No client keepalive needed; the `websockets` library's `ping_interval=20` handles it. USDM still needs the per-bucket URL routing (see "Binance USD-M WebSocket routing buckets" below) — one hub per `(market_type, bucket)`.
+- **Bybit.** Standard JSON `{"op": "subscribe", "args": [...]}`. Routing field is `topic`. Send `{"op": "ping"}` every 20 seconds via the hub's `keepalive_payload`.
+- **Kraken spot.** Use the v2 WebSocket protocol on `wss://ws.kraken.com/v2`. Translate `XBT`/`XDG` to `BTC`/`DOGE` when constructing subscription payloads. The `ticker` channel needs `event_trigger: "bbo"` to emit BBO updates without trade activity. The `trade` channel needs `"snapshot": true` to emit recent trades on connect. Because incoming messages don't echo `event_trigger`/`depth`/`snapshot`, two subscriptions that differ only in those flags are indistinguishable on the receive side; the adapter therefore creates a **separate hub per subscription shape** (one for ticker, one for ticker-bbo, one for book-depth-N, etc.) keyed off the params dict in `_hub_key`.
+- **Kraken futures.** Use the v1 WebSocket protocol on a separate URL (`wss://futures.kraken.com/ws/v1`); message shapes differ from v2 spot. Routing is `f"{feed}:{product_id}"`. Multiple route methods can share a single subscription on the same `feed` (futures `ticker` carries last/bid/ask/markPrice/indexPrice/fundingRate all at once, so `stream_ticker`, `stream_book_ticker`, and `stream_mark_price` all subscribe to the same `ticker:<product>` topic; the hub fans the same message into each consumer's queue).
+- **KuCoin.** Two-step handshake. `POST /api/v1/bullet-public` against the spot or futures host returns `{token, instanceServers: [{endpoint, pingInterval, ...}]}`. The hub's `connect()` performs the bullet fetch, builds `endpoint?token=...&connectId=<uuid>`, opens the WS, and consumes the welcome frame before returning. Subscribe payload: `{"id": ..., "type": "subscribe", "topic": "/market/ticker:BTC-USDT", "privateChannel": false, "response": false}` (one per topic; KuCoin doesn't batch multiple topics in one subscribe). Routing is `msg["topic"]`. Heartbeat: `{"id": ..., "type": "ping"}` every ~15 seconds. Spot and futures use different bullet endpoints and topic prefixes (`/market/`, `/spotMarket/` vs `/contractMarket/`, `/contract/`).
+- **OKX.** OKX closes idle connections after 30 seconds. Send a raw `"ping"` (not JSON) every 25 seconds; the server replies with raw `"pong"`. OKX subscribe args are dicts, not strings, so the adapter keeps a `_topic_args: Dict[str, dict]` mapping the synthetic topic key (`f"{channel}:{instId}"`) back to the wire-format arg the hub callbacks reconstruct.
 
 ### Internal endpoints behind `open_interest` and `long_short_ratio`
 
