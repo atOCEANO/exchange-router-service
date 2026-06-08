@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import uuid
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Request
@@ -5,16 +6,16 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from typing import Optional
-from src.exchanges import load_exchanges, get_adapter, EXCHANGE_REGISTRY
+from src.exchanges import EXCHANGE_REGISTRY, get_adapter, shutdown_exchanges, startup_exchanges
+from src.exchanges.base import build_oi_value
 from src.models import MarketType
 from src.stream_manager import StreamManager
+from src.version import SCHEMA_VERSION, SERVICE_VERSION
 
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s:     %(name)s - %(message)s')
 
 stream_manager = StreamManager()
-
-SERVICE_VERSION = "1.0.4"
 
 KNOWN_WS_CHANNELS = {"ticker", "book_ticker", "mark_price", "agg_trades", "trades", "orderbook", "liquidations"}
 
@@ -22,13 +23,11 @@ KNOWN_WS_CHANNELS = {"ticker", "book_ticker", "mark_price", "agg_trades", "trade
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     logging.info("Starting Exchange Router Service...")
-    load_exchanges()
+    await startup_exchanges()
     yield
     logging.info("Shutting down. Closing exchange connections...")
     await stream_manager.shutdown()
-    for name, adapter in EXCHANGE_REGISTRY.items():
-        logging.info(f"   Closing {name}...")
-        await adapter.shutdown()
+    await shutdown_exchanges()
 
 
 app = FastAPI(title="Exchange Router Service", version=SERVICE_VERSION, lifespan=lifespan)
@@ -76,6 +75,23 @@ def validate_request(exchange: str, market_type: MarketType = None):
     return adapter
 
 
+@app.get("/")
+async def service_root():
+    return {
+        "service":        "exchange-router-service",
+        "version":        SERVICE_VERSION,
+        "status":         "ok",
+        "schema_version": SCHEMA_VERSION,
+        "exchanges": [
+            {
+                "name":         name,
+                "market_types": [mt.value for mt in adapter.supported_market_types],
+            }
+            for name, adapter in EXCHANGE_REGISTRY.items()
+        ],
+    }
+
+
 @app.get("/status")
 def service_status():
     return {"status": "ok", "service": "exchange-router-service"}
@@ -89,6 +105,34 @@ def service_version():
 @app.get("/exchanges")
 def list_exchanges():
     return {"count": len(EXCHANGE_REGISTRY), "exchanges": list(EXCHANGE_REGISTRY.keys())}
+
+
+@app.get("/{exchange}")
+async def exchange_overview(exchange: str):
+    adapter      = validate_request(exchange)
+    capabilities = adapter.get_capabilities() or {}
+    caps_markets = capabilities.get("markets", {}) or {}
+
+    market_types_payload = []
+    for mt in adapter.supported_market_types:
+        try:
+            info_list    = await adapter.get_exchange_info(mt)
+            symbol_count = len(info_list)
+        except Exception:
+            logging.exception(f"symbol_count fetch failed for {exchange}/{mt.value}")
+            symbol_count = 0
+
+        market_types_payload.append({
+            "name":         mt.value,
+            "symbol_count": symbol_count,
+            "capabilities": caps_markets.get(mt, caps_markets.get(mt.value, {})),
+        })
+
+    return {
+        "exchange":     exchange,
+        "status":       "ok",
+        "market_types": market_types_payload,
+    }
 
 
 @app.get("/{exchange}/status")
@@ -109,16 +153,36 @@ def list_market_types(exchange: str):
     return {"market_types": adapter.supported_market_types}
 
 
-@app.get("/{exchange}/{market_type}/info")
-async def get_exchange_info(exchange: str, market_type: MarketType):
-    adapter = validate_request(exchange, market_type)
-    return await adapter.get_exchange_info(market_type)
+def _symbol_info_to_lite(info) -> dict:
+    funding = None
+    if info.funding is not None:
+        funding = {"kind": info.funding.kind}
+    return {
+        "symbol":        info.symbol,
+        "base_asset":    info.base_asset,
+        "quote_asset":   info.quote_asset,
+        "qty_unit":      info.qty_unit,
+        "contract_size": info.contract_size,
+        "funding":       funding,
+    }
 
 
 @app.get("/{exchange}/{market_type}/markets")
 async def get_markets(exchange: str, market_type: MarketType):
+    adapter   = validate_request(exchange, market_type)
+    info_list = await adapter.get_exchange_info(market_type)
+    return {
+        "exchange":    exchange,
+        "market_type": market_type.value,
+        "count":       len(info_list),
+        "markets":     [_symbol_info_to_lite(info) for info in info_list],
+    }
+
+
+@app.get("/{exchange}/{market_type}/markets/{symbol}")
+async def get_market_symbol(exchange: str, market_type: MarketType, symbol: str):
     adapter = validate_request(exchange, market_type)
-    return await adapter.get_markets(market_type)
+    return await adapter.get_symbol_info(market_type, symbol)
 
 
 @app.get("/{exchange}/{market_type}/ticker/{symbol}")
@@ -165,8 +229,38 @@ async def get_candles(exchange: str, market_type: MarketType, symbol: str, inter
 
 @app.get("/{exchange}/{market_type}/open_interest/{symbol}")
 async def get_open_interest(exchange: str, market_type: MarketType, symbol: str, period: str = Query("1h"), start: Optional[int] = None, limit: int = Query(30, ge=1)):
-    adapter = validate_request(exchange, market_type)
-    return await adapter.get_open_interest(market_type, symbol, period, start, limit)
+    adapter  = validate_request(exchange, market_type)
+    oi_rows  = await adapter.get_open_interest(market_type, symbol, period, start, limit)
+
+    if market_type != MarketType.LINEAR or not oi_rows:
+        return oi_rows
+
+    try:
+        candles = await adapter.get_candles(market_type, symbol, period, start, limit)
+    except Exception:
+        logging.exception(f"OI candle-join: candle fetch failed for {exchange}/{market_type.value}/{symbol}")
+        return oi_rows
+
+    close_by_ts = {c.timestamp: c.close for c in candles}
+
+    joined = []
+    for oi_row in oi_rows:
+        matching_close = close_by_ts.get(oi_row.timestamp)
+        if matching_close is None:
+            joined.append(oi_row)
+            continue
+
+        oi_obj = oi_row.open_interest
+        new_oi_value = build_oi_value(
+            native          = oi_obj.native,
+            oi_unit         = oi_obj.unit,
+            contract_size   = oi_obj.contract_size,
+            candle_close    = matching_close,
+            candle_close_ts = oi_row.timestamp,
+        )
+        joined.append(oi_row.model_copy(update={"open_interest": new_oi_value}))
+
+    return joined
 
 
 @app.get("/{exchange}/{market_type}/funding_rate/{symbol}")
@@ -209,7 +303,15 @@ async def websocket_endpoint(websocket: WebSocket, exchange: str, market_type: M
             await websocket.close(code=1003)
             return
 
-        key = f"{exchange}:{market_type.value}:{channel}:{symbol}"
+        caps = adapter.get_capabilities() or {}
+        markets_block = caps.get("markets", {}) or {}
+        mt_block = markets_block.get(market_type) or markets_block.get(market_type.value) or {}
+        ch_block = mt_block.get(channel) or {}
+        if not ch_block.get("ws"):
+            await websocket.close(code=1003, reason=f"channel {channel!r} not supported on {exchange}/{market_type.value}")
+            return
+
+        key       = f"{exchange}:{market_type.value}:{channel}:{symbol}"
         client_id = await stream_manager.subscribe(key, websocket, adapter, market_type, channel, symbol)
 
         while True:
