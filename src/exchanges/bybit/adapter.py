@@ -5,10 +5,14 @@ import time
 import websockets
 import logging
 from typing import List, AsyncGenerator, Dict, Any, Optional, Callable
-from src.exchanges.base import BaseExchange, StreamHub
+from src.exchanges.base import (
+    BaseExchange, StreamHub,
+    build_qty_value, build_volume_value, build_oi_value,
+    build_funding_current, build_funding_historical, build_funding_convention,
+)
 from src.models import (
     Ticker, BookTicker, MarkPrice, OrderBook, Candle, Trade, AggTrade,
-    MarketType, SymbolInfo, OpenInterest, FundingRate, Liquidation, LongShortRatio
+    MarketType, SymbolInfo, OpenInterest, FundingRate, Liquidation, LongShortRatio,
 )
 
 
@@ -33,6 +37,11 @@ class BybitAdapter(BaseExchange):
         self._hubs: Dict[MarketType, StreamHub] = {}
         self._hubs_lock = asyncio.Lock()
 
+        self._info_cache: Dict[MarketType, Dict[str, SymbolInfo]] = {}
+        self._info_cache_lock = asyncio.Lock()
+
+        self._funding_interval_cache: Dict[MarketType, Dict[str, int]] = {}
+
         self._capabilities = self._build_capabilities()
 
 
@@ -41,6 +50,12 @@ class BybitAdapter(BaseExchange):
             await hub.close()
         self._hubs.clear()
         await self.http_client.aclose()
+
+
+    async def _warm(self) -> None:
+        await self._step("spot_info",    self._ensure_info_cache(MarketType.SPOT))
+        await self._step("linear_info",  self._ensure_info_cache(MarketType.LINEAR))
+        await self._step("inverse_info", self._ensure_info_cache(MarketType.INVERSE))
 
 
     @property
@@ -70,6 +85,10 @@ class BybitAdapter(BaseExchange):
                         "rest": True,
                         "ws":   True,
                     },
+                    "mark_price": {
+                        "rest": False,
+                        "ws":   False,
+                    },
                     "orderbook": {
                         "rest":      True,
                         "ws":        True,
@@ -96,10 +115,6 @@ class BybitAdapter(BaseExchange):
                         "retention_ms": None,
                         "intervals":    ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w", "1M"],
                     },
-                    "mark_price": {
-                        "rest": False,
-                        "ws":   False,
-                    },
                     "funding_rate": {
                         "rest":         False,
                         "ws":           False,
@@ -121,6 +136,7 @@ class BybitAdapter(BaseExchange):
                         "paginated":    False,
                         "max_limit":    None,
                         "retention_ms": None,
+                        "completeness": None,
                     },
                     "long_short_ratio": {
                         "rest":         False,
@@ -140,6 +156,10 @@ class BybitAdapter(BaseExchange):
                         "rest": True,
                         "ws":   True,
                     },
+                    "mark_price": {
+                        "rest": True,
+                        "ws":   False,
+                    },
                     "orderbook": {
                         "rest":      True,
                         "ws":        True,
@@ -166,10 +186,6 @@ class BybitAdapter(BaseExchange):
                         "retention_ms": None,
                         "intervals":    ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w", "1M"],
                     },
-                    "mark_price": {
-                        "rest": True,
-                        "ws":   False,
-                    },
                     "funding_rate": {
                         "rest":         True,
                         "ws":           False,
@@ -182,7 +198,7 @@ class BybitAdapter(BaseExchange):
                         "ws":           False,
                         "paginated":    True,
                         "max_limit":    None,
-                        "retention_ms": 30 * 24 * 60 * 60 * 1000,
+                        "retention_ms": None,
                         "intervals":    ["5m", "15m", "30m", "1h", "4h", "1d"],
                     },
                     "liquidations": {
@@ -191,13 +207,14 @@ class BybitAdapter(BaseExchange):
                         "paginated":    False,
                         "max_limit":    None,
                         "retention_ms": None,
+                        "completeness": "partial",
                     },
                     "long_short_ratio": {
                         "rest":         True,
                         "ws":           False,
-                        "paginated":    False,
-                        "max_limit":    500,
-                        "retention_ms": 30 * 24 * 60 * 60 * 1000,
+                        "paginated":    True,
+                        "max_limit":    None,
+                        "retention_ms": None,
                         "intervals":    ["5m", "15m", "30m", "1h", "4h", "1d"],
                     },
                 },
@@ -210,6 +227,10 @@ class BybitAdapter(BaseExchange):
                         "rest": True,
                         "ws":   True,
                     },
+                    "mark_price": {
+                        "rest": True,
+                        "ws":   False,
+                    },
                     "orderbook": {
                         "rest":      True,
                         "ws":        True,
@@ -236,10 +257,6 @@ class BybitAdapter(BaseExchange):
                         "retention_ms": None,
                         "intervals":    ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w", "1M"],
                     },
-                    "mark_price": {
-                        "rest": True,
-                        "ws":   False,
-                    },
                     "funding_rate": {
                         "rest":         True,
                         "ws":           False,
@@ -252,7 +269,7 @@ class BybitAdapter(BaseExchange):
                         "ws":           False,
                         "paginated":    True,
                         "max_limit":    None,
-                        "retention_ms": 30 * 24 * 60 * 60 * 1000,
+                        "retention_ms": None,
                         "intervals":    ["5m", "15m", "30m", "1h", "4h", "1d"],
                     },
                     "liquidations": {
@@ -261,13 +278,14 @@ class BybitAdapter(BaseExchange):
                         "paginated":    False,
                         "max_limit":    None,
                         "retention_ms": None,
+                        "completeness": "partial",
                     },
                     "long_short_ratio": {
                         "rest":         True,
                         "ws":           False,
-                        "paginated":    False,
-                        "max_limit":    500,
-                        "retention_ms": 30 * 24 * 60 * 60 * 1000,
+                        "paginated":    True,
+                        "max_limit":    None,
+                        "retention_ms": None,
                         "intervals":    ["5m", "15m", "30m", "1h", "4h", "1d"],
                     },
                 },
@@ -344,6 +362,19 @@ class BybitAdapter(BaseExchange):
         if interval.endswith("m"):
             return f"{interval[:-1]}min"
         return interval
+
+
+    async def _ensure_info_cache(self, market_type: MarketType) -> Dict[str, SymbolInfo]:
+        async with self._info_cache_lock:
+            if market_type not in self._info_cache:
+                infos = await self._fetch_exchange_info(market_type)
+                self._info_cache[market_type] = {info.symbol: info for info in infos}
+            return self._info_cache[market_type]
+
+
+    async def _info_for(self, market_type: MarketType, model_symbol: str) -> Optional[SymbolInfo]:
+        cache = await self._ensure_info_cache(market_type)
+        return cache.get(model_symbol)
 
 
     async def _make_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Any:
@@ -498,16 +529,28 @@ class BybitAdapter(BaseExchange):
             raise ValueError(f"Symbol {api_symbol} not found")
         t = data["list"][0]
 
+        model_sym  = self.get_model_symbol(t["symbol"], market_type)
+        info       = await self._info_for(market_type, model_sym)
+        quote      = info.quote_asset if info else ""
+        is_inverse = market_type == MarketType.INVERSE
+        close      = float(t["lastPrice"])
+
         return Ticker(
-            symbol=self.get_model_symbol(t["symbol"], market_type),
-            price=float(t["lastPrice"]),
-            open_24h=float(t["prevPrice24h"]),
-            high_24h=float(t["highPrice24h"]),
-            low_24h=float(t["lowPrice24h"]),
-            volume_24h=float(t["volume24h"]),
-            quote_volume_24h=float(t["turnover24h"]),
-            price_change_percent=float(t["price24hPcnt"]) * 100,
-            timestamp=self.normalize_timestamp(t.get("ts") or int(time.time() * 1000)),
+            symbol               = model_sym,
+            market_type          = market_type,
+            quote                = quote,
+            price                = close,
+            open_24h             = float(t["prevPrice24h"]),
+            high_24h             = float(t["highPrice24h"]),
+            low_24h              = float(t["lowPrice24h"]),
+            volume_24h           = build_volume_value(
+                native        = float(t["volume24h"]),
+                volume_unit   = "contract" if is_inverse else "base",
+                contract_size = info.contract_size if info else None,
+                close         = close,
+            ),
+            price_change_percent = float(t["price24hPcnt"]) * 100,
+            timestamp            = self.normalize_timestamp(t.get("ts") or int(time.time() * 1000)),
         )
 
 
@@ -518,13 +561,34 @@ class BybitAdapter(BaseExchange):
         data = await self._make_request("GET", "/v5/market/tickers", {"category": cat, "symbol": api_symbol})
         t = data["list"][0]
 
+        model_sym     = self.get_model_symbol(t["symbol"], market_type)
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
+        is_inverse    = market_type == MarketType.INVERSE
+        unit          = "contract" if is_inverse else "base"
+        bid_price     = float(t.get("bid1Price", 0))
+        ask_price     = float(t.get("ask1Price", 0))
+
         return BookTicker(
-            symbol=self.get_model_symbol(t["symbol"], market_type),
-            bid_price=float(t.get("bid1Price", 0)),
-            bid_qty=float(t.get("bid1Size", 0)),
-            ask_price=float(t.get("ask1Price", 0)),
-            ask_qty=float(t.get("ask1Size", 0)),
-            timestamp=int(time.time() * 1000),
+            symbol      = model_sym,
+            market_type = market_type,
+            quote       = quote,
+            bid_price   = bid_price,
+            bid_qty     = build_qty_value(
+                native        = float(t.get("bid1Size", 0)),
+                qty_unit      = unit,
+                contract_size = contract_size,
+                price         = bid_price,
+            ),
+            ask_price   = ask_price,
+            ask_qty     = build_qty_value(
+                native        = float(t.get("ask1Size", 0)),
+                qty_unit      = unit,
+                contract_size = contract_size,
+                price         = ask_price,
+            ),
+            timestamp   = int(time.time() * 1000),
         )
 
 
@@ -537,11 +601,18 @@ class BybitAdapter(BaseExchange):
 
         data = await self._make_request("GET", "/v5/market/orderbook", {"category": cat, "symbol": api_symbol, "limit": discrete_depth_bucket})
 
+        model_sym = self.get_model_symbol(data["s"], market_type)
+        info      = await self._info_for(market_type, model_sym)
+        quote     = info.quote_asset if info else ""
+
         return OrderBook(
-            symbol=self.get_model_symbol(data["s"], market_type),
-            bids=[[float(p), float(q)] for p, q in data["b"][:depth]],
-            asks=[[float(p), float(q)] for p, q in data["a"][:depth]],
-            timestamp=self.normalize_timestamp(data["ts"]),
+            symbol      = model_sym,
+            market_type = market_type,
+            quote       = quote,
+            bids        = [[float(p), float(q)] for p, q in data["b"][:depth]],
+            asks        = [[float(p), float(q)] for p, q in data["a"][:depth]],
+            qty_unit    = "contract" if market_type == MarketType.INVERSE else "base",
+            timestamp   = self.normalize_timestamp(data["ts"]),
         )
 
 
@@ -554,13 +625,31 @@ class BybitAdapter(BaseExchange):
 
         data = await self._make_request("GET", "/v5/market/recent-trade", {"category": cat, "symbol": api_symbol, "limit": req_limit})
 
-        trades = [Trade(
-            id=t["execId"],
-            price=float(t["price"]),
-            qty=float(t["size"]),
-            side=t["side"].lower(),
-            timestamp=self.normalize_timestamp(t["time"]),
-        ) for t in data["list"]]
+        model_sym     = self.get_model_symbol(api_symbol, market_type)
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
+        is_inverse    = market_type == MarketType.INVERSE
+        unit          = "contract" if is_inverse else "base"
+
+        trades = []
+        for t in data["list"]:
+            price = float(t["price"])
+            trades.append(Trade(
+                id          = t["execId"],
+                symbol      = model_sym,
+                market_type = market_type,
+                quote       = quote,
+                price       = price,
+                qty         = build_qty_value(
+                    native        = float(t["size"]),
+                    qty_unit      = unit,
+                    contract_size = contract_size,
+                    price         = price,
+                ),
+                side        = t["side"].lower(),
+                timestamp   = self.normalize_timestamp(t["time"]),
+            ))
         trades.sort(key=lambda t: t.timestamp)
 
         return trades[-limit:]
@@ -571,8 +660,15 @@ class BybitAdapter(BaseExchange):
 
 
     async def get_candles(self, market_type: MarketType, symbol: str, interval: str, start_time: Optional[int] = None, limit: int = 100) -> List[Candle]:
-        cat = self._get_category(market_type)
+        cat        = self._get_category(market_type)
         api_symbol = self.get_api_symbol(symbol, market_type)
+        model_sym  = self.get_model_symbol(api_symbol, market_type)
+        is_inverse = market_type == MarketType.INVERSE
+        unit       = "contract" if is_inverse else "base"
+
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
 
         bybit_interval = self._map_candle_interval(interval)
 
@@ -587,14 +683,26 @@ class BybitAdapter(BaseExchange):
             if not data["list"]:
                 return []
 
-            parsed = [Candle(
-                timestamp=self.normalize_timestamp(k[0]),
-                open=float(k[1]),
-                high=float(k[2]),
-                low=float(k[3]),
-                close=float(k[4]),
-                volume=float(k[5]),
-            ) for k in data["list"]]
+            parsed = []
+            for k in data["list"]:
+                close = float(k[4])
+                parsed.append(Candle(
+                    symbol      = model_sym,
+                    market_type = market_type,
+                    quote       = quote,
+                    interval    = interval,
+                    timestamp   = self.normalize_timestamp(k[0]),
+                    open        = float(k[1]),
+                    high        = float(k[2]),
+                    low         = float(k[3]),
+                    close       = close,
+                    volume      = build_volume_value(
+                        native        = float(k[5]),
+                        volume_unit   = unit,
+                        contract_size = contract_size,
+                        close         = close,
+                    ),
+                ))
 
             return sorted(parsed, key=lambda x: x.timestamp)
 
@@ -612,21 +720,53 @@ class BybitAdapter(BaseExchange):
         data = await self._make_request("GET", "/v5/market/tickers", {"category": cat, "symbol": api_symbol})
         t = data["list"][0]
 
+        model_sym = self.get_model_symbol(t["symbol"], market_type)
+        info      = await self._info_for(market_type, model_sym)
+        quote     = info.quote_asset if info else ""
+        cycle_ms  = await self._funding_interval_ms_for(market_type, model_sym)
+
+        ts          = self.normalize_timestamp(t.get("ts") or int(time.time() * 1000))
+        next_ft_raw = t.get("nextFundingTime")
+        next_ft: Optional[int] = None
+        if next_ft_raw:
+            try:
+                v = int(next_ft_raw)
+                if v > 0:
+                    next_ft = v
+            except (TypeError, ValueError):
+                pass
+
+        funding_block = None
+        rate_raw      = t.get("fundingRate")
+        if rate_raw is not None and cycle_ms is not None and next_ft is not None:
+            funding_block = build_funding_current(
+                kind           = "discrete",
+                per_cycle      = float(rate_raw),
+                cycle_ms       = cycle_ms,
+                valid_until_ts = max(next_ft, ts + 1),
+            )
+
         return MarkPrice(
-            symbol=self.get_model_symbol(t["symbol"], market_type),
-            mark_price=float(t["markPrice"]),
-            index_price=float(t["indexPrice"]),
-            funding_rate=float(t.get("fundingRate", 0)),
-            next_funding_time=int(t.get("nextFundingTime", 0)),
-            timestamp=self.normalize_timestamp(t.get("ts") or int(time.time() * 1000)),
+            symbol      = model_sym,
+            market_type = market_type,
+            quote       = quote,
+            mark_price  = float(t["markPrice"]),
+            index_price = float(t["indexPrice"]),
+            funding     = funding_block,
+            timestamp   = ts,
         )
 
 
     async def get_funding_rate(self, market_type: MarketType, symbol: str, start_time: Optional[int] = None, limit: int = 100) -> List[FundingRate]:
         if market_type == MarketType.SPOT:
             raise NotImplementedError(f"{self.name} does not support funding_rate for {market_type.value}")
-        cat = self._get_category(market_type)
+        cat        = self._get_category(market_type)
         api_symbol = self.get_api_symbol(symbol, market_type)
+        model_sym  = self.get_model_symbol(api_symbol, market_type)
+        info       = await self._info_for(market_type, model_sym)
+        quote      = info.quote_asset if info else ""
+        cycle_ms   = await self._funding_interval_ms_for(market_type, model_sym)
+        cycle_ms   = cycle_ms if cycle_ms is not None else 8 * 3_600_000
 
         max_per_req = 200
 
@@ -638,9 +778,15 @@ class BybitAdapter(BaseExchange):
             data = await self._make_request("GET", "/v5/market/funding/history", p)
 
             parsed = [FundingRate(
-                symbol=self.get_model_symbol(api_symbol, market_type),
-                rate=float(i["fundingRate"]),
-                timestamp=self.normalize_timestamp(i["fundingRateTimestamp"]),
+                symbol      = model_sym,
+                market_type = market_type,
+                quote       = quote,
+                rate        = build_funding_historical(
+                    kind      = "discrete",
+                    per_cycle = float(i["fundingRate"]),
+                    cycle_ms  = cycle_ms,
+                ),
+                timestamp   = self.normalize_timestamp(i["fundingRateTimestamp"]),
             ) for i in data.get("list", [])]
             return sorted(parsed, key=lambda x: x.timestamp)
 
@@ -652,9 +798,15 @@ class BybitAdapter(BaseExchange):
             raise NotImplementedError(f"{self.name} does not support open_interest for {market_type.value}")
         cat = self._get_category(market_type)
         api_symbol = self.get_api_symbol(symbol, market_type)
+        model_sym = self.get_model_symbol(api_symbol, market_type)
 
-        interval = self._map_metric_interval(period)
-        max_per_req = 200
+        interval      = self._map_metric_interval(period)
+        is_inverse    = market_type == MarketType.INVERSE
+        oi_unit       = "contract" if is_inverse else "base"
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
+        max_per_req   = 200
 
         async def fetch_backwards(end_ts, l):
             anchor = end_ts if end_ts is not None else start_time
@@ -665,10 +817,18 @@ class BybitAdapter(BaseExchange):
             data = await self._make_request("GET", "/v5/market/open-interest", p)
 
             res_list = [OpenInterest(
-                symbol=self.get_model_symbol(api_symbol, market_type),
-                open_interest=float(i["openInterest"]),
-                value_usd=0.0,
-                timestamp=self.normalize_timestamp(i["timestamp"]),
+                symbol        = model_sym,
+                market_type   = market_type,
+                quote         = quote,
+                interval      = period,
+                open_interest = build_oi_value(
+                    native          = float(i["openInterest"]),
+                    oi_unit         = oi_unit,
+                    contract_size   = contract_size,
+                    candle_close    = None,
+                    candle_close_ts = None,
+                ),
+                timestamp     = self.normalize_timestamp(i["timestamp"]),
             ) for i in data["list"]]
 
             return sorted(res_list, key=lambda x: x.timestamp)
@@ -679,31 +839,33 @@ class BybitAdapter(BaseExchange):
     async def get_long_short_ratio(self, market_type: MarketType, symbol: str, period: str = "5m", start_time: Optional[int] = None, limit: int = 30) -> List[LongShortRatio]:
         if market_type == MarketType.SPOT:
             raise NotImplementedError(f"{self.name} does not support long_short_ratio for {market_type.value}")
-        cat = self._get_category(market_type)
+        cat        = self._get_category(market_type)
         api_symbol = self.get_api_symbol(symbol, market_type)
-        interval = self._map_metric_interval(period)
+        interval   = self._map_metric_interval(period)
+        model_sym  = self.get_model_symbol(api_symbol, market_type)
+        per_req    = 500
 
-        if start_time:
-            logger.warning("Bybit /v5/market/account-ratio does not support a time anchor; returning most recent data only.")
+        async def fetch_batch_backward(end_ts, l):
+            anchor = end_ts if end_ts is not None else start_time
+            p = {"category": cat, "symbol": api_symbol, "period": interval, "limit": min(l, per_req)}
+            if anchor:
+                p["endTime"] = anchor
+            data = await self._make_request("GET", "/v5/market/account-ratio", p)
+            return [LongShortRatio(
+                symbol        = model_sym,
+                market_type   = market_type,
+                interval      = period,
+                ratio         = float(i["buyRatio"]) / float(i["sellRatio"]) if float(i["sellRatio"]) > 0 else 0,
+                long_account  = float(i["buyRatio"]),
+                short_account = float(i["sellRatio"]),
+                account_scope = "all_accounts",
+                timestamp     = self.normalize_timestamp(i["timestamp"]),
+            ) for i in data.get("list", [])]
 
-        max_limit = self.get_capabilities()["markets"][market_type]["long_short_ratio"]["max_limit"]
-        req_limit = min(limit, max_limit)
-        p = {"category": cat, "symbol": api_symbol, "period": interval, "limit": req_limit}
-
-        data = await self._make_request("GET", "/v5/market/account-ratio", p)
-
-        results = [LongShortRatio(
-            symbol=self.get_model_symbol(api_symbol, market_type),
-            ratio=float(i["buyRatio"]) / float(i["sellRatio"]) if float(i["sellRatio"]) > 0 else 0,
-            long_account=float(i["buyRatio"]),
-            short_account=float(i["sellRatio"]),
-            timestamp=self.normalize_timestamp(i["timestamp"]),
-        ) for i in data["list"]]
-
-        return sorted(results, key=lambda x: x.timestamp)
+        return await self._paginate_backwards(fetch_batch_backward, limit, per_req)
 
 
-    async def get_exchange_info(self, market_type: MarketType) -> List[SymbolInfo]:
+    async def _fetch_exchange_info(self, market_type: MarketType) -> List[SymbolInfo]:
         cat = self._get_category(market_type)
         params: dict = {"category": cat, "limit": 1000}
         if market_type == MarketType.LINEAR:
@@ -721,23 +883,75 @@ class BybitAdapter(BaseExchange):
                 continue
             if market_type == MarketType.INVERSE and s.get("contractType") != "InversePerpetual":
                 continue
-            min_qty, max_qty, min_notional = 0.0, 0.0, 0.0
-            if "lotSizeFilter" in s:
-                min_qty = float(s["lotSizeFilter"].get("minOrderQty", 0))
-                max_qty = float(s["lotSizeFilter"].get("maxOrderQty", 0))
-                min_notional = float(s["lotSizeFilter"].get("minNotionalValue", 0))
+            min_qty: Optional[float] = None
+            max_qty: Optional[float] = None
+            min_notional: Optional[float] = None
+            lot = s.get("lotSizeFilter") or {}
+            raw_min_qty = lot.get("minOrderQty")
+            raw_max_qty = lot.get("maxOrderQty")
+            raw_min_notional = lot.get("minNotionalValue")
+            if raw_min_qty is not None:
+                v = float(raw_min_qty)
+                min_qty = v if v > 0 else None
+            if raw_max_qty is not None:
+                v = float(raw_max_qty)
+                max_qty = v if v > 0 else None
+            if raw_min_notional is not None:
+                v = float(raw_min_notional)
+                min_notional = v if v > 0 else None
+
+            qty_unit = "contract" if market_type == MarketType.INVERSE else "base"
+            contract_size: Optional[float] = 1.0 if market_type == MarketType.INVERSE else None
+
+            funding_interval_ms: Optional[int] = None
+            funding_block = None
+            if market_type != MarketType.SPOT:
+                fi_raw = s.get("fundingInterval")
+                if fi_raw is not None:
+                    try:
+                        funding_interval_ms = int(fi_raw) * 60_000
+                    except (TypeError, ValueError):
+                        funding_interval_ms = None
+                funding_block = build_funding_convention("discrete")
+
+            self._funding_interval_cache.setdefault(market_type, {})
+            if funding_interval_ms is not None:
+                self._funding_interval_cache[market_type][s["symbol"]] = funding_interval_ms
+
             results.append(SymbolInfo(
-                symbol=s["symbol"],
-                native_symbol=s["symbol"],
-                base_asset=s["baseCoin"],
-                quote_asset=s["quoteCoin"],
-                price_precision=int(len(s.get("priceFilter", {}).get("tickSize", "0.01").split(".")[-1])),
-                quantity_precision=int(len(s.get("lotSizeFilter", {}).get("qtyStep", "0.001").split(".")[-1])),
-                min_qty=min_qty,
-                max_qty=max_qty,
-                min_notional=min_notional,
+                symbol             = s["symbol"],
+                native_symbol      = s["symbol"],
+                base_asset         = s["baseCoin"],
+                quote_asset        = s["quoteCoin"],
+                price_precision    = int(len(s.get("priceFilter", {}).get("tickSize", "0.01").split(".")[-1])),
+                quantity_precision = int(len(s.get("lotSizeFilter", {}).get("qtyStep", "0.001").split(".")[-1])),
+                min_qty            = min_qty,
+                max_qty            = max_qty,
+                min_notional       = min_notional,
+                qty_unit           = qty_unit,
+                contract_size      = contract_size,
+                funding            = funding_block,
             ))
         return results
+
+
+    async def _funding_interval_ms_for(self, market_type: MarketType, model_symbol: str) -> Optional[int]:
+        await self._ensure_info_cache(market_type)
+        return self._funding_interval_cache.get(market_type, {}).get(model_symbol)
+
+
+    async def get_exchange_info(self, market_type: MarketType) -> List[SymbolInfo]:
+        cache = await self._ensure_info_cache(market_type)
+        return list(cache.values())
+
+
+    async def get_symbol_info(self, market_type: MarketType, symbol: str) -> SymbolInfo:
+        cache = await self._ensure_info_cache(market_type)
+        model_sym = self.get_model_symbol(self.get_api_symbol(symbol, market_type), market_type)
+        info = cache.get(model_sym)
+        if info is None:
+            raise ValueError(f"Symbol {symbol} not found on Bybit {market_type.value}")
+        return info
 
 
     async def get_markets(self, market_type: MarketType) -> List[str]:
@@ -747,26 +961,57 @@ class BybitAdapter(BaseExchange):
 
     async def stream_ticker(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Ticker, None]:
         api_symbol = self.get_api_symbol(symbol, market_type)
-        topic = f"tickers.{api_symbol}"
+        topic      = f"tickers.{api_symbol}"
+        is_inverse = market_type == MarketType.INVERSE
+        unit       = "contract" if is_inverse else "base"
+
+        model_sym_for_lookup = self.get_model_symbol(api_symbol, market_type)
+        info                 = await self._info_for(market_type, model_sym_for_lookup)
+        quote                = info.quote_asset if info else ""
+        contract_size        = info.contract_size if info else None
+
+        state: Dict[str, Any] = {}
+        bootstrapped          = False
 
         async for msg in self._ws_connect(market_type, [topic]):
-            d = msg["data"]
+            d = msg.get("data") or {}
+            if msg.get("type") == "snapshot":
+                state        = dict(d)
+                bootstrapped = True
+            else:
+                state.update(d)
+            if not bootstrapped:
+                continue
+            close_price = float(state.get("lastPrice") or 0)
             yield Ticker(
-                symbol=self.get_model_symbol(d.get("symbol", api_symbol), market_type),
-                price=float(d.get("lastPrice", 0)),
-                open_24h=float(d.get("prevPrice24h", 0)),
-                high_24h=float(d.get("highPrice24h", 0)),
-                low_24h=float(d.get("lowPrice24h", 0)),
-                volume_24h=float(d.get("volume24h", 0)),
-                quote_volume_24h=float(d.get("turnover24h", 0)),
-                price_change_percent=float(d.get("price24hPcnt", 0)) * 100,
-                timestamp=self.normalize_timestamp(msg.get("ts", time.time())),
+                symbol               = self.get_model_symbol(state.get("symbol", api_symbol), market_type),
+                market_type          = market_type,
+                quote                = quote,
+                price                = close_price,
+                open_24h             = float(state.get("prevPrice24h") or 0),
+                high_24h             = float(state.get("highPrice24h") or 0),
+                low_24h              = float(state.get("lowPrice24h") or 0),
+                volume_24h           = build_volume_value(
+                    native        = float(state.get("volume24h") or 0),
+                    volume_unit   = unit,
+                    contract_size = contract_size,
+                    close         = close_price,
+                ),
+                price_change_percent = float(state.get("price24hPcnt") or 0) * 100,
+                timestamp            = self.normalize_timestamp(msg.get("ts", time.time())),
             )
 
 
     async def stream_book_ticker(self, market_type: MarketType, symbol: str) -> AsyncGenerator[BookTicker, None]:
         api_symbol = self.get_api_symbol(symbol, market_type)
-        topic = f"orderbook.1.{api_symbol}"
+        topic      = f"orderbook.1.{api_symbol}"
+        is_inverse = market_type == MarketType.INVERSE
+        unit       = "contract" if is_inverse else "base"
+
+        model_sym_for_lookup = self.get_model_symbol(api_symbol, market_type)
+        info                 = await self._info_for(market_type, model_sym_for_lookup)
+        quote                = info.quote_asset if info else ""
+        contract_size        = info.contract_size if info else None
 
         async for msg in self._ws_connect(market_type, [topic]):
             d = msg["data"]
@@ -774,18 +1019,35 @@ class BybitAdapter(BaseExchange):
             asks = d.get("a", [])
             if not bids or not asks:
                 continue
+            bid_price = float(bids[0][0])
+            ask_price = float(asks[0][0])
             yield BookTicker(
-                symbol=self.get_model_symbol(d.get("s", api_symbol), market_type),
-                bid_price=float(bids[0][0]),
-                bid_qty=float(bids[0][1]),
-                ask_price=float(asks[0][0]),
-                ask_qty=float(asks[0][1]),
-                timestamp=self.normalize_timestamp(msg.get("ts")),
+                symbol      = self.get_model_symbol(d.get("s", api_symbol), market_type),
+                market_type = market_type,
+                quote       = quote,
+                bid_price   = bid_price,
+                bid_qty     = build_qty_value(
+                    native        = float(bids[0][1]),
+                    qty_unit      = unit,
+                    contract_size = contract_size,
+                    price         = bid_price,
+                ),
+                ask_price   = ask_price,
+                ask_qty     = build_qty_value(
+                    native        = float(asks[0][1]),
+                    qty_unit      = unit,
+                    contract_size = contract_size,
+                    price         = ask_price,
+                ),
+                timestamp   = self.normalize_timestamp(msg.get("ts")),
             )
 
 
     async def stream_orderbook(self, market_type: MarketType, symbol: str, depth: int = 20, update_speed: str = "100ms") -> AsyncGenerator[OrderBook, None]:
         api_symbol = self.get_api_symbol(symbol, market_type)
+        model_sym  = self.get_model_symbol(api_symbol, market_type)
+        info       = await self._info_for(market_type, model_sym)
+        quote      = info.quote_asset if info else ""
 
         if depth <= 1:
             lvl = 1
@@ -797,28 +1059,69 @@ class BybitAdapter(BaseExchange):
             lvl = 500
         topic = f"orderbook.{lvl}.{api_symbol}"
 
+        bids: Dict[float, float] = {}
+        asks: Dict[float, float] = {}
+
         async for msg in self._ws_connect(market_type, [topic]):
-            d = msg["data"]
+            d = msg.get("data") or {}
+            if msg.get("type") == "snapshot":
+                bids.clear()
+                asks.clear()
+            for p_str, q_str in d.get("b", []):
+                p, q = float(p_str), float(q_str)
+                if q == 0:
+                    bids.pop(p, None)
+                else:
+                    bids[p] = q
+            for p_str, q_str in d.get("a", []):
+                p, q = float(p_str), float(q_str)
+                if q == 0:
+                    asks.pop(p, None)
+                else:
+                    asks[p] = q
+
+            sorted_bids = sorted(bids.items(), key=lambda kv: -kv[0])[:depth]
+            sorted_asks = sorted(asks.items(), key=lambda kv: kv[0])[:depth]
+
             yield OrderBook(
-                symbol=self.get_model_symbol(d.get("s", api_symbol), market_type),
-                bids=[[float(p), float(q)] for p, q in d.get("b", [])],
-                asks=[[float(p), float(q)] for p, q in d.get("a", [])],
-                timestamp=self.normalize_timestamp(msg.get("ts")),
+                symbol      = self.get_model_symbol(d.get("s", api_symbol), market_type),
+                market_type = market_type,
+                quote       = quote,
+                bids        = [[p, q] for p, q in sorted_bids],
+                asks        = [[p, q] for p, q in sorted_asks],
+                qty_unit    = "contract" if market_type == MarketType.INVERSE else "base",
+                timestamp   = self.normalize_timestamp(msg.get("ts")),
             )
 
 
     async def stream_trades(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Trade, None]:
         api_symbol = self.get_api_symbol(symbol, market_type)
-        topic = f"publicTrade.{api_symbol}"
+        topic      = f"publicTrade.{api_symbol}"
+        model_sym  = self.get_model_symbol(api_symbol, market_type)
+        is_inverse = market_type == MarketType.INVERSE
+        unit       = "contract" if is_inverse else "base"
+
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
 
         async for msg in self._ws_connect(market_type, [topic]):
             for t in msg.get("data", []):
+                price = float(t["p"])
                 yield Trade(
-                    id=t["i"],
-                    price=float(t["p"]),
-                    qty=float(t["v"]),
-                    side=t["S"].lower(),
-                    timestamp=self.normalize_timestamp(t["T"]),
+                    id          = t["i"],
+                    symbol      = model_sym,
+                    market_type = market_type,
+                    quote       = quote,
+                    price       = price,
+                    qty         = build_qty_value(
+                        native        = float(t["v"]),
+                        qty_unit      = unit,
+                        contract_size = contract_size,
+                        price         = price,
+                    ),
+                    side        = t["S"].lower(),
+                    timestamp   = self.normalize_timestamp(t["T"]),
                 )
 
 
@@ -826,14 +1129,35 @@ class BybitAdapter(BaseExchange):
         if market_type == MarketType.SPOT:
             raise NotImplementedError(f"{self.name} does not support stream_liquidations for {market_type.value}")
         api_symbol = self.get_api_symbol(symbol, market_type)
-        topic = f"allLiquidation.{api_symbol}"
+        topic      = f"allLiquidation.{api_symbol}"
+        model_sym  = self.get_model_symbol(api_symbol, market_type)
+        is_inverse = market_type == MarketType.INVERSE
+        unit       = "contract" if is_inverse else "base"
+
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
 
         async for msg in self._ws_connect(market_type, [topic]):
             for d in msg.get("data", []):
+                side_raw = d.get("S")
+                if side_raw is None:
+                    continue
+                side_norm = side_raw.lower()
+                if side_norm not in ("buy", "sell"):
+                    continue
+                price = float(d.get("p", 0))
                 yield Liquidation(
-                    symbol=self.get_model_symbol(d.get("s", api_symbol), market_type),
-                    side=d.get("S", "").lower(),
-                    price=float(d.get("p", 0)),
-                    qty=float(d.get("v", 0)),
-                    timestamp=self.normalize_timestamp(d.get("T", msg.get("ts"))),
+                    symbol      = self.get_model_symbol(d.get("s", api_symbol), market_type),
+                    market_type = market_type,
+                    quote       = quote,
+                    side        = side_norm,
+                    price       = price,
+                    qty         = build_qty_value(
+                        native        = float(d.get("v", 0)),
+                        qty_unit      = unit,
+                        contract_size = contract_size,
+                        price         = price,
+                    ),
+                    timestamp   = self.normalize_timestamp(d.get("T", msg.get("ts"))),
                 )
