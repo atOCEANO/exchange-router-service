@@ -27,3 +27,18 @@ def load_exchanges():
 
 def get_adapter(name: str) -> BaseExchange:
     return EXCHANGE_REGISTRY.get(name)
+
+
+async def startup_exchanges() -> None:
+    load_exchanges()
+    for name, adapter in EXCHANGE_REGISTRY.items():
+        try:
+            await adapter.preload()
+        except Exception:
+            logger.exception(f"preload() failed for {name}")
+
+
+async def shutdown_exchanges() -> None:
+    for name, adapter in EXCHANGE_REGISTRY.items():
+        logger.info(f"   Closing {name}...")
+        await adapter.shutdown()
