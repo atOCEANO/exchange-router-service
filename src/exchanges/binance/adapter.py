@@ -5,10 +5,14 @@ import time
 import websockets
 import logging
 from typing import List, AsyncGenerator, Dict, Any, Optional, Callable
-from src.exchanges.base import BaseExchange, StreamHub
+from src.exchanges.base import (
+    BaseExchange, StreamHub,
+    build_qty_value, build_volume_value, build_oi_value,
+    build_funding_current, build_funding_historical, build_funding_convention,
+)
 from src.models import (
     Ticker, BookTicker, MarkPrice, OrderBook, Candle, Trade, AggTrade,
-    MarketType, SymbolInfo, OpenInterest, FundingRate, Liquidation, LongShortRatio
+    MarketType, SymbolInfo, OpenInterest, FundingRate, Liquidation, LongShortRatio,
 )
 
 
@@ -26,15 +30,6 @@ class BinanceAdapter(BaseExchange):
         "bookTicker":  "public",
         "depth":       "public",
     }
-
-
-    def _usdm_bucket_for_topic(self, topic: str) -> str:
-        if "@" not in topic:
-            return "public"
-        channel = topic.split("@", 1)[1].split("@", 1)[0]
-        if channel.startswith("depth"):
-            channel = "depth"
-        return self._USDM_BUCKETS.get(channel, "public")
 
 
     def __init__(self):
@@ -57,6 +52,11 @@ class BinanceAdapter(BaseExchange):
         self._hubs: Dict[str, StreamHub] = {}
         self._hubs_lock = asyncio.Lock()
 
+        self._info_cache: Dict[MarketType, Dict[str, SymbolInfo]] = {}
+        self._info_cache_lock = asyncio.Lock()
+
+        self._funding_interval_cache: Dict[MarketType, Dict[str, int]] = {}
+
         self._capabilities = self._build_capabilities()
 
 
@@ -65,6 +65,12 @@ class BinanceAdapter(BaseExchange):
             await hub.close()
         self._hubs.clear()
         await self.http_client.aclose()
+
+
+    async def _warm(self) -> None:
+        await self._step("spot_info",    self._ensure_info_cache(MarketType.SPOT))
+        await self._step("linear_info",  self._ensure_info_cache(MarketType.LINEAR))
+        await self._step("inverse_info", self._ensure_info_cache(MarketType.INVERSE))
 
 
     @property
@@ -94,6 +100,10 @@ class BinanceAdapter(BaseExchange):
                         "rest": True,
                         "ws":   True,
                     },
+                    "mark_price": {
+                        "rest": False,
+                        "ws":   False,
+                    },
                     "orderbook": {
                         "rest":      True,
                         "ws":        True,
@@ -120,10 +130,6 @@ class BinanceAdapter(BaseExchange):
                         "retention_ms": None,
                         "intervals":    ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"],
                     },
-                    "mark_price": {
-                        "rest": False,
-                        "ws":   False,
-                    },
                     "funding_rate": {
                         "rest":         False,
                         "ws":           False,
@@ -145,6 +151,7 @@ class BinanceAdapter(BaseExchange):
                         "paginated":    False,
                         "max_limit":    None,
                         "retention_ms": None,
+                        "completeness": None,
                     },
                     "long_short_ratio": {
                         "rest":         False,
@@ -164,6 +171,10 @@ class BinanceAdapter(BaseExchange):
                         "rest": True,
                         "ws":   True,
                     },
+                    "mark_price": {
+                        "rest": True,
+                        "ws":   True,
+                    },
                     "orderbook": {
                         "rest":      True,
                         "ws":        True,
@@ -190,10 +201,6 @@ class BinanceAdapter(BaseExchange):
                         "retention_ms": None,
                         "intervals":    ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"],
                     },
-                    "mark_price": {
-                        "rest": True,
-                        "ws":   True,
-                    },
                     "funding_rate": {
                         "rest":         True,
                         "ws":           False,
@@ -215,6 +222,7 @@ class BinanceAdapter(BaseExchange):
                         "paginated":    False,
                         "max_limit":    None,
                         "retention_ms": None,
+                        "completeness": "partial",
                     },
                     "long_short_ratio": {
                         "rest":         True,
@@ -234,6 +242,10 @@ class BinanceAdapter(BaseExchange):
                         "rest": True,
                         "ws":   True,
                     },
+                    "mark_price": {
+                        "rest": True,
+                        "ws":   True,
+                    },
                     "orderbook": {
                         "rest":      True,
                         "ws":        True,
@@ -260,10 +272,6 @@ class BinanceAdapter(BaseExchange):
                         "retention_ms": None,
                         "intervals":    ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"],
                     },
-                    "mark_price": {
-                        "rest": True,
-                        "ws":   True,
-                    },
                     "funding_rate": {
                         "rest":         True,
                         "ws":           False,
@@ -285,6 +293,7 @@ class BinanceAdapter(BaseExchange):
                         "paginated":    False,
                         "max_limit":    None,
                         "retention_ms": None,
+                        "completeness": "partial",
                     },
                     "long_short_ratio": {
                         "rest":         True,
@@ -344,6 +353,19 @@ class BinanceAdapter(BaseExchange):
         if unit == "M": return val * 30 * 24 * 60 * 60 * 1000
 
         return 0
+
+
+    async def _ensure_info_cache(self, market_type: MarketType) -> Dict[str, SymbolInfo]:
+        async with self._info_cache_lock:
+            if market_type not in self._info_cache:
+                infos = await self._fetch_exchange_info(market_type)
+                self._info_cache[market_type] = {info.symbol: info for info in infos}
+            return self._info_cache[market_type]
+
+
+    async def _info_for(self, market_type: MarketType, model_symbol: str) -> Optional[SymbolInfo]:
+        cache = await self._ensure_info_cache(market_type)
+        return cache.get(model_symbol)
 
 
     async def _make_request(self, method: str, url: str, params: Optional[Dict] = None) -> Any:
@@ -449,6 +471,15 @@ class BinanceAdapter(BaseExchange):
         return final_results[-total_limit:]
 
 
+    def _usdm_bucket_for_topic(self, topic: str) -> str:
+        if "@" not in topic:
+            return "public"
+        channel = topic.split("@", 1)[1].split("@", 1)[0]
+        if channel.startswith("depth"):
+            channel = "depth"
+        return self._USDM_BUCKETS.get(channel, "public")
+
+
     def _hub_key(self, market_type: MarketType, topic: str) -> str:
         if market_type == MarketType.LINEAR:
             return f"{market_type.value}:{self._usdm_bucket_for_topic(topic)}"
@@ -483,11 +514,12 @@ class BinanceAdapter(BaseExchange):
 
     async def _ws_connect(self, market_type: MarketType, params: list) -> AsyncGenerator[Dict, None]:
         topic = params[0]
-        hub = await self._get_hub(market_type, topic)
-        q = await hub.subscribe(topic)
+        hub   = await self._get_hub(market_type, topic)
+        q     = await hub.subscribe(topic)
+
         try:
             while True:
-                msg = await q.get()
+                msg  = await q.get()
                 data = msg.get("data") if isinstance(msg, dict) else None
                 if data is None:
                     continue
@@ -508,16 +540,30 @@ class BinanceAdapter(BaseExchange):
         if isinstance(data, list):
             data = data[0]
 
+        model_sym = self.get_model_symbol(data["symbol"], market_type)
+        info      = await self._info_for(market_type, model_sym)
+        quote     = info.quote_asset if info else ""
+
+        is_inverse    = market_type == MarketType.INVERSE
+        volume_native = float(data["volume"])
+        close_price   = float(data["lastPrice"])
+
         return Ticker(
-            symbol=self.get_model_symbol(data["symbol"], market_type),
-            price=float(data["lastPrice"]),
-            open_24h=float(data["openPrice"]),
-            high_24h=float(data["highPrice"]),
-            low_24h=float(data["lowPrice"]),
-            volume_24h=float(data["volume"]),
-            quote_volume_24h=float(data.get("quoteVolume", 0)),
-            price_change_percent=float(data["priceChangePercent"]),
-            timestamp=self.normalize_timestamp(data["closeTime"]),
+            symbol               = model_sym,
+            market_type          = market_type,
+            quote                = quote,
+            price                = close_price,
+            open_24h             = float(data["openPrice"]),
+            high_24h             = float(data["highPrice"]),
+            low_24h              = float(data["lowPrice"]),
+            volume_24h           = build_volume_value(
+                native        = volume_native,
+                volume_unit   = "contract" if is_inverse else "base",
+                contract_size = info.contract_size if info else None,
+                close         = close_price,
+            ),
+            price_change_percent = float(data["priceChangePercent"]),
+            timestamp            = self.normalize_timestamp(data["closeTime"]),
         )
 
 
@@ -533,13 +579,35 @@ class BinanceAdapter(BaseExchange):
         if isinstance(data, list):
             data = data[0]
 
+        model_sym = self.get_model_symbol(data["symbol"], market_type)
+        info      = await self._info_for(market_type, model_sym)
+        quote     = info.quote_asset if info else ""
+
+        is_inverse    = market_type == MarketType.INVERSE
+        unit          = "contract" if is_inverse else "base"
+        contract_size = info.contract_size if info else None
+        bid_price     = float(data["bidPrice"])
+        ask_price     = float(data["askPrice"])
+
         return BookTicker(
-            symbol=self.get_model_symbol(data["symbol"], market_type),
-            bid_price=float(data["bidPrice"]),
-            bid_qty=float(data["bidQty"]),
-            ask_price=float(data["askPrice"]),
-            ask_qty=float(data["askQty"]),
-            timestamp=self.normalize_timestamp(data.get("time") or int(time.time() * 1000)),
+            symbol      = model_sym,
+            market_type = market_type,
+            quote       = quote,
+            bid_price   = bid_price,
+            bid_qty     = build_qty_value(
+                native        = float(data["bidQty"]),
+                qty_unit      = unit,
+                contract_size = contract_size,
+                price         = bid_price,
+            ),
+            ask_price   = ask_price,
+            ask_qty     = build_qty_value(
+                native        = float(data["askQty"]),
+                qty_unit      = unit,
+                contract_size = contract_size,
+                price         = ask_price,
+            ),
+            timestamp   = self.normalize_timestamp(data.get("time") or int(time.time() * 1000)),
         )
 
 
@@ -557,11 +625,18 @@ class BinanceAdapter(BaseExchange):
         data = await self._make_request("GET", f"{base_url}{path}", params={"symbol": api_symbol, "limit": discrete_depth_bucket})
         ts = data.get("E") or data.get("T") or int(time.time() * 1000)
 
+        model_sym = self.get_model_symbol(api_symbol, market_type)
+        info      = await self._info_for(market_type, model_sym)
+        quote     = info.quote_asset if info else ""
+
         return OrderBook(
-            symbol=self.get_model_symbol(api_symbol, market_type),
-            bids=[[float(p), float(q)] for p, q in data["bids"][:depth]],
-            asks=[[float(p), float(q)] for p, q in data["asks"][:depth]],
-            timestamp=self.normalize_timestamp(ts),
+            symbol      = model_sym,
+            market_type = market_type,
+            quote       = quote,
+            bids        = [[float(p), float(q)] for p, q in data["bids"][:depth]],
+            asks        = [[float(p), float(q)] for p, q in data["asks"][:depth]],
+            qty_unit    = "contract" if market_type == MarketType.INVERSE else "base",
+            timestamp   = self.normalize_timestamp(ts),
         )
 
 
@@ -576,13 +651,32 @@ class BinanceAdapter(BaseExchange):
 
         data = await self._make_request("GET", f"{base_url}{path}", params={"symbol": api_symbol, "limit": limit})
 
-        trades = [Trade(
-            id=str(t["id"]),
-            price=float(t["price"]),
-            qty=float(t["qty"]),
-            side="sell" if t["isBuyerMaker"] else "buy",
-            timestamp=self.normalize_timestamp(t["time"]),
-        ) for t in data]
+        model_sym     = self.get_model_symbol(api_symbol, market_type)
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
+        is_inverse    = market_type == MarketType.INVERSE
+        unit          = "contract" if is_inverse else "base"
+
+        trades = []
+        for t in data:
+            price = float(t["price"])
+            trades.append(Trade(
+                id          = str(t["id"]),
+                symbol      = model_sym,
+                market_type = market_type,
+                quote       = quote,
+                price       = price,
+                qty         = build_qty_value(
+                    native        = float(t["qty"]),
+                    qty_unit      = unit,
+                    contract_size = contract_size,
+                    price         = price,
+                ),
+                side        = "sell" if t["isBuyerMaker"] else "buy",
+                timestamp   = self.normalize_timestamp(t["time"]),
+            ))
+
         trades.sort(key=lambda t: t.timestamp)
         return trades[-limit:]
 
@@ -595,21 +689,40 @@ class BinanceAdapter(BaseExchange):
         if market_type == MarketType.INVERSE:
             path = "/dapi/v1/aggTrades"
 
+        model_sym     = self.get_model_symbol(api_symbol, market_type)
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
+        is_inverse    = market_type == MarketType.INVERSE
+        unit          = "contract" if is_inverse else "base"
+
         async def fetch_batch_by_end(end_ts, l):
             anchor = end_ts if end_ts is not None else start_time
             p = {"symbol": api_symbol, "limit": l}
             if anchor:
                 p["endTime"] = anchor
             data = await self._make_request("GET", f"{base_url}{path}", params=p)
-            return [AggTrade(
-                agg_id=str(t["a"]),
-                price=float(t["p"]),
-                qty=float(t["q"]),
-                first_trade_id=str(t["f"]),
-                last_trade_id=str(t["l"]),
-                side="sell" if t["m"] else "buy",
-                timestamp=self.normalize_timestamp(t["T"]),
-            ) for t in data]
+            out = []
+            for t in data:
+                price = float(t["p"])
+                out.append(AggTrade(
+                    agg_id         = str(t["a"]),
+                    symbol         = model_sym,
+                    market_type    = market_type,
+                    quote          = quote,
+                    price          = price,
+                    qty            = build_qty_value(
+                        native        = float(t["q"]),
+                        qty_unit      = unit,
+                        contract_size = contract_size,
+                        price         = price,
+                    ),
+                    first_trade_id = str(t["f"]),
+                    last_trade_id  = str(t["l"]),
+                    side           = "sell" if t["m"] else "buy",
+                    timestamp      = self.normalize_timestamp(t["T"]),
+                ))
+            return out
 
         if start_time or limit > 1000:
             return await self._paginate_backwards(fetch_batch_by_end, limit, 1000)
@@ -624,15 +737,35 @@ class BinanceAdapter(BaseExchange):
         if market_type == MarketType.INVERSE:
             path = "/dapi/v1/klines"
 
+        model_sym     = self.get_model_symbol(api_symbol, market_type)
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
+        is_inverse    = market_type == MarketType.INVERSE
+        unit          = "contract" if is_inverse else "base"
+
         def _parse_candles(data):
-            return [Candle(
-                timestamp=self.normalize_timestamp(k[0]),
-                open=float(k[1]),
-                high=float(k[2]),
-                low=float(k[3]),
-                close=float(k[4]),
-                volume=float(k[5]),
-            ) for k in data]
+            out = []
+            for k in data:
+                close = float(k[4])
+                out.append(Candle(
+                    symbol      = model_sym,
+                    market_type = market_type,
+                    quote       = quote,
+                    interval    = interval,
+                    timestamp   = self.normalize_timestamp(k[0]),
+                    open        = float(k[1]),
+                    high        = float(k[2]),
+                    low         = float(k[3]),
+                    close       = close,
+                    volume      = build_volume_value(
+                        native        = float(k[5]),
+                        volume_unit   = unit,
+                        contract_size = contract_size,
+                        close         = close,
+                    ),
+                ))
+            return out
 
         async def fetch_batch_by_end(end_ts, l):
             anchor = end_ts if end_ts is not None else start_time
@@ -661,13 +794,33 @@ class BinanceAdapter(BaseExchange):
         if isinstance(data, list):
             data = data[0]
 
+        model_sym = self.get_model_symbol(data["symbol"], market_type)
+        info      = await self._info_for(market_type, model_sym)
+        quote     = info.quote_asset if info else ""
+        cycle_ms  = await self._funding_interval_ms_for(market_type, model_sym)
+
+        ts          = self.normalize_timestamp(data["time"])
+        next_ft_raw = data.get("nextFundingTime")
+        next_ft     = self.normalize_timestamp(next_ft_raw) if next_ft_raw else None
+
+        funding_block = None
+        rate_raw      = data.get("lastFundingRate")
+        if rate_raw is not None and cycle_ms is not None and next_ft is not None:
+            funding_block = build_funding_current(
+                kind           = "discrete",
+                per_cycle      = float(rate_raw),
+                cycle_ms       = cycle_ms,
+                valid_until_ts = max(next_ft, ts + 1),
+            )
+
         return MarkPrice(
-            symbol=self.get_model_symbol(data["symbol"], market_type),
-            mark_price=float(data["markPrice"]),
-            index_price=float(data["indexPrice"]),
-            funding_rate=float(data["lastFundingRate"]),
-            next_funding_time=self.normalize_timestamp(data.get("nextFundingTime") or 0),
-            timestamp=self.normalize_timestamp(data["time"]),
+            symbol      = model_sym,
+            market_type = market_type,
+            quote       = quote,
+            mark_price  = float(data["markPrice"]),
+            index_price = float(data["indexPrice"]),
+            funding     = funding_block,
+            timestamp   = ts,
         )
 
 
@@ -677,26 +830,73 @@ class BinanceAdapter(BaseExchange):
 
         base_url = self._get_rest_url(market_type)
         endpoint = "/fapi/v1/fundingRate" if market_type == MarketType.LINEAR else "/dapi/v1/fundingRate"
-
         api_symbol = self.get_api_symbol(symbol, market_type)
 
-        async def fetch_batch_by_end(end_ts, l):
-            anchor = end_ts if end_ts is not None else start_time
-            p = {"symbol": api_symbol, "limit": l}
-            if anchor:
-                p["endTime"] = anchor
-            data = await self._make_request("GET", f"{base_url}{endpoint}", params=p)
+        per_req = 1000
+        default_cadence_ms = 8 * 3_600_000
+
+        model_sym       = self.get_model_symbol(api_symbol, market_type)
+        info            = await self._info_for(market_type, model_sym)
+        quote           = info.quote_asset if info else ""
+        row_interval_ms = await self._funding_interval_ms_for(market_type, model_sym)
+        cycle_ms        = row_interval_ms if row_interval_ms is not None else default_cadence_ms
+
+        async def call(params: dict) -> List[FundingRate]:
+            data = await self._make_request("GET", f"{base_url}{endpoint}", params=params)
             return [FundingRate(
-                symbol=i["symbol"],
-                rate=float(i["fundingRate"]),
-                timestamp=self.normalize_timestamp(i["fundingTime"]),
+                symbol      = self.get_model_symbol(i["symbol"], market_type),
+                market_type = market_type,
+                quote       = quote,
+                rate        = build_funding_historical(
+                    kind      = "discrete",
+                    per_cycle = float(i["fundingRate"]),
+                    cycle_ms  = cycle_ms,
+                ),
+                timestamp   = self.normalize_timestamp(i["fundingTime"]),
             ) for i in data]
 
-        max_per_req = 1000
+        if start_time is not None:
+            params = {
+                "symbol":    api_symbol,
+                "limit":     min(limit, per_req),
+                "startTime": max(0, start_time - min(limit, per_req) * default_cadence_ms),
+                "endTime":   start_time,
+            }
+            return (await call(params))[-limit:]
 
-        if start_time is not None or limit > max_per_req:
-            return await self._paginate_backwards(fetch_batch_by_end, limit, max_per_req)
-        return await fetch_batch_by_end(None, limit)
+        recent = await call({"symbol": api_symbol, "limit": min(limit, 200)})
+        if limit <= len(recent):
+            return recent[-limit:]
+
+        collected = list(recent)
+        seen = {r.timestamp for r in collected}
+
+        if len(recent) >= 2:
+            intervals = sorted(recent[i + 1].timestamp - recent[i].timestamp for i in range(len(recent) - 1))
+            cadence_ms = max(intervals[len(intervals) // 2], 60_000)
+        else:
+            cadence_ms = default_cadence_ms
+
+        safety_pages = 10
+        while len(collected) < limit and safety_pages > 0:
+            oldest_ts = min(r.timestamp for r in collected)
+            params = {
+                "symbol":    api_symbol,
+                "limit":     per_req,
+                "startTime": max(0, oldest_ts - per_req * cadence_ms),
+                "endTime":   oldest_ts - 1,
+            }
+            batch = await call(params)
+            new = [r for r in batch if r.timestamp not in seen]
+            if not new:
+                break
+            for r in new:
+                seen.add(r.timestamp)
+            collected.extend(new)
+            safety_pages -= 1
+
+        collected.sort(key=lambda x: x.timestamp)
+        return collected[-limit:]
 
 
     async def get_open_interest(self, market_type: MarketType, symbol: str, period: str = "1h", start_time: Optional[int] = None, limit: int = 30) -> List[OpenInterest]:
@@ -711,6 +911,12 @@ class BinanceAdapter(BaseExchange):
 
         sym_key = "symbol" if market_type == MarketType.LINEAR else "pair"
 
+        info          = await self._info_for(market_type, model_symbol)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
+        is_inverse    = market_type == MarketType.INVERSE
+        oi_unit       = "contract" if is_inverse else "base"
+
         async def fetch_batch_backward(end_ts, l):
             anchor = end_ts if end_ts is not None else start_time
             p = {sym_key: raw_symbol, "period": period, "limit": l}
@@ -720,10 +926,18 @@ class BinanceAdapter(BaseExchange):
                 p["contractType"] = "PERPETUAL"
             data = await self._make_request("GET", f"{base_url}{endpoint}", params=p)
             return [OpenInterest(
-                symbol=model_symbol,
-                open_interest=float(i["sumOpenInterest"]),
-                value_usd=float(i["sumOpenInterestValue"]),
-                timestamp=self.normalize_timestamp(i["timestamp"]),
+                symbol        = model_symbol,
+                market_type   = market_type,
+                quote         = quote,
+                interval      = period,
+                open_interest = build_oi_value(
+                    native        = float(i["sumOpenInterest"]),
+                    oi_unit       = oi_unit,
+                    contract_size = contract_size,
+                    candle_close  = None,
+                    candle_close_ts = None,
+                ),
+                timestamp     = self.normalize_timestamp(i["timestamp"]),
             ) for i in data]
 
         return await self._paginate_backwards(fetch_batch_backward, limit, 500)
@@ -755,24 +969,50 @@ class BinanceAdapter(BaseExchange):
             p[sym_key] = raw_symbol
             data = await self._make_request("GET", f"{base_url}{endpoint}", params=p)
             return [LongShortRatio(
-                symbol=model_symbol,
-                ratio=float(i["longShortRatio"]),
-                long_account=float(i["longAccount"]),
-                short_account=float(i["shortAccount"]),
-                timestamp=self.normalize_timestamp(i["timestamp"]),
+                symbol        = model_symbol,
+                market_type   = market_type,
+                interval      = period,
+                ratio         = float(i["longShortRatio"]),
+                long_account  = float(i["longAccount"]),
+                short_account = float(i["shortAccount"]),
+                account_scope = "all_accounts",
+                timestamp     = self.normalize_timestamp(i["timestamp"]),
             ) for i in data]
 
         return await self._paginate_backwards(fetch_batch_backward, limit, 500)
 
 
-    async def get_exchange_info(self, market_type: MarketType) -> List[SymbolInfo]:
+    async def _fetch_funding_overrides(self, market_type: MarketType) -> Dict[str, int]:
+        if market_type == MarketType.SPOT:
+            return {}
+        base_url = self._get_rest_url(market_type)
+        endpoint = "/fapi/v1/fundingInfo" if market_type == MarketType.LINEAR else "/dapi/v1/fundingInfo"
+        try:
+            data = await self._make_request("GET", f"{base_url}{endpoint}")
+        except Exception as e:
+            logger.warning(f"Binance fundingInfo fetch failed for {market_type}: {e}; falling back to default 8h cycle for every symbol")
+            return {}
+        out: Dict[str, int] = {}
+        for item in data or []:
+            try:
+                hours = float(item["fundingIntervalHours"])
+                out[item["symbol"]] = int(hours * 3_600_000)
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
+
+
+    async def _fetch_exchange_info(self, market_type: MarketType) -> List[SymbolInfo]:
         base_url = self._get_rest_url(market_type)
         endpoint = "/api/v3/exchangeInfo" if market_type == MarketType.SPOT else "/fapi/v1/exchangeInfo"
         if market_type == MarketType.INVERSE:
             endpoint = "/dapi/v1/exchangeInfo"
 
         data = await self._make_request("GET", f"{base_url}{endpoint}")
+        funding_overrides = await self._fetch_funding_overrides(market_type)
         results = []
+
+        self._funding_interval_cache.setdefault(market_type, {})
 
         for s in data["symbols"]:
             s_status = s.get("status") or s.get("contractStatus")
@@ -781,25 +1021,57 @@ class BinanceAdapter(BaseExchange):
             if market_type != MarketType.SPOT and s.get("contractType") != "PERPETUAL":
                 continue
 
-            min_qty = 0.0
-            max_qty = 0.0
-            min_notional = 0.0
+            min_qty: Optional[float] = None
+            max_qty: Optional[float] = None
+            min_notional: Optional[float] = None
+            tick_size = ""
+            step_size = ""
 
             for f in s.get("filters", []):
                 if f["filterType"] == "LOT_SIZE":
                     min_qty, max_qty = float(f["minQty"]), float(f["maxQty"])
+                    step_size = f.get("stepSize", "") or step_size
+                if f["filterType"] == "PRICE_FILTER":
+                    tick_size = f.get("tickSize", "") or tick_size
                 if f["filterType"] in ["MIN_NOTIONAL", "NOTIONAL"]:
-                    min_notional = float(f.get("minNotional", 0) or f.get("notional", 0))
+                    raw_notional = f.get("minNotional") or f.get("notional")
+                    if raw_notional is not None:
+                        min_notional = float(raw_notional)
+
+            def _decimals(s_val):
+                if not s_val or "." not in s_val:
+                    return 0
+                return len(s_val.split(".")[1].rstrip("0"))
 
             if market_type == MarketType.SPOT:
-                price_prec    = s.get("quotePrecision", 8)
-                quantity_prec = s.get("baseAssetPrecision", 8)
+                price_prec    = _decimals(tick_size) if tick_size else s.get("quotePrecision", 8)
+                quantity_prec = _decimals(step_size) if step_size else s.get("baseAssetPrecision", 8)
             else:
                 price_prec    = s.get("pricePrecision", 8)
                 quantity_prec = s.get("quantityPrecision", 8)
 
+            qty_unit = "contract" if market_type == MarketType.INVERSE else "base"
+            contract_size: Optional[float] = None
+            if market_type == MarketType.INVERSE:
+                cs_raw = s.get("contractSize")
+                if cs_raw is not None:
+                    try:
+                        contract_size = float(cs_raw)
+                    except (TypeError, ValueError):
+                        contract_size = None
+
+            funding_interval_ms: Optional[int] = None
+            funding_block = None
+            if market_type != MarketType.SPOT:
+                funding_interval_ms = funding_overrides.get(s["symbol"], 8 * 3_600_000)
+                funding_block = build_funding_convention("discrete")
+
+            model_sym = self.get_model_symbol(s["symbol"], market_type)
+            if funding_interval_ms is not None:
+                self._funding_interval_cache[market_type][model_sym] = funding_interval_ms
+
             results.append(SymbolInfo(
-                symbol=self.get_model_symbol(s["symbol"], market_type),
+                symbol=model_sym,
                 native_symbol=s["symbol"],
                 base_asset=s["baseAsset"],
                 quote_asset=s["quoteAsset"],
@@ -808,9 +1080,31 @@ class BinanceAdapter(BaseExchange):
                 min_qty=min_qty,
                 max_qty=max_qty,
                 min_notional=min_notional,
+                qty_unit=qty_unit,
+                contract_size=contract_size,
+                funding=funding_block,
             ))
 
         return results
+
+
+    async def _funding_interval_ms_for(self, market_type: MarketType, model_symbol: str) -> Optional[int]:
+        await self._ensure_info_cache(market_type)
+        return self._funding_interval_cache.get(market_type, {}).get(model_symbol)
+
+
+    async def get_exchange_info(self, market_type: MarketType) -> List[SymbolInfo]:
+        cache = await self._ensure_info_cache(market_type)
+        return list(cache.values())
+
+
+    async def get_symbol_info(self, market_type: MarketType, symbol: str) -> SymbolInfo:
+        cache = await self._ensure_info_cache(market_type)
+        model_sym = self.get_model_symbol(self.get_api_symbol(symbol, market_type), market_type)
+        info = cache.get(model_sym)
+        if info is None:
+            raise ValueError(f"Symbol {symbol} not found on Binance {market_type.value}")
+        return info
 
 
     async def get_markets(self, market_type: MarketType) -> List[str]:
@@ -819,108 +1113,226 @@ class BinanceAdapter(BaseExchange):
 
 
     async def stream_ticker(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Ticker, None]:
-        s_norm = self.get_stream_symbol(symbol, market_type)
+        s_norm     = self.get_stream_symbol(symbol, market_type)
+        is_inverse = market_type == MarketType.INVERSE
+        unit       = "contract" if is_inverse else "base"
+
+        model_sym_for_lookup = self.get_model_symbol(self.get_api_symbol(symbol, market_type), market_type)
+        info                 = await self._info_for(market_type, model_sym_for_lookup)
+        quote                = info.quote_asset if info else ""
+        contract_size        = info.contract_size if info else None
+
         async for data in self._ws_connect(market_type, [f"{s_norm}@ticker"]):
+            close_price = float(data["c"])
             yield Ticker(
-                symbol=self.get_model_symbol(data["s"], market_type),
-                price=float(data["c"]),
-                open_24h=float(data["o"]),
-                high_24h=float(data["h"]),
-                low_24h=float(data["l"]),
-                volume_24h=float(data["v"]),
-                quote_volume_24h=float(data["q"]),
-                price_change_percent=float(data["P"]),
-                timestamp=self.normalize_timestamp(data["E"]),
+                symbol               = self.get_model_symbol(data["s"], market_type),
+                market_type          = market_type,
+                quote                = quote,
+                price                = close_price,
+                open_24h             = float(data["o"]),
+                high_24h             = float(data["h"]),
+                low_24h              = float(data["l"]),
+                volume_24h           = build_volume_value(
+                    native        = float(data["v"]),
+                    volume_unit   = unit,
+                    contract_size = contract_size,
+                    close         = close_price,
+                ),
+                price_change_percent = float(data["P"]),
+                timestamp            = self.normalize_timestamp(data["E"]),
             )
 
 
     async def stream_book_ticker(self, market_type: MarketType, symbol: str) -> AsyncGenerator[BookTicker, None]:
-        s_norm = self.get_stream_symbol(symbol, market_type)
+        s_norm     = self.get_stream_symbol(symbol, market_type)
+        is_inverse = market_type == MarketType.INVERSE
+        unit       = "contract" if is_inverse else "base"
+
+        model_sym_for_lookup = self.get_model_symbol(self.get_api_symbol(symbol, market_type), market_type)
+        info                 = await self._info_for(market_type, model_sym_for_lookup)
+        quote                = info.quote_asset if info else ""
+        contract_size        = info.contract_size if info else None
+
         async for data in self._ws_connect(market_type, [f"{s_norm}@bookTicker"]):
+            bid_price = float(data["b"])
+            ask_price = float(data["a"])
             yield BookTicker(
-                symbol=self.get_model_symbol(data["s"], market_type),
-                bid_price=float(data["b"]),
-                bid_qty=float(data["B"]),
-                ask_price=float(data["a"]),
-                ask_qty=float(data["A"]),
-                timestamp=self.normalize_timestamp(data.get("T") or data.get("E") or int(time.time() * 1000)),
+                symbol      = self.get_model_symbol(data["s"], market_type),
+                market_type = market_type,
+                quote       = quote,
+                bid_price   = bid_price,
+                bid_qty     = build_qty_value(
+                    native        = float(data["B"]),
+                    qty_unit      = unit,
+                    contract_size = contract_size,
+                    price         = bid_price,
+                ),
+                ask_price   = ask_price,
+                ask_qty     = build_qty_value(
+                    native        = float(data["A"]),
+                    qty_unit      = unit,
+                    contract_size = contract_size,
+                    price         = ask_price,
+                ),
+                timestamp   = self.normalize_timestamp(data.get("T") or data.get("E") or int(time.time() * 1000)),
             )
 
 
     async def stream_orderbook(self, market_type: MarketType, symbol: str, depth: int = 20, update_speed: str = "100ms") -> AsyncGenerator[OrderBook, None]:
-        s_norm = self.get_stream_symbol(symbol, market_type)
-        model_sym = self.get_model_symbol(self.get_api_symbol(symbol, market_type), market_type)
+        s_norm       = self.get_stream_symbol(symbol, market_type)
+        model_sym    = self.get_model_symbol(self.get_api_symbol(symbol, market_type), market_type)
         target_depth = depth if depth in [5, 10, 20] else 20
         if market_type == MarketType.SPOT:
             topic = f"{s_norm}@depth{target_depth}" if update_speed == "1000ms" else f"{s_norm}@depth{target_depth}@100ms"
         else:
             topic = f"{s_norm}@depth{target_depth}@{update_speed}" if update_speed in ["250ms", "500ms"] else f"{s_norm}@depth{target_depth}@100ms"
 
+        info  = await self._info_for(market_type, model_sym)
+        quote = info.quote_asset if info else ""
+
+        qty_unit = "contract" if market_type == MarketType.INVERSE else "base"
         async for data in self._ws_connect(market_type, [topic]):
             bids = data.get("bids") or data.get("b") or []
             asks = data.get("asks") or data.get("a") or []
-            ts = data.get("E") or data.get("T") or int(time.time() * 1000)
+            ts   = data.get("E") or data.get("T") or int(time.time() * 1000)
             yield OrderBook(
-                symbol=model_sym,
-                bids=[[float(p), float(q)] for p, q in bids],
-                asks=[[float(p), float(q)] for p, q in asks],
-                timestamp=self.normalize_timestamp(ts),
+                symbol      = model_sym,
+                market_type = market_type,
+                quote       = quote,
+                bids        = [[float(p), float(q)] for p, q in bids],
+                asks        = [[float(p), float(q)] for p, q in asks],
+                qty_unit    = qty_unit,
+                timestamp   = self.normalize_timestamp(ts),
             )
 
 
     async def stream_trades(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Trade, None]:
-        s_norm = self.get_stream_symbol(symbol, market_type)
+        s_norm     = self.get_stream_symbol(symbol, market_type)
+        model_sym  = self.get_model_symbol(self.get_api_symbol(symbol, market_type), market_type)
+        is_inverse = market_type == MarketType.INVERSE
+        unit       = "contract" if is_inverse else "base"
+
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
+
         async for data in self._ws_connect(market_type, [f"{s_norm}@trade"]):
+            price = float(data.get("p", 0) or 0)
+            qty   = float(data.get("q", 0) or 0)
+            if price <= 0 or qty <= 0:
+                continue
             yield Trade(
-                id=str(data["t"]),
-                price=float(data["p"]),
-                qty=float(data["q"]),
-                side="sell" if data["m"] else "buy",
-                timestamp=self.normalize_timestamp(data["T"]),
+                id          = str(data["t"]),
+                symbol      = model_sym,
+                market_type = market_type,
+                quote       = quote,
+                price       = price,
+                qty         = build_qty_value(
+                    native        = qty,
+                    qty_unit      = unit,
+                    contract_size = contract_size,
+                    price         = price,
+                ),
+                side        = "sell" if data["m"] else "buy",
+                timestamp   = self.normalize_timestamp(data["T"]),
             )
 
 
     async def stream_agg_trades(self, market_type: MarketType, symbol: str) -> AsyncGenerator[AggTrade, None]:
-        s_norm = self.get_stream_symbol(symbol, market_type)
+        s_norm     = self.get_stream_symbol(symbol, market_type)
+        model_sym  = self.get_model_symbol(self.get_api_symbol(symbol, market_type), market_type)
+        is_inverse = market_type == MarketType.INVERSE
+        unit       = "contract" if is_inverse else "base"
+
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
+
         async for data in self._ws_connect(market_type, [f"{s_norm}@aggTrade"]):
+            price = float(data["p"])
             yield AggTrade(
-                agg_id=str(data["a"]),
-                price=float(data["p"]),
-                qty=float(data["q"]),
-                first_trade_id=str(data["f"]),
-                last_trade_id=str(data["l"]),
-                side="sell" if data["m"] else "buy",
-                timestamp=self.normalize_timestamp(data["T"]),
+                agg_id         = str(data["a"]),
+                symbol         = model_sym,
+                market_type    = market_type,
+                quote          = quote,
+                price          = price,
+                qty            = build_qty_value(
+                    native        = float(data["q"]),
+                    qty_unit      = unit,
+                    contract_size = contract_size,
+                    price         = price,
+                ),
+                first_trade_id = str(data["f"]),
+                last_trade_id  = str(data["l"]),
+                side           = "sell" if data["m"] else "buy",
+                timestamp      = self.normalize_timestamp(data["T"]),
             )
 
 
     async def stream_mark_price(self, market_type: MarketType, symbol: str) -> AsyncGenerator[MarkPrice, None]:
         if market_type == MarketType.SPOT:
             raise NotImplementedError(f"{self.name} does not support stream_mark_price for {market_type.value}")
-        s_norm = self.get_stream_symbol(symbol, market_type)
+        s_norm    = self.get_stream_symbol(symbol, market_type)
+        model_sym = self.get_model_symbol(self.get_api_symbol(symbol, market_type), market_type)
+
+        info     = await self._info_for(market_type, model_sym)
+        quote    = info.quote_asset if info else ""
+        cycle_ms = await self._funding_interval_ms_for(market_type, model_sym)
+
         async for data in self._ws_connect(market_type, [f"{s_norm}@markPrice"]):
+            ts          = self.normalize_timestamp(data["E"])
+            next_ft_raw = data.get("T")
+            next_ft     = self.normalize_timestamp(next_ft_raw) if next_ft_raw else None
+
+            funding_block = None
+            rate_raw      = data.get("r")
+            if rate_raw is not None and cycle_ms is not None and next_ft is not None:
+                funding_block = build_funding_current(
+                    kind           = "discrete",
+                    per_cycle      = float(rate_raw),
+                    cycle_ms       = cycle_ms,
+                    valid_until_ts = max(next_ft, ts + 1),
+                )
+
             yield MarkPrice(
-                symbol=self.get_model_symbol(data["s"], market_type),
-                mark_price=float(data["p"]),
-                index_price=float(data["i"]),
-                funding_rate=float(data["r"]),
-                next_funding_time=self.normalize_timestamp(data["T"]),
-                timestamp=self.normalize_timestamp(data["E"]),
+                symbol      = self.get_model_symbol(data["s"], market_type),
+                market_type = market_type,
+                quote       = quote,
+                mark_price  = float(data["p"]),
+                index_price = float(data["i"]),
+                funding     = funding_block,
+                timestamp   = ts,
             )
 
 
     async def stream_liquidations(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Liquidation, None]:
         if market_type == MarketType.SPOT:
             raise NotImplementedError(f"{self.name} does not support stream_liquidations for {market_type.value}")
-        s_norm = self.get_stream_symbol(symbol, market_type)
+        s_norm     = self.get_stream_symbol(symbol, market_type)
+        model_sym  = self.get_model_symbol(self.get_api_symbol(symbol, market_type), market_type)
+        is_inverse = market_type == MarketType.INVERSE
+        unit       = "contract" if is_inverse else "base"
+
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
+
         async for data in self._ws_connect(market_type, [f"{s_norm}@forceOrder"]):
             o = data.get("o", {})
             if not o:
                 continue
+            price = float(o["p"])
             yield Liquidation(
-                symbol=self.get_model_symbol(o["s"], market_type),
-                side=o["S"].lower(),
-                price=float(o["p"]),
-                qty=float(o["q"]),
-                timestamp=self.normalize_timestamp(data["E"]),
+                symbol      = self.get_model_symbol(o["s"], market_type),
+                market_type = market_type,
+                quote       = quote,
+                side        = o["S"].lower(),
+                price       = price,
+                qty         = build_qty_value(
+                    native        = float(o["q"]),
+                    qty_unit      = unit,
+                    contract_size = contract_size,
+                    price         = price,
+                ),
+                timestamp   = self.normalize_timestamp(data["E"]),
             )
