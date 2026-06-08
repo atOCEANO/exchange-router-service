@@ -1,17 +1,17 @@
 import asyncio
 import logging
 import uuid
-from typing import Dict
+from typing import Dict, Optional
 from fastapi import WebSocket
 
 
 class StreamManager:
-    """Manages fan-out of upstream exchange streams to multiple local clients."""
 
     def __init__(self):
         self.active_streams: Dict[str, Dict[uuid.UUID, WebSocket]] = {}
         self.upstream_tasks: Dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
+
 
     async def subscribe(self, key: str, websocket: WebSocket, adapter, market_type, channel, symbol) -> uuid.UUID:
         client_id = uuid.uuid4()
@@ -24,24 +24,36 @@ class StreamManager:
             self.active_streams[key][client_id] = websocket
         return client_id
 
+
     async def unsubscribe(self, key: str, client_id: uuid.UUID):
+        task: Optional[asyncio.Task] = None
         async with self._lock:
             if key in self.active_streams:
                 self.active_streams[key].pop(client_id, None)
                 if not self.active_streams[key]:
-                    self.upstream_tasks[key].cancel()
-                    self.upstream_tasks.pop(key, None)
+                    task = self.upstream_tasks.pop(key, None)
                     self.active_streams.pop(key, None)
+        if task is not None:
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
+
 
     async def shutdown(self):
-        for task in self.upstream_tasks.values():
-            task.cancel()
+        tasks = list(self.upstream_tasks.values())
         self.upstream_tasks.clear()
         self.active_streams.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
 
     async def _upstream_handler(self, key, adapter, market_type, channel, symbol):
         try:
-            if channel == "ticker":         stream = adapter.stream_ticker(market_type, symbol)
+            if   channel == "ticker":       stream = adapter.stream_ticker(market_type, symbol)
             elif channel == "book_ticker":  stream = adapter.stream_book_ticker(market_type, symbol)
             elif channel == "mark_price":   stream = adapter.stream_mark_price(market_type, symbol)
             elif channel == "agg_trades":   stream = adapter.stream_agg_trades(market_type, symbol)
@@ -51,12 +63,13 @@ class StreamManager:
             else: return
 
             async for item in stream:
-                data = item.model_dump_json()
+                data   = item.model_dump_json()
                 bucket = self.active_streams.get(key)
                 if not bucket:
                     break
+
                 client_items = list(bucket.items())
-                results = await asyncio.gather(
+                results      = await asyncio.gather(
                     *[client.send_text(data) for _, client in client_items],
                     return_exceptions=True,
                 )
