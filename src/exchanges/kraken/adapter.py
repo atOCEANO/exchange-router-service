@@ -6,10 +6,14 @@ import time
 import websockets
 import logging
 from typing import List, AsyncGenerator, Dict, Any, Optional, Tuple
-from src.exchanges.base import BaseExchange, StreamHub
+from src.exchanges.base import (
+    BaseExchange, StreamHub,
+    build_qty_value, build_volume_value, build_oi_value,
+    build_funding_current, build_funding_historical, build_funding_convention,
+)
 from src.models import (
     Ticker, BookTicker, MarkPrice, OrderBook, Candle, Trade, AggTrade,
-    MarketType, SymbolInfo, OpenInterest, FundingRate, Liquidation, LongShortRatio
+    MarketType, SymbolInfo, OpenInterest, FundingRate, Liquidation, LongShortRatio,
 )
 
 
@@ -43,6 +47,9 @@ class KrakenAdapter(BaseExchange):
         self._hubs_lock = asyncio.Lock()
         self._topic_payloads: Dict[str, Dict[str, Any]] = {}
 
+        self._info_cache: Dict[MarketType, Dict[str, SymbolInfo]] = {}
+        self._info_cache_lock = asyncio.Lock()
+
         self._capabilities = self._build_capabilities()
 
 
@@ -51,6 +58,13 @@ class KrakenAdapter(BaseExchange):
             await hub.close()
         self._hubs.clear()
         await self.http_client.aclose()
+
+
+    async def _warm(self) -> None:
+        await self._step("spot_info",    self._ensure_info_cache(MarketType.SPOT))
+        await self._step("linear_info",  self._ensure_info_cache(MarketType.LINEAR))
+        await self._step("inverse_info", self._ensure_info_cache(MarketType.INVERSE))
+        await self._step("spot_ws_map",  self._ensure_spot_ws_map())
 
 
     @property
@@ -80,6 +94,10 @@ class KrakenAdapter(BaseExchange):
                         "rest": True,
                         "ws":   True,
                     },
+                    "mark_price": {
+                        "rest": False,
+                        "ws":   False,
+                    },
                     "orderbook": {
                         "rest":      True,
                         "ws":        True,
@@ -101,14 +119,10 @@ class KrakenAdapter(BaseExchange):
                     "candles": {
                         "rest":         True,
                         "ws":           False,
-                        "paginated":    True,
-                        "max_limit":    None,
+                        "paginated":    False,
+                        "max_limit":    720,
                         "retention_ms": None,
-                        "intervals":    ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"],
-                    },
-                    "mark_price": {
-                        "rest": False,
-                        "ws":   False,
+                        "intervals": ["1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"],
                     },
                     "funding_rate": {
                         "rest":         False,
@@ -131,6 +145,7 @@ class KrakenAdapter(BaseExchange):
                         "paginated":    False,
                         "max_limit":    None,
                         "retention_ms": None,
+                        "completeness": None,
                     },
                     "long_short_ratio": {
                         "rest":         False,
@@ -150,6 +165,10 @@ class KrakenAdapter(BaseExchange):
                         "rest": True,
                         "ws":   True,
                     },
+                    "mark_price": {
+                        "rest": True,
+                        "ws":   True,
+                    },
                     "orderbook": {
                         "rest":      True,
                         "ws":        True,
@@ -174,11 +193,7 @@ class KrakenAdapter(BaseExchange):
                         "paginated":    True,
                         "max_limit":    None,
                         "retention_ms": None,
-                        "intervals":    ["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d", "1w"],
-                    },
-                    "mark_price": {
-                        "rest": True,
-                        "ws":   True,
+                        "intervals": ["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d", "1w"],
                     },
                     "funding_rate": {
                         "rest":         True,
@@ -193,7 +208,7 @@ class KrakenAdapter(BaseExchange):
                         "paginated":    True,
                         "max_limit":    None,
                         "retention_ms": None,
-                        "intervals":    ["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d"],
+                        "intervals": ["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d"],
                     },
                     "liquidations": {
                         "rest":         False,
@@ -201,14 +216,16 @@ class KrakenAdapter(BaseExchange):
                         "paginated":    False,
                         "max_limit":    None,
                         "retention_ms": None,
+                        "completeness": None,
                     },
                     "long_short_ratio": {
-                        "rest":         True,
-                        "ws":           False,
-                        "paginated":    True,
-                        "max_limit":    None,
-                        "retention_ms": None,
-                        "intervals":    ["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d"],
+                        "rest":              True,
+                        "ws":                False,
+                        "paginated":         True,
+                        "max_limit":         None,
+                        "retention_ms":      None,
+                        "intervals":         ["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d"],
+                        "account_breakdown": False,
                     },
                 },
                 MarketType.INVERSE: {
@@ -220,6 +237,10 @@ class KrakenAdapter(BaseExchange):
                         "rest": True,
                         "ws":   True,
                     },
+                    "mark_price": {
+                        "rest": True,
+                        "ws":   True,
+                    },
                     "orderbook": {
                         "rest":      True,
                         "ws":        True,
@@ -244,11 +265,7 @@ class KrakenAdapter(BaseExchange):
                         "paginated":    True,
                         "max_limit":    None,
                         "retention_ms": None,
-                        "intervals":    ["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d", "1w"],
-                    },
-                    "mark_price": {
-                        "rest": True,
-                        "ws":   True,
+                        "intervals": ["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d", "1w"],
                     },
                     "funding_rate": {
                         "rest":         True,
@@ -263,7 +280,7 @@ class KrakenAdapter(BaseExchange):
                         "paginated":    True,
                         "max_limit":    None,
                         "retention_ms": None,
-                        "intervals":    ["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d"],
+                        "intervals": ["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d"],
                     },
                     "liquidations": {
                         "rest":         False,
@@ -271,14 +288,16 @@ class KrakenAdapter(BaseExchange):
                         "paginated":    False,
                         "max_limit":    None,
                         "retention_ms": None,
+                        "completeness": None,
                     },
                     "long_short_ratio": {
-                        "rest":         True,
-                        "ws":           False,
-                        "paginated":    True,
-                        "max_limit":    None,
-                        "retention_ms": None,
-                        "intervals":    ["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d"],
+                        "rest":              True,
+                        "ws":                False,
+                        "paginated":         True,
+                        "max_limit":         None,
+                        "retention_ms":      None,
+                        "intervals":         ["1m", "5m", "15m", "30m", "1h", "4h", "12h", "1d"],
+                        "account_breakdown": False,
                     },
                 },
             },
@@ -368,13 +387,59 @@ class KrakenAdapter(BaseExchange):
 
 
     def _map_spot_interval(self, interval: str) -> int:
-        mapping = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440, "1w": 10080}
+        mapping = {
+            "1m": 1,
+            "5m": 5,
+            "15m": 15,
+            "30m": 30,
+            "1h": 60,
+            "4h": 240,
+            "1d": 1440,
+            "1w": 10080,
+        }
         return mapping.get(interval, 60)
 
 
     def _map_analytics_interval(self, interval: str) -> int:
-        mapping = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "12h": 43200, "1d": 86400}
+        mapping = {
+            "1m": 60,
+            "5m": 300,
+            "15m": 900,
+            "30m": 1800,
+            "1h": 3600,
+            "4h": 14400,
+            "12h": 43200,
+            "1d": 86400,
+        }
         return mapping.get(interval, 3600)
+
+
+    def _interval_to_ms(self, interval: str) -> int:
+        if not interval:
+            return 0
+        unit = interval[-1]
+        try:
+            val = int(interval[:-1])
+        except (ValueError, TypeError):
+            return 0
+        if unit == "m": return val * 60 * 1000
+        if unit == "h": return val * 60 * 60 * 1000
+        if unit == "d": return val * 24 * 60 * 60 * 1000
+        if unit == "w": return val * 7 * 24 * 60 * 60 * 1000
+        return 0
+
+
+    async def _ensure_info_cache(self, market_type: MarketType) -> Dict[str, SymbolInfo]:
+        async with self._info_cache_lock:
+            if market_type not in self._info_cache:
+                infos = await self._fetch_exchange_info(market_type)
+                self._info_cache[market_type] = {info.symbol: info for info in infos}
+            return self._info_cache[market_type]
+
+
+    async def _info_for(self, market_type: MarketType, model_symbol: str) -> Optional[SymbolInfo]:
+        cache = await self._ensure_info_cache(market_type)
+        return cache.get(model_symbol)
 
 
     @staticmethod
@@ -652,9 +717,11 @@ class KrakenAdapter(BaseExchange):
                     if not isinstance(msg, dict):
                         return None
                     feed = msg.get("feed")
-                    pid = msg.get("product_id")
+                    pid  = msg.get("product_id")
                     if not feed or not pid:
                         return None
+                    if feed.endswith("_snapshot"):
+                        feed = feed[: -len("_snapshot")]
                     return f"{feed}:{pid}"
 
             hub = StreamHub(
@@ -683,91 +750,147 @@ class KrakenAdapter(BaseExchange):
 
     async def get_ticker(self, market_type: MarketType, symbol: str) -> Ticker:
         api_symbol = self.get_api_symbol(symbol, market_type)
+        model_sym  = self.get_model_symbol(api_symbol, market_type)
+        info       = await self._info_for(market_type, model_sym)
+        quote      = info.quote_asset if info else ""
 
         if market_type == MarketType.SPOT:
             data = await self._make_request("GET", f"{self.spot_rest_url}/Ticker", {"pair": api_symbol})
             pair_key = list(data.keys())[0]
             t = data[pair_key]
 
-            c_price = float(t["c"][0])
+            c_price    = float(t["c"][0])
             open_price = float(t["o"])
-            vol = float(t["v"][1])
-            vwap = float(t["p"][1])
+            vol        = float(t["v"][1])
 
             return Ticker(
-                symbol=self.get_model_symbol(api_symbol, market_type),
-                price=c_price,
-                open_24h=open_price,
-                high_24h=float(t["h"][1]),
-                low_24h=float(t["l"][1]),
-                volume_24h=vol,
-                quote_volume_24h=vwap * vol,
-                price_change_percent=((c_price - open_price) / open_price) * 100 if open_price > 0 else 0,
-                timestamp=int(time.time() * 1000),
+                symbol               = model_sym,
+                market_type          = market_type,
+                quote                = quote,
+                price                = c_price,
+                open_24h             = open_price,
+                high_24h             = float(t["h"][1]),
+                low_24h              = float(t["l"][1]),
+                volume_24h           = build_volume_value(
+                    native        = vol,
+                    volume_unit   = "base",
+                    contract_size = None,
+                    close         = c_price,
+                ),
+                price_change_percent = ((c_price - open_price) / open_price) * 100 if open_price > 0 else 0,
+                timestamp            = int(time.time() * 1000),
             )
-        else:
-            data = await self._make_request("GET", f"{self.futures_rest_url}/tickers")
-            for t in data.get("tickers", []):
-                if t["symbol"] == api_symbol:
-                    last = float(t.get("last", 0))
-                    vol = float(t.get("vol24h", 0))
-                    open_24h = float(t.get("open24h", 0))
-                    high_24h = float(t.get("high24h", 0))
-                    low_24h = float(t.get("low24h", 0))
-                    q_vol = float(t.get("volumeQuote", 0))
 
-                    pc = 0.0
-                    if open_24h > 0:
-                        pc = ((last - open_24h) / open_24h) * 100
+        data       = await self._make_request("GET", f"{self.futures_rest_url}/tickers")
+        server_ts  = self.normalize_timestamp(data["serverTime"]) if data.get("serverTime") else int(time.time() * 1000)
+        is_inverse = market_type == MarketType.INVERSE
+        unit       = "contract" if is_inverse else "base"
 
-                    return Ticker(
-                        symbol=self.get_model_symbol(api_symbol, market_type),
-                        price=last,
-                        open_24h=open_24h,
-                        high_24h=high_24h,
-                        low_24h=low_24h,
-                        volume_24h=vol,
-                        quote_volume_24h=q_vol,
-                        price_change_percent=pc,
-                        timestamp=int(time.time() * 1000),
-                    )
-            raise ValueError(f"Symbol {api_symbol} not found")
+        for t in data.get("tickers", []):
+            if t["symbol"] == api_symbol:
+                last     = float(t.get("last", 0))
+                vol      = float(t.get("vol24h", 0))
+                open_24h = float(t.get("open24h", 0))
+
+                pc = 0.0
+                if open_24h > 0:
+                    pc = ((last - open_24h) / open_24h) * 100
+
+                return Ticker(
+                    symbol               = model_sym,
+                    market_type          = market_type,
+                    quote                = quote,
+                    price                = last,
+                    open_24h             = open_24h,
+                    high_24h             = float(t.get("high24h", 0)),
+                    low_24h              = float(t.get("low24h", 0)),
+                    volume_24h           = build_volume_value(
+                        native        = vol,
+                        volume_unit   = unit,
+                        contract_size = info.contract_size if info else None,
+                        close         = last,
+                    ),
+                    price_change_percent = pc,
+                    timestamp            = server_ts,
+                )
+        raise ValueError(f"Symbol {api_symbol} not found")
 
 
     async def get_book_ticker(self, market_type: MarketType, symbol: str) -> BookTicker:
-        api_symbol = self.get_api_symbol(symbol, market_type)
+        api_symbol    = self.get_api_symbol(symbol, market_type)
+        model_sym     = self.get_model_symbol(api_symbol, market_type)
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
+        is_inverse    = market_type == MarketType.INVERSE
+        unit          = "contract" if is_inverse else "base"
 
         if market_type == MarketType.SPOT:
             data = await self._make_request("GET", f"{self.spot_rest_url}/Depth", {"pair": api_symbol, "count": 1})
             pair_key = list(data.keys())[0]
             bids = data[pair_key].get("bids", [])
             asks = data[pair_key].get("asks", [])
+            if not bids or not asks:
+                raise ValueError(f"No quotes available for {api_symbol} on Kraken spot")
 
+            bid_price = float(bids[0][0])
+            ask_price = float(asks[0][0])
             return BookTicker(
-                symbol=self.get_model_symbol(api_symbol, market_type),
-                bid_price=float(bids[0][0]) if bids else 0.0,
-                bid_qty=float(bids[0][1]) if bids else 0.0,
-                ask_price=float(asks[0][0]) if asks else 0.0,
-                ask_qty=float(asks[0][1]) if asks else 0.0,
-                timestamp=self.normalize_timestamp(bids[0][2] if bids else time.time()),
+                symbol      = model_sym,
+                market_type = market_type,
+                quote       = quote,
+                bid_price   = bid_price,
+                bid_qty     = build_qty_value(
+                    native        = float(bids[0][1]),
+                    qty_unit      = "base",
+                    contract_size = None,
+                    price         = bid_price,
+                ),
+                ask_price   = ask_price,
+                ask_qty     = build_qty_value(
+                    native        = float(asks[0][1]),
+                    qty_unit      = "base",
+                    contract_size = None,
+                    price         = ask_price,
+                ),
+                timestamp   = self.normalize_timestamp(bids[0][2]),
             )
-        else:
-            data = await self._make_request("GET", f"{self.futures_rest_url}/tickers")
-            for t in data.get("tickers", []):
-                if t["symbol"] == api_symbol:
-                    return BookTicker(
-                        symbol=self.get_model_symbol(api_symbol, market_type),
-                        bid_price=float(t.get("bid", 0)),
-                        bid_qty=float(t.get("bidSize", 0)),
-                        ask_price=float(t.get("ask", 0)),
-                        ask_qty=float(t.get("askSize", 0)),
-                        timestamp=int(time.time() * 1000),
-                    )
-            raise ValueError(f"Symbol {api_symbol} not found")
+
+        data      = await self._make_request("GET", f"{self.futures_rest_url}/tickers")
+        server_ts = self.normalize_timestamp(data["serverTime"]) if data.get("serverTime") else int(time.time() * 1000)
+
+        for t in data.get("tickers", []):
+            if t["symbol"] == api_symbol:
+                bid_price = float(t.get("bid", 0))
+                ask_price = float(t.get("ask", 0))
+                return BookTicker(
+                    symbol      = model_sym,
+                    market_type = market_type,
+                    quote       = quote,
+                    bid_price   = bid_price,
+                    bid_qty     = build_qty_value(
+                        native        = float(t.get("bidSize", 0)),
+                        qty_unit      = unit,
+                        contract_size = contract_size,
+                        price         = bid_price,
+                    ),
+                    ask_price   = ask_price,
+                    ask_qty     = build_qty_value(
+                        native        = float(t.get("askSize", 0)),
+                        qty_unit      = unit,
+                        contract_size = contract_size,
+                        price         = ask_price,
+                    ),
+                    timestamp   = server_ts,
+                )
+        raise ValueError(f"Symbol {api_symbol} not found")
 
 
     async def get_orderbook(self, market_type: MarketType, symbol: str, depth: int = 20) -> OrderBook:
         api_symbol = self.get_api_symbol(symbol, market_type)
+        model_sym  = self.get_model_symbol(api_symbol, market_type)
+        info       = await self._info_for(market_type, model_sym)
+        quote      = info.quote_asset if info else ""
 
         max_depth = self.get_capabilities()["markets"][market_type]["orderbook"]["max_depth"]
         req_depth = min(depth, max_depth)
@@ -782,51 +905,93 @@ class KrakenAdapter(BaseExchange):
             bids.sort(key=lambda r: r[0], reverse=True)
             asks.sort(key=lambda r: r[0])
             return OrderBook(
-                symbol=self.get_model_symbol(api_symbol, market_type),
-                bids=bids[:depth],
-                asks=asks[:depth],
-                timestamp=self.normalize_timestamp(ts),
+                symbol      = model_sym,
+                market_type = market_type,
+                quote       = quote,
+                bids        = bids[:req_depth],
+                asks        = asks[:req_depth],
+                qty_unit    = "base",
+                timestamp   = self.normalize_timestamp(ts),
             )
-        else:
-            data = await self._make_request("GET", f"{self.futures_rest_url}/orderbook", {"symbol": api_symbol})
-            book = data.get("orderBook", {})
-            bids = [[float(p), float(q)] for p, q in book.get("bids", [])]
-            asks = [[float(p), float(q)] for p, q in book.get("asks", [])]
-            bids.sort(key=lambda r: r[0], reverse=True)
-            asks.sort(key=lambda r: r[0])
-            return OrderBook(
-                symbol=self.get_model_symbol(api_symbol, market_type),
-                bids=bids[:depth],
-                asks=asks[:depth],
-                timestamp=int(time.time() * 1000),
-            )
+
+        data      = await self._make_request("GET", f"{self.futures_rest_url}/orderbook", {"symbol": api_symbol})
+        server_ts = self.normalize_timestamp(data["serverTime"]) if data.get("serverTime") else int(time.time() * 1000)
+
+        book = data.get("orderBook", {})
+        bids = [[float(p), float(q)] for p, q in book.get("bids", [])]
+        asks = [[float(p), float(q)] for p, q in book.get("asks", [])]
+        bids.sort(key=lambda r: r[0], reverse=True)
+        asks.sort(key=lambda r: r[0])
+        return OrderBook(
+            symbol      = model_sym,
+            market_type = market_type,
+            quote       = quote,
+            bids        = bids[:req_depth],
+            asks        = asks[:req_depth],
+            qty_unit    = "contract" if market_type == MarketType.INVERSE else "base",
+            timestamp   = server_ts,
+        )
 
 
     async def get_trades(self, market_type: MarketType, symbol: str, limit: int = 100) -> List[Trade]:
-        limit = min(limit, self.get_capabilities()["markets"][market_type]["trades"]["max_limit"])
-        api_symbol = self.get_api_symbol(symbol, market_type)
+        limit         = min(limit, self.get_capabilities()["markets"][market_type]["trades"]["max_limit"])
+        api_symbol    = self.get_api_symbol(symbol, market_type)
+        model_sym     = self.get_model_symbol(api_symbol, market_type)
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
+        is_inverse    = market_type == MarketType.INVERSE
+        unit          = "contract" if is_inverse else "base"
 
         if market_type == MarketType.SPOT:
             data = await self._make_request("GET", f"{self.spot_rest_url}/Trades", {"pair": api_symbol})
             pair_key = [k for k in data.keys() if k != "last"][0]
             raw = data[pair_key]
-            trades = [Trade(
-                id=str(int(t[2] * 1000000)) + str(i),
-                price=float(t[0]),
-                qty=float(t[1]),
-                side="buy" if t[3] == "b" else "sell",
-                timestamp=self.normalize_timestamp(t[2]),
-            ) for i, t in enumerate(raw)]
+            trades = []
+            for i, t in enumerate(raw):
+                price = float(t[0])
+                trades.append(Trade(
+                    id          = str(int(t[2] * 1000000)) + str(i),
+                    symbol      = model_sym,
+                    market_type = market_type,
+                    quote       = quote,
+                    price       = price,
+                    qty         = build_qty_value(
+                        native        = float(t[1]),
+                        qty_unit      = unit,
+                        contract_size = contract_size,
+                        price         = price,
+                    ),
+                    side        = "buy" if t[3] == "b" else "sell",
+                    timestamp   = self.normalize_timestamp(t[2]),
+                ))
         else:
             data = await self._make_request("GET", f"{self.futures_rest_url}/history", {"symbol": api_symbol})
             raw = data.get("history", [])
-            trades = [Trade(
-                id=str(t.get("trade_id", t["time"])),
-                price=float(t["price"]),
-                qty=float(t["size"]),
-                side=t.get("side", "buy").lower(),
-                timestamp=self.normalize_timestamp(t["time"]),
-            ) for t in raw]
+            trades = []
+            for t in raw:
+                side_raw = t.get("side")
+                if side_raw is None:
+                    continue
+                side_norm = side_raw.lower()
+                if side_norm not in ("buy", "sell"):
+                    continue
+                price = float(t["price"])
+                trades.append(Trade(
+                    id          = str(t.get("uid") or t.get("time")),
+                    symbol      = model_sym,
+                    market_type = market_type,
+                    quote       = quote,
+                    price       = price,
+                    qty         = build_qty_value(
+                        native        = float(t["size"]),
+                        qty_unit      = unit,
+                        contract_size = contract_size,
+                        price         = price,
+                    ),
+                    side        = side_norm,
+                    timestamp   = self.normalize_timestamp(t["time"]),
+                ))
         trades.sort(key=lambda t: t.timestamp)
         return trades[-limit:]
 
@@ -836,7 +1001,13 @@ class KrakenAdapter(BaseExchange):
 
 
     async def get_candles(self, market_type: MarketType, symbol: str, interval: str, start_time: Optional[int] = None, limit: int = 100) -> List[Candle]:
-        api_symbol = self.get_api_symbol(symbol, market_type)
+        api_symbol    = self.get_api_symbol(symbol, market_type)
+        model_sym     = self.get_model_symbol(api_symbol, market_type)
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
+        is_inverse    = market_type == MarketType.INVERSE
+        unit          = "contract" if is_inverse else "base"
 
         if market_type == MarketType.SPOT:
             interval_min = self._map_spot_interval(interval)
@@ -852,13 +1023,23 @@ class KrakenAdapter(BaseExchange):
             results = []
 
             for b in data[pair_key]:
+                close = float(b[4])
                 results.append(Candle(
-                    timestamp=self.normalize_timestamp(b[0]),
-                    open=float(b[1]),
-                    high=float(b[2]),
-                    low=float(b[3]),
-                    close=float(b[4]),
-                    volume=float(b[6]),
+                    symbol      = model_sym,
+                    market_type = market_type,
+                    quote       = quote,
+                    interval    = interval,
+                    timestamp   = self.normalize_timestamp(b[0]),
+                    open        = float(b[1]),
+                    high        = float(b[2]),
+                    low         = float(b[3]),
+                    close       = close,
+                    volume      = build_volume_value(
+                        native        = float(b[6]),
+                        volume_unit   = unit,
+                        contract_size = contract_size,
+                        close         = close,
+                    ),
                 ))
 
             results.sort(key=lambda c: c.timestamp)
@@ -866,9 +1047,19 @@ class KrakenAdapter(BaseExchange):
                 results = [c for c in results if c.timestamp <= start_time]
             return results[-limit:]
         else:
-            interval_secs_map = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600,
-                                 "4h": 14400, "12h": 43200, "1d": 86400, "1w": 604800}
+            interval_secs_map = {
+                "1m": 60,
+                "5m": 300,
+                "15m": 900,
+                "30m": 1800,
+                "1h": 3600,
+                "4h": 14400,
+                "12h": 43200,
+                "1d": 86400,
+                "1w": 604800,
+            }
             interval_secs = interval_secs_map.get(interval, 3600)
+            interval_ms = interval_secs * 1000
             now_secs = int(time.time())
             anchor_secs = int(start_time / 1000) if start_time else now_secs
             from_ts = anchor_secs - limit * interval_secs
@@ -889,16 +1080,27 @@ class KrakenAdapter(BaseExchange):
                 added = 0
                 last_ts_secs = from_ts
                 for b in batch:
-                    ts_ms = self.normalize_timestamp(b["time"])
+                    upstream_close_ms = self.normalize_timestamp(b["time"])
+                    ts_ms = upstream_close_ms - interval_ms
                     if ts_ms not in seen_ts:
                         seen_ts.add(ts_ms)
+                        close = float(b["close"])
                         all_candles.append(Candle(
-                            timestamp=ts_ms,
-                            open=float(b["open"]),
-                            high=float(b["high"]),
-                            low=float(b["low"]),
-                            close=float(b["close"]),
-                            volume=float(b["volume"]),
+                            symbol      = model_sym,
+                            market_type = market_type,
+                            quote       = quote,
+                            interval    = interval,
+                            timestamp   = ts_ms,
+                            open        = float(b["open"]),
+                            high        = float(b["high"]),
+                            low         = float(b["low"]),
+                            close       = close,
+                            volume      = build_volume_value(
+                                native        = float(b["volume"]),
+                                volume_unit   = unit,
+                                contract_size = contract_size,
+                                close         = close,
+                            ),
                         ))
                         added += 1
                     last_ts_secs = ts_ms // 1000
@@ -918,18 +1120,48 @@ class KrakenAdapter(BaseExchange):
         if market_type == MarketType.SPOT:
             raise NotImplementedError(f"{self.name} does not support mark_price for {market_type.value}")
         api_symbol = self.get_api_symbol(symbol, market_type)
-        data = await self._make_request("GET", f"{self.futures_rest_url}/tickers")
+        model_sym  = self.get_model_symbol(api_symbol, market_type)
+        info       = await self._info_for(market_type, model_sym)
+        quote      = info.quote_asset if info else ""
+
+        data      = await self._make_request("GET", f"{self.futures_rest_url}/tickers")
+        server_ts = self.normalize_timestamp(data["serverTime"]) if data.get("serverTime") else int(time.time() * 1000)
 
         for t in data.get("tickers", []):
             if t["symbol"] == api_symbol:
-                mark = float(t.get("markPrice", 0))
+                mark_raw = t.get("markPrice")
+                if mark_raw is None:
+                    raise ValueError(f"No markPrice available for {api_symbol} on Kraken")
+                mark = float(mark_raw)
+                if mark <= 0:
+                    raise ValueError(f"Non-positive markPrice {mark} for {api_symbol} on Kraken")
+                abs_rate_raw = t.get("fundingRate")
+
+                rel_rate: Optional[float] = None
+                if abs_rate_raw is not None and mark > 0:
+                    abs_rate = float(abs_rate_raw)
+                    rel_rate = abs_rate / mark if market_type == MarketType.LINEAR else abs_rate * mark
+
+                idx_raw = t.get("indexPrice")
+                idx_price: Optional[float] = float(idx_raw) if idx_raw is not None else None
+
+                funding_block = None
+                if rel_rate is not None:
+                    funding_block = build_funding_current(
+                        kind           = "continuous",
+                        per_cycle      = rel_rate,
+                        cycle_ms       = 3_600_000,
+                        valid_until_ts = server_ts + 3_600_000,
+                    )
+
                 return MarkPrice(
-                    symbol=self.get_model_symbol(api_symbol, market_type),
-                    mark_price=mark,
-                    index_price=float(t.get("indexPrice", mark)),
-                    funding_rate=float(t.get("fundingRate", 0)),
-                    next_funding_time=0,
-                    timestamp=int(time.time() * 1000),
+                    symbol      = model_sym,
+                    market_type = market_type,
+                    quote       = quote,
+                    mark_price  = mark,
+                    index_price = idx_price,
+                    funding     = funding_block,
+                    timestamp   = server_ts,
                 )
         raise ValueError(f"Symbol {api_symbol} not found")
 
@@ -942,15 +1174,25 @@ class KrakenAdapter(BaseExchange):
         data = await self._make_request("GET", f"{self.futures_rest_url}/historical-funding-rates", {"symbol": api_symbol})
         rates = data.get("rates", [])
 
+        model_sym = self.get_model_symbol(api_symbol, market_type)
+        info      = await self._info_for(market_type, model_sym)
+        quote     = info.quote_asset if info else ""
+
         results = []
         for r in rates:
             ts = self.normalize_timestamp(r.get("timestamp"))
             if start_time and ts > start_time:
                 continue
             results.append(FundingRate(
-                symbol=self.get_model_symbol(api_symbol, market_type),
-                rate=float(r.get("fundingRate", 0)),
-                timestamp=ts,
+                symbol      = model_sym,
+                market_type = market_type,
+                quote       = quote,
+                rate        = build_funding_historical(
+                    kind      = "continuous",
+                    per_cycle = float(r.get("relativeFundingRate", 0)),
+                    cycle_ms  = 3_600_000,
+                ),
+                timestamp   = ts,
             ))
         results.sort(key=lambda x: x.timestamp)
 
@@ -972,15 +1214,47 @@ class KrakenAdapter(BaseExchange):
         data = await self._make_request("GET", url, params)
         elements = self._extract_analytics(data, "openInterest")
 
+        model_sym     = self.get_model_symbol(api_symbol, market_type)
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
+        is_inverse    = market_type == MarketType.INVERSE
+        oi_unit       = "contract" if is_inverse else "base"
         results = [OpenInterest(
-            symbol=self.get_model_symbol(api_symbol, market_type),
-            open_interest=float(e["value"]),
-            value_usd=0.0,
-            timestamp=self.normalize_timestamp(e["time"]),
+            symbol        = model_sym,
+            market_type   = market_type,
+            quote         = quote,
+            interval      = period,
+            open_interest = build_oi_value(
+                native          = float(e["value"]),
+                oi_unit         = oi_unit,
+                contract_size   = contract_size,
+                candle_close    = None,
+                candle_close_ts = None,
+            ),
+            timestamp     = self.normalize_timestamp(e["time"]),
         ) for e in elements]
         results.sort(key=lambda x: x.timestamp)
         if start_time:
             results = [r for r in results if r.timestamp <= start_time]
+
+        if results and oi_unit != "contract":
+            bucket_ms = interval_secs * 1000
+            now_bucket_start = (int(time.time() * 1000) // bucket_ms) * bucket_ms
+            latest = results[-1]
+            if latest.timestamp == now_bucket_start:
+                try:
+                    t = await self.get_ticker(market_type, symbol)
+                    patched = build_oi_value(
+                        native          = latest.open_interest.native,
+                        oi_unit         = latest.open_interest.unit,
+                        contract_size   = latest.open_interest.contract_size,
+                        candle_close    = t.price,
+                        candle_close_ts = latest.timestamp,
+                    )
+                    results[-1] = latest.model_copy(update={"open_interest": patched})
+                except Exception:
+                    pass
 
         return results[-limit:]
 
@@ -1004,12 +1278,16 @@ class KrakenAdapter(BaseExchange):
         data = await self._make_request("GET", url, params)
         elements = self._extract_analytics(data, "ratio")
 
+        model_sym = self.get_model_symbol(api_symbol, market_type)
         results = [LongShortRatio(
-            symbol=self.get_model_symbol(api_symbol, market_type),
-            ratio=float(e["value"]),
-            long_account=0.0,
-            short_account=0.0,
-            timestamp=self.normalize_timestamp(e["time"]),
+            symbol        = model_sym,
+            market_type   = market_type,
+            interval      = period,
+            ratio         = float(e["value"]),
+            long_account  = None,
+            short_account = None,
+            account_scope = "opaque",
+            timestamp     = self.normalize_timestamp(e["time"]),
         ) for e in elements]
         results.sort(key=lambda x: x.timestamp)
         if start_time:
@@ -1018,7 +1296,7 @@ class KrakenAdapter(BaseExchange):
         return results[-limit:]
 
 
-    async def get_exchange_info(self, market_type: MarketType) -> List[SymbolInfo]:
+    async def _fetch_exchange_info(self, market_type: MarketType) -> List[SymbolInfo]:
         results = []
         if market_type == MarketType.SPOT:
             data = await self._make_request("GET", f"{self.spot_rest_url}/AssetPairs")
@@ -1030,16 +1308,28 @@ class KrakenAdapter(BaseExchange):
                 wsname = v.get("wsname", "/")
                 base, quote = wsname.split("/") if "/" in wsname else (v.get("base", ""), v.get("quote", ""))
 
+                raw_ordermin = v.get("ordermin")
+                raw_costmin = v.get("costmin")
+                spot_min_qty: Optional[float] = float(raw_ordermin) if raw_ordermin is not None else None
+                spot_min_notional: Optional[float] = float(raw_costmin) if raw_costmin is not None else None
+                if spot_min_qty is not None and spot_min_qty <= 0:
+                    spot_min_qty = None
+                if spot_min_notional is not None and spot_min_notional <= 0:
+                    spot_min_notional = None
+
                 results.append(SymbolInfo(
-                    symbol=self.get_model_symbol(v.get("altname", k), market_type),
-                    native_symbol=v.get("altname", k),
-                    base_asset=base,
-                    quote_asset=quote,
-                    price_precision=int(v.get("pair_decimals", 8)),
-                    quantity_precision=int(v.get("lot_decimals", 8)),
-                    min_qty=float(v.get("ordermin", 0)),
-                    max_qty=0.0,
-                    min_notional=float(v.get("costmin", 0)),
+                    symbol             = self.get_model_symbol(v.get("altname", k), market_type),
+                    native_symbol      = v.get("altname", k),
+                    base_asset         = base,
+                    quote_asset        = quote,
+                    price_precision    = int(v.get("pair_decimals", 8)),
+                    quantity_precision = int(v.get("lot_decimals", 8)),
+                    min_qty            = spot_min_qty,
+                    max_qty            = None,
+                    min_notional       = spot_min_notional,
+                    qty_unit           = "base",
+                    contract_size      = None,
+                    funding            = None,
                 ))
         else:
             data = await self._make_request("GET", f"{self.futures_rest_url}/instruments")
@@ -1053,22 +1343,58 @@ class KrakenAdapter(BaseExchange):
                 if market_type == MarketType.LINEAR and (t != "flexible_futures" or not sym.startswith("PF_")):
                     continue
 
-                tick = float(v.get("tickSize", 0) or 0)
-                min_size = float(v.get("minTradeSize", 0) or 0)
-                max_size = float(v.get("maxTradeSize", 0) or 0)
+                tick     = float(v.get("tickSize", 0) or 0)
+                raw_min_size = v.get("minTradeSize")
+                raw_max_size = v.get("maxTradeSize")
+                min_size: Optional[float] = float(raw_min_size) if raw_min_size is not None else None
+                max_size: Optional[float] = float(raw_max_size) if raw_max_size is not None else None
+                if min_size is not None and min_size <= 0:
+                    min_size = None
+                if max_size is not None and max_size <= 0:
+                    max_size = None
+
+                base_asset  = (v.get("baseCurrency") or "").upper()
+                quote_asset = (v.get("quoteCurrency") or "").upper()
+                if not base_asset or not quote_asset:
+                    stripped = self.get_model_symbol(v["symbol"], market_type)
+                    for q in ("USDT", "USDC", "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD"):
+                        if stripped.endswith(q) and len(stripped) > len(q):
+                            base_asset  = stripped[:-len(q)]
+                            quote_asset = q
+                            break
+
+                qty_unit = "contract" if market_type == MarketType.INVERSE else "base"
+                contract_size: Optional[float] = 1.0 if market_type == MarketType.INVERSE else None
 
                 results.append(SymbolInfo(
-                    symbol=self.get_model_symbol(v["symbol"], market_type),
-                    native_symbol=v["symbol"],
-                    base_asset=v.get("baseCurrency", "").upper(),
-                    quote_asset=v.get("quoteCurrency", "").upper(),
-                    price_precision=self._decimal_places(tick),
-                    quantity_precision=self._decimal_places(min_size),
-                    min_qty=min_size,
-                    max_qty=max_size,
-                    min_notional=0.0,
+                    symbol             = self.get_model_symbol(v["symbol"], market_type),
+                    native_symbol      = v["symbol"],
+                    base_asset         = base_asset,
+                    quote_asset        = quote_asset,
+                    price_precision    = self._decimal_places(tick),
+                    quantity_precision = self._decimal_places(min_size or 0),
+                    min_qty            = min_size,
+                    max_qty            = max_size,
+                    min_notional       = None,
+                    qty_unit           = qty_unit,
+                    contract_size      = contract_size,
+                    funding            = build_funding_convention("continuous"),
                 ))
         return results
+
+
+    async def get_exchange_info(self, market_type: MarketType) -> List[SymbolInfo]:
+        cache = await self._ensure_info_cache(market_type)
+        return list(cache.values())
+
+
+    async def get_symbol_info(self, market_type: MarketType, symbol: str) -> SymbolInfo:
+        cache = await self._ensure_info_cache(market_type)
+        model_sym = self.get_model_symbol(self.get_api_symbol(symbol, market_type), market_type)
+        info = cache.get(model_sym)
+        if info is None:
+            raise ValueError(f"Symbol {symbol} not found on Kraken {market_type.value}")
+        return info
 
 
     async def get_markets(self, market_type: MarketType) -> List[str]:
@@ -1077,143 +1403,295 @@ class KrakenAdapter(BaseExchange):
 
 
     async def stream_ticker(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Ticker, None]:
-        api_symbol = self.get_api_symbol(symbol, market_type)
+        api_symbol    = self.get_api_symbol(symbol, market_type)
+        model_sym     = self.get_model_symbol(api_symbol, market_type)
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
+        is_inverse    = market_type == MarketType.INVERSE
+        unit          = "contract" if is_inverse else "base"
 
         if market_type == MarketType.SPOT:
-            ws_sym = await self._spot_ws_symbol(api_symbol)
+            ws_sym  = await self._spot_ws_symbol(api_symbol)
             payload = {"method": "subscribe", "params": {"channel": "ticker", "symbol": [ws_sym]}}
             async for data in self._ws_connect(self.spot_ws_url, payload):
                 if data.get("type") in ["snapshot", "update"] and data.get("channel") == "ticker":
                     for item in data.get("data", []):
                         last = float(item.get("last", 0))
                         yield Ticker(
-                            symbol=self.get_model_symbol(api_symbol, market_type),
-                            price=last,
-                            open_24h=0.0,
-                            high_24h=float(item.get("high", 0)),
-                            low_24h=float(item.get("low", 0)),
-                            volume_24h=float(item.get("volume", 0)),
-                            quote_volume_24h=float(item.get("vwap", 0)) * float(item.get("volume", 0)),
-                            price_change_percent=float(item.get("change_pct", 0)),
-                            timestamp=self.normalize_timestamp(item.get("timestamp", time.time())),
+                            symbol               = model_sym,
+                            market_type          = market_type,
+                            quote                = quote,
+                            price                = last,
+                            open_24h             = 0.0,
+                            high_24h             = float(item.get("high", 0)),
+                            low_24h              = float(item.get("low", 0)),
+                            volume_24h           = build_volume_value(
+                                native        = float(item.get("volume", 0)),
+                                volume_unit   = "base",
+                                contract_size = None,
+                                close         = last,
+                            ),
+                            price_change_percent = float(item.get("change_pct", 0)),
+                            timestamp            = self.normalize_timestamp(item.get("timestamp", time.time())),
                         )
         else:
             payload = {"event": "subscribe", "feed": "ticker", "product_ids": [api_symbol]}
             async for data in self._ws_connect(self.futures_ws_url, payload):
                 if data.get("feed") == "ticker" and "last" in data:
-                    last = float(data["last"])
+                    last     = float(data["last"])
                     open_24h = float(data.get("open", 0))
-                    pc = 0.0
+                    pc       = 0.0
                     if open_24h > 0:
                         pc = (float(data.get("change", 0)) / open_24h) * 100
                     yield Ticker(
-                        symbol=self.get_model_symbol(api_symbol, market_type),
-                        price=last,
-                        open_24h=open_24h,
-                        high_24h=float(data.get("high", 0)),
-                        low_24h=float(data.get("low", 0)),
-                        volume_24h=float(data.get("volume", 0)),
-                        quote_volume_24h=float(data.get("volumeQuote", 0)),
-                        price_change_percent=pc,
-                        timestamp=self.normalize_timestamp(data.get("time", time.time())),
+                        symbol               = model_sym,
+                        market_type          = market_type,
+                        quote                = quote,
+                        price                = last,
+                        open_24h             = open_24h,
+                        high_24h             = float(data.get("high", 0)),
+                        low_24h              = float(data.get("low", 0)),
+                        volume_24h           = build_volume_value(
+                            native        = float(data.get("volume", 0)),
+                            volume_unit   = unit,
+                            contract_size = contract_size,
+                            close         = last,
+                        ),
+                        price_change_percent = pc,
+                        timestamp            = self.normalize_timestamp(data.get("time", time.time())),
                     )
 
 
     async def stream_book_ticker(self, market_type: MarketType, symbol: str) -> AsyncGenerator[BookTicker, None]:
-        api_symbol = self.get_api_symbol(symbol, market_type)
+        api_symbol    = self.get_api_symbol(symbol, market_type)
+        model_sym     = self.get_model_symbol(api_symbol, market_type)
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
+        is_inverse    = market_type == MarketType.INVERSE
+        unit          = "contract" if is_inverse else "base"
 
         if market_type == MarketType.SPOT:
-            ws_sym = await self._spot_ws_symbol(api_symbol)
+            ws_sym  = await self._spot_ws_symbol(api_symbol)
             payload = {"method": "subscribe", "params": {"channel": "ticker", "symbol": [ws_sym], "event_trigger": "bbo"}}
             async for data in self._ws_connect(self.spot_ws_url, payload):
                 if data.get("type") in ["snapshot", "update"] and data.get("channel") == "ticker":
                     for item in data.get("data", []):
+                        bid_price = float(item.get("bid", 0))
+                        ask_price = float(item.get("ask", 0))
                         yield BookTicker(
-                            symbol=self.get_model_symbol(api_symbol, market_type),
-                            bid_price=float(item.get("bid", 0)),
-                            bid_qty=float(item.get("bid_qty", 0)),
-                            ask_price=float(item.get("ask", 0)),
-                            ask_qty=float(item.get("ask_qty", 0)),
-                            timestamp=self.normalize_timestamp(item.get("timestamp", time.time())),
+                            symbol      = model_sym,
+                            market_type = market_type,
+                            quote       = quote,
+                            bid_price   = bid_price,
+                            bid_qty     = build_qty_value(
+                                native        = float(item.get("bid_qty", 0)),
+                                qty_unit      = "base",
+                                contract_size = None,
+                                price         = bid_price,
+                            ),
+                            ask_price   = ask_price,
+                            ask_qty     = build_qty_value(
+                                native        = float(item.get("ask_qty", 0)),
+                                qty_unit      = "base",
+                                contract_size = None,
+                                price         = ask_price,
+                            ),
+                            timestamp   = self.normalize_timestamp(item.get("timestamp", time.time())),
                         )
         else:
             payload = {"event": "subscribe", "feed": "ticker", "product_ids": [api_symbol]}
             async for data in self._ws_connect(self.futures_ws_url, payload):
                 if data.get("feed") == "ticker" and "bid" in data:
+                    bid_price = float(data.get("bid", 0))
+                    ask_price = float(data.get("ask", 0))
                     yield BookTicker(
-                        symbol=self.get_model_symbol(api_symbol, market_type),
-                        bid_price=float(data.get("bid", 0)),
-                        bid_qty=float(data.get("bid_size", 0)),
-                        ask_price=float(data.get("ask", 0)),
-                        ask_qty=float(data.get("ask_size", 0)),
-                        timestamp=self.normalize_timestamp(data.get("time", time.time())),
+                        symbol      = model_sym,
+                        market_type = market_type,
+                        quote       = quote,
+                        bid_price   = bid_price,
+                        bid_qty     = build_qty_value(
+                            native        = float(data.get("bid_size", 0)),
+                            qty_unit      = unit,
+                            contract_size = contract_size,
+                            price         = bid_price,
+                        ),
+                        ask_price   = ask_price,
+                        ask_qty     = build_qty_value(
+                            native        = float(data.get("ask_size", 0)),
+                            qty_unit      = unit,
+                            contract_size = contract_size,
+                            price         = ask_price,
+                        ),
+                        timestamp   = self.normalize_timestamp(data.get("time", time.time())),
                     )
 
 
     async def stream_orderbook(self, market_type: MarketType, symbol: str, depth: int = 20, update_speed: str = "100ms") -> AsyncGenerator[OrderBook, None]:
         api_symbol = self.get_api_symbol(symbol, market_type)
+        model_sym  = self.get_model_symbol(api_symbol, market_type)
+        info       = await self._info_for(market_type, model_sym)
+        quote      = info.quote_asset if info else ""
 
         if market_type == MarketType.SPOT:
-            ws_sym = await self._spot_ws_symbol(api_symbol)
+            ws_sym    = await self._spot_ws_symbol(api_symbol)
             req_depth = 10 if depth <= 10 else 25 if depth <= 25 else 100
-            payload = {"method": "subscribe", "params": {"channel": "book", "symbol": [ws_sym], "depth": req_depth}}
+            payload   = {"method": "subscribe", "params": {"channel": "book", "symbol": [ws_sym], "depth": req_depth}}
+
+            bids: Dict[float, float] = {}
+            asks: Dict[float, float] = {}
+
             async for data in self._ws_connect(self.spot_ws_url, payload):
-                if data.get("channel") == "book" and data.get("type") in ["snapshot", "update"]:
-                    for item in data.get("data", []):
-                        yield OrderBook(
-                            symbol=self.get_model_symbol(api_symbol, market_type),
-                            bids=[[float(b["price"]), float(b["qty"])] for b in item.get("bids", [])],
-                            asks=[[float(a["price"]), float(a["qty"])] for a in item.get("asks", [])],
-                            timestamp=self.normalize_timestamp(item.get("timestamp", time.time())),
-                        )
+                if data.get("channel") != "book" or data.get("type") not in ("snapshot", "update"):
+                    continue
+                if data.get("type") == "snapshot":
+                    bids.clear()
+                    asks.clear()
+                for item in data.get("data", []):
+                    for b in item.get("bids", []):
+                        p, q = float(b["price"]), float(b["qty"])
+                        if q == 0: bids.pop(p, None)
+                        else:      bids[p] = q
+                    for a in item.get("asks", []):
+                        p, q = float(a["price"]), float(a["qty"])
+                        if q == 0: asks.pop(p, None)
+                        else:      asks[p] = q
+
+                    sorted_bids = sorted(bids.items(), key=lambda kv: -kv[0])[:depth]
+                    sorted_asks = sorted(asks.items(), key=lambda kv: kv[0])[:depth]
+
+                    yield OrderBook(
+                        symbol      = model_sym,
+                        market_type = market_type,
+                        quote       = quote,
+                        bids        = [[p, q] for p, q in sorted_bids],
+                        asks        = [[p, q] for p, q in sorted_asks],
+                        qty_unit    = "base",
+                        timestamp   = self.normalize_timestamp(item.get("timestamp", time.time())),
+                    )
         else:
             payload = {"event": "subscribe", "feed": "book", "product_ids": [api_symbol]}
+
+            bids: Dict[float, float] = {}
+            asks: Dict[float, float] = {}
+
             async for data in self._ws_connect(self.futures_ws_url, payload):
-                if data.get("feed") in ["book", "book_snapshot"] and "bids" in data:
-                    yield OrderBook(
-                        symbol=self.get_model_symbol(api_symbol, market_type),
-                        bids=[[float(b["price"]), float(b["qty"])] for b in data.get("bids", [])[:depth]],
-                        asks=[[float(a["price"]), float(a["qty"])] for a in data.get("asks", [])[:depth]],
-                        timestamp=self.normalize_timestamp(data.get("timestamp", time.time())),
-                    )
+                feed = data.get("feed")
+                if feed == "book_snapshot":
+                    bids.clear()
+                    asks.clear()
+                    for b in data.get("bids", []):
+                        p, q = float(b["price"]), float(b["qty"])
+                        if q > 0: bids[p] = q
+                    for a in data.get("asks", []):
+                        p, q = float(a["price"]), float(a["qty"])
+                        if q > 0: asks[p] = q
+                elif feed == "book" and "side" in data and "price" in data:
+                    p, q = float(data["price"]), float(data.get("qty", 0))
+                    side = data.get("side", "").lower()
+                    book = bids if side == "buy" else asks if side == "sell" else None
+                    if book is None:
+                        continue
+                    if q == 0: book.pop(p, None)
+                    else:      book[p] = q
+                else:
+                    continue
+                if not bids or not asks:
+                    continue
+
+                sorted_bids = sorted(bids.items(), key=lambda kv: -kv[0])[:depth]
+                sorted_asks = sorted(asks.items(), key=lambda kv: kv[0])[:depth]
+
+                yield OrderBook(
+                    symbol      = model_sym,
+                    market_type = market_type,
+                    quote       = quote,
+                    bids        = [[p, q] for p, q in sorted_bids],
+                    asks        = [[p, q] for p, q in sorted_asks],
+                    qty_unit    = "contract" if market_type == MarketType.INVERSE else "base",
+                    timestamp   = self.normalize_timestamp(data.get("timestamp", time.time())),
+                )
 
 
     async def stream_trades(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Trade, None]:
-        api_symbol = self.get_api_symbol(symbol, market_type)
+        api_symbol    = self.get_api_symbol(symbol, market_type)
+        model_sym     = self.get_model_symbol(api_symbol, market_type)
+        info          = await self._info_for(market_type, model_sym)
+        quote         = info.quote_asset if info else ""
+        contract_size = info.contract_size if info else None
+        is_inverse    = market_type == MarketType.INVERSE
+        unit          = "contract" if is_inverse else "base"
+
+        def _mk_trade(trade_id: str, price: float, qty_native: float, side_norm: str, ts) -> Trade:
+            return Trade(
+                id          = trade_id,
+                symbol      = model_sym,
+                market_type = market_type,
+                quote       = quote,
+                price       = price,
+                qty         = build_qty_value(
+                    native        = qty_native,
+                    qty_unit      = unit,
+                    contract_size = contract_size,
+                    price         = price,
+                ),
+                side        = side_norm,
+                timestamp   = self.normalize_timestamp(ts),
+            )
 
         if market_type == MarketType.SPOT:
-            ws_sym = await self._spot_ws_symbol(api_symbol)
+            ws_sym  = await self._spot_ws_symbol(api_symbol)
             payload = {"method": "subscribe", "params": {"channel": "trade", "symbol": [ws_sym], "snapshot": True}}
             async for data in self._ws_connect(self.spot_ws_url, payload):
                 if data.get("type") in ["snapshot", "update"] and data.get("channel") == "trade":
                     for t in data.get("data", []):
-                        yield Trade(
-                            id=str(t.get("trade_id", t.get("timestamp", time.time()))),
-                            price=float(t.get("price", 0)),
-                            qty=float(t.get("qty", 0)),
-                            side=t.get("side", "buy").lower(),
-                            timestamp=self.normalize_timestamp(t.get("timestamp", time.time())),
+                        side_raw = t.get("side")
+                        if side_raw is None:
+                            continue
+                        side_norm = side_raw.lower()
+                        if side_norm not in ("buy", "sell"):
+                            continue
+                        yield _mk_trade(
+                            trade_id   = str(t.get("trade_id", t.get("timestamp", time.time()))),
+                            price      = float(t.get("price", 0)),
+                            qty_native = float(t.get("qty", 0)),
+                            side_norm  = side_norm,
+                            ts         = t.get("timestamp", time.time()),
                         )
         else:
             payload = {"event": "subscribe", "feed": "trade", "product_ids": [api_symbol]}
             async for data in self._ws_connect(self.futures_ws_url, payload):
                 feed = data.get("feed")
                 if feed == "trade" and "price" in data:
-                    yield Trade(
-                        id=str(data.get("uid", data.get("time"))),
-                        price=float(data["price"]),
-                        qty=float(data.get("qty", 0)),
-                        side=data.get("side", "buy").lower(),
-                        timestamp=self.normalize_timestamp(data.get("time", time.time())),
+                    side_raw = data.get("side")
+                    if side_raw is None:
+                        continue
+                    side_norm = side_raw.lower()
+                    if side_norm not in ("buy", "sell"):
+                        continue
+                    yield _mk_trade(
+                        trade_id   = str(data.get("uid", data.get("time"))),
+                        price      = float(data["price"]),
+                        qty_native = float(data.get("qty", 0)),
+                        side_norm  = side_norm,
+                        ts         = data.get("time", time.time()),
                     )
                 elif feed == "trade_snapshot" and "trades" in data:
-                    for t in data["trades"]:
-                        yield Trade(
-                            id=str(t.get("uid", t.get("time"))),
-                            price=float(t["price"]),
-                            qty=float(t.get("qty", 0)),
-                            side=t.get("side", "buy").lower(),
-                            timestamp=self.normalize_timestamp(t.get("time", time.time())),
+                    snapshot_trades = sorted(data["trades"], key=lambda t: t.get("time", 0))
+                    for t in snapshot_trades:
+                        side_raw = t.get("side")
+                        if side_raw is None:
+                            continue
+                        side_norm = side_raw.lower()
+                        if side_norm not in ("buy", "sell"):
+                            continue
+                        yield _mk_trade(
+                            trade_id   = str(t.get("uid", t.get("time"))),
+                            price      = float(t["price"]),
+                            qty_native = float(t.get("qty", 0)),
+                            side_norm  = side_norm,
+                            ts         = t.get("time", time.time()),
                         )
 
 
@@ -1221,16 +1699,35 @@ class KrakenAdapter(BaseExchange):
         if market_type == MarketType.SPOT:
             raise NotImplementedError(f"{self.name} does not support stream_mark_price for {market_type.value}")
         api_symbol = self.get_api_symbol(symbol, market_type)
-        payload = {"event": "subscribe", "feed": "ticker", "product_ids": [api_symbol]}
+        model_sym  = self.get_model_symbol(api_symbol, market_type)
+        info       = await self._info_for(market_type, model_sym)
+        quote      = info.quote_asset if info else ""
+        payload    = {"event": "subscribe", "feed": "ticker", "product_ids": [api_symbol]}
 
         async for data in self._ws_connect(self.futures_ws_url, payload):
             if data.get("feed") == "ticker" and "markPrice" in data:
                 mark = float(data["markPrice"])
+                idx_raw = data.get("indexPrice")
+                idx_price: Optional[float] = float(idx_raw) if idx_raw is not None else None
+                rate_raw = data.get("funding_rate")
+                rate: Optional[float] = float(rate_raw) if rate_raw is not None else None
+                ts = self.normalize_timestamp(data.get("time", time.time()))
+
+                funding_block = None
+                if rate is not None:
+                    funding_block = build_funding_current(
+                        kind           = "continuous",
+                        per_cycle      = rate,
+                        cycle_ms       = 3_600_000,
+                        valid_until_ts = ts + 3_600_000,
+                    )
+
                 yield MarkPrice(
-                    symbol=self.get_model_symbol(api_symbol, market_type),
-                    mark_price=mark,
-                    index_price=float(data.get("indexPrice", mark)),
-                    funding_rate=float(data.get("funding_rate", 0)),
-                    next_funding_time=0,
-                    timestamp=self.normalize_timestamp(data.get("time", time.time())),
+                    symbol      = model_sym,
+                    market_type = market_type,
+                    quote       = quote,
+                    mark_price  = mark,
+                    index_price = idx_price,
+                    funding     = funding_block,
+                    timestamp   = ts,
                 )
