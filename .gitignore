@@ -9,4 +9,6 @@ venv/
 Thumbs.db
 .pytest_cache/
 *.log
-tests/runs/
+tools/auditor/runs/*
+!tools/auditor/runs/.gitkeep
+nul

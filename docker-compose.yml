@@ -13,7 +13,7 @@ services:
     env_file:
       - .env
     healthcheck:
-      test: curl -f http://localhost:${EXCHANGE_ROUTER_SERVICE_PORT}/status
+      test: curl -f http://localhost:8040/status
       interval: 30s
       timeout: 10s
       retries: 3
