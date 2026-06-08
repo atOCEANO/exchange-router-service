@@ -1,9 +1,9 @@
 import time
 from typing import Dict, List
 
-from tests.validator.results import ErrorType, ProbeResult
+from tools.auditor.aggregator import ErrorType, ProbeResult
 
-from tests.validator.probes.base import Probe, ProbeContext, fetch
+from tools.auditor.probes.base import Probe, ProbeContext, fetch
 
 
 class SymbolResolutionProbe(Probe):
@@ -33,38 +33,45 @@ class SymbolResolutionProbe(Probe):
         ended = time.time()
 
         if err is not None:
-            return [self.result(
+            r = self.result(
                 ctx, self.name, started,
                 status="fail",
                 error_type=ErrorType.NETWORK,
                 message=err,
                 evidence={"endpoint": endpoint, "expected_symbol": sym},
                 ended=ended,
-            )]
+            )
+            return [r]
         if status != 200:
-            return [self.result(
+            r = self.result(
                 ctx, self.name, started,
                 status="fail",
                 error_type=ErrorType.HTTP,
                 message=f"HTTP {status} on known spot symbol {sym}",
                 evidence={"endpoint": endpoint, "status": status},
                 ended=ended,
-            )]
+            )
+            r.sample = data
+            return [r]
         if not isinstance(data, dict) or data.get("symbol") != sym:
-            return [self.result(
+            r = self.result(
                 ctx, self.name, started,
                 status="fail",
                 error_type=ErrorType.LOGIC,
                 message=f"response symbol mismatch: expected {sym}, got {data.get('symbol') if isinstance(data, dict) else 'n/a'}",
                 evidence={"expected": sym, "got": data.get("symbol") if isinstance(data, dict) else None},
                 ended=ended,
-            )]
+            )
+            r.sample = data
+            return [r]
 
-        return [self.result(
+        r = self.result(
             ctx, self.name, started,
             status="pass",
             error_type=ErrorType.OK,
             message=f"{sym} resolves on spot",
             evidence={"symbol": sym},
             ended=ended,
-        )]
+        )
+        r.sample = data
+        return [r]

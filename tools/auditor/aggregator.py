@@ -34,6 +34,7 @@ class ProbeResult:
     latency_ms  : float          = 0.0
     started_at  : float          = 0.0
     ended_at    : float          = 0.0
+    sample      : Any            = None
 
 
     def to_dict(self) -> Dict[str, Any]:

@@ -11,9 +11,9 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from tests.validator import runner
-from tests.validator.reporting import LiveReporter, make_run_folder, render_failure_summary, write_json
-from tests.validator.results import Aggregator
+from tools.auditor import runner
+from tools.auditor.aggregator import Aggregator
+from tools.auditor.output import LiveReporter, make_run_folder, render_exchange_summary, render_failure_summary, write_html, write_json
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -25,15 +25,15 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="python -m tests.validator",
-        description="Validate exchange-router-service routes against a running instance.",
+        prog="python -m tools.auditor",
+        description="Audit exchange-router-service routes against a running instance.",
         epilog=(
             "Examples:\n"
-            "  python -m tests.validator                       all registered exchanges, default parallelism\n"
-            "  python -m tests.validator okx                   only OKX\n"
-            "  python -m tests.validator binance bybit         Binance and Bybit, both in parallel\n"
-            "  python -m tests.validator -p 1                  serial mode (one adapter at a time)\n"
-            "  python -m tests.validator --parallel 2 binance bybit kraken\n"
+            "  python -m tools.auditor                       all registered exchanges, default parallelism\n"
+            "  python -m tools.auditor okx                   only OKX\n"
+            "  python -m tools.auditor binance bybit         Binance and Bybit, both in parallel\n"
+            "  python -m tools.auditor -p 1                  serial mode (one adapter at a time)\n"
+            "  python -m tools.auditor --parallel 2 binance bybit kraken\n"
             "\n"
             "Env knobs (CLI flags override these):\n"
             "  API_URL                              default http://localhost:8040\n"
@@ -48,9 +48,9 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("exchanges", nargs="*", metavar="EXCHANGE",
-                        help="Exchange(s) to test (binance, bybit, kraken, kucoin, okx). Omit for all.")
+                        help="Exchange(s) to audit (binance, bybit, kraken, kucoin, okx). Omit for all.")
     parser.add_argument("-p", "--parallel", type=int, default=None, metavar="N",
-                        help="Number of adapters to test in parallel (overrides MAX_CONCURRENT_EXCHANGES). Use 1 for serial.")
+                        help="Number of adapters to audit in parallel (overrides MAX_CONCURRENT_EXCHANGES). Use 1 for serial.")
     return parser.parse_args()
 
 
@@ -64,12 +64,20 @@ async def _amain(requested: list, parallel: int) -> int:
             aggregator.add(r)
             live.on_result(r)
 
-        await runner.run(requested, on_result, max_concurrent_exchanges=parallel)
+        await runner.run(
+            requested, on_result,
+            on_register_exchange    = live.register_exchange,
+            on_probe_done           = live.on_probe_done,
+            on_skip_market          = live.on_skip_market,
+            max_concurrent_exchanges= parallel,
+        )
     wall_time = time.time() - started
 
     folder = make_run_folder(requested)
     write_json(folder / "results.json", aggregator, wall_time, requested)
+    write_html(folder, aggregator, wall_time, requested)
 
+    render_exchange_summary(console, aggregator)
     render_failure_summary(console, aggregator.results)
 
     totals = aggregator.totals()

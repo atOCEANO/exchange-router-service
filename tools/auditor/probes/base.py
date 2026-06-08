@@ -7,8 +7,8 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from tests.validator.config import API_URL, MIN_REST_INTERVAL_MS
-from tests.validator.results import ErrorType, ProbeResult
+from tools.auditor.aggregator import ErrorType, ProbeResult
+from tools.auditor.config import API_URL, HTTP_BODY_PREVIEW_CHARS, MIN_REST_INTERVAL_MS
 
 
 @dataclass
@@ -179,7 +179,7 @@ class Probe(ABC):
                 message="501 Not Implemented (unexpected)",
                 evidence={"endpoint": self.route, "status": 501},
             )
-        snippet = str(data)[:200] if data is not None else ""
+        snippet = str(data)[:HTTP_BODY_PREVIEW_CHARS] if data is not None else ""
         return self.result(
             ctx, probe_name, started,
             status="fail",

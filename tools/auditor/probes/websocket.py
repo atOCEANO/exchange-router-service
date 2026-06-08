@@ -9,10 +9,10 @@ from pydantic import BaseModel
 from src.models import (
     AggTrade, BookTicker, Liquidation, MarkPrice, OrderBook, Ticker, Trade,
 )
-from tests.validator.config import API_URL, WS_MIN_FRAMES, WS_TEST_DURATION
-from tests.validator.results import ErrorType, ProbeResult
+from tools.auditor.config import API_URL, SAMPLE_MAX_ITEMS, WS_MIN_FRAMES, WS_OPEN_TIMEOUT, WS_TEST_DURATION
+from tools.auditor.aggregator import ErrorType, ProbeResult
 
-from tests.validator.probes.base import Probe, ProbeContext, validate_one
+from tools.auditor.probes.base import Probe, ProbeContext, validate_one
 
 
 WS_CHANNEL_MODEL: Dict[str, Type[BaseModel]] = {
@@ -49,14 +49,16 @@ class WebSocketProbe(Probe):
             base_ws = API_URL.replace("http://", "ws://")
         ws_url = f"{base_ws}/ws/{ctx.exchange}/{ctx.market_type}"
 
-        started = time.time()
+        started         = time.time()
         frames_received = 0
         first_frame_ms: Optional[float] = None
-        last_error: Optional[str] = None
+        last_error: Optional[str]       = None
         bad_frame: Optional[Dict[str, Any]] = None
 
+        captured_frames: List[Dict[str, Any]] = []
+
         try:
-            async with websockets.connect(ws_url, open_timeout=15) as ws:
+            async with websockets.connect(ws_url, open_timeout=WS_OPEN_TIMEOUT) as ws:
                 await ws.send(json.dumps({"channel": self.channel, "symbol": ctx.symbol}))
                 deadline = started + WS_TEST_DURATION
 
@@ -69,8 +71,9 @@ class WebSocketProbe(Probe):
                     except asyncio.TimeoutError:
                         break
 
+                    arrived = (time.time() - started) * 1000.0
                     if first_frame_ms is None:
-                        first_frame_ms = (time.time() - started) * 1000.0
+                        first_frame_ms = arrived
 
                     try:
                         msg = json.loads(raw)
@@ -90,6 +93,7 @@ class WebSocketProbe(Probe):
                             break
 
                     frames_received += 1
+                    captured_frames.append({"arrival_ms": arrived, "frame": msg})
         except asyncio.TimeoutError:
             last_error = "connection timeout"
         except websockets.exceptions.WebSocketException as e:
@@ -127,40 +131,52 @@ class WebSocketProbe(Probe):
             "window_s":        WS_TEST_DURATION,
         }
 
+        sample = [item["frame"] for item in captured_frames[:SAMPLE_MAX_ITEMS]]
+
         if frames_received == 0:
             if self.min_frames == 0:
-                return [self.result(
+                r = self.result(
                     ctx, self.name, started,
                     status="pass",
                     error_type=ErrorType.OK,
                     message=f"connected, no frames in {WS_TEST_DURATION:.0f}s window (acceptable for {self.channel})",
                     evidence=evidence,
                     ended=ended,
-                )]
-            return [self.result(
+                )
+                r.sample = sample
+                return [r]
+            r = self.result(
                 ctx, self.name, started,
                 status="fail",
                 error_type=ErrorType.EMPTY,
                 message=f"no frames received in {WS_TEST_DURATION:.0f}s (required >= {self.min_frames})",
                 evidence=evidence,
                 ended=ended,
-            )]
+            )
+            r.sample = sample
+            return [r]
 
         if frames_received < self.min_frames:
-            return [self.result(
+            r = self.result(
                 ctx, self.name, started,
                 status="warn",
                 error_type=ErrorType.LOGIC,
                 message=f"got {frames_received}/{self.min_frames} frames (flaky stream or quiet market)",
                 evidence=evidence,
                 ended=ended,
-            )]
+            )
+            r.sample = sample
+            return [r]
 
-        return [self.result(
+        r = self.result(
             ctx, self.name, started,
             status="pass",
             error_type=ErrorType.OK,
             message=f"received {frames_received} frames, first at {first_frame_ms:.0f}ms",
             evidence=evidence,
             ended=ended,
-        )]
+        )
+        r.sample = sample
+        return [r]
+
+

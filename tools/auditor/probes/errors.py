@@ -1,9 +1,9 @@
 import time
 from typing import Any, Dict, List, Tuple
 
-from tests.validator.results import ErrorType, ProbeResult
+from tools.auditor.aggregator import ErrorType, ProbeResult
 
-from tests.validator.probes.base import Probe, ProbeContext, fetch
+from tools.auditor.probes.base import Probe, ProbeContext, fetch
 
 
 class ErrorPathProbe(Probe):
@@ -21,7 +21,7 @@ class ErrorPathProbe(Probe):
 
         cases: List[Tuple[str, str, Dict[str, Any], Tuple[int, ...], str]] = [
             ("error:unknown_exchange", "/zzznotanexchange/status",                 {}, (404,),     "404"),
-            ("error:bad_market_type",  f"/{ctx.exchange}/notamarket/info",         {}, (400, 422), "400/422"),
+            ("error:bad_market_type",  f"/{ctx.exchange}/notamarket/markets",      {}, (400, 422), "400/422"),
             ("error:bad_symbol",       f"/{ctx.exchange}/spot/ticker/ZZZNOTREAL",  {}, (400, 404), "400/404"),
         ]
 
@@ -30,32 +30,35 @@ class ErrorPathProbe(Probe):
             status, data, err = await fetch(ctx.client, path, params)
             ended = time.time()
             if err is not None:
-                out.append(self.result(
+                r = self.result(
                     ctx, probe_name, started,
                     status="fail",
                     error_type=ErrorType.NETWORK,
                     message=err,
                     evidence={"endpoint": path},
                     ended=ended,
-                ))
+                )
+                out.append(r)
                 continue
             if status in expected:
-                out.append(self.result(
+                r = self.result(
                     ctx, probe_name, started,
                     status="pass",
                     error_type=ErrorType.OK,
                     message=f"HTTP {status} (expected {expected_str})",
                     evidence={"endpoint": path, "status": status},
                     ended=ended,
-                ))
+                )
             else:
-                out.append(self.result(
+                r = self.result(
                     ctx, probe_name, started,
                     status="fail",
                     error_type=ErrorType.LOGIC,
                     message=f"got {status}, expected {expected_str}",
                     evidence={"endpoint": path, "status": status, "expected": expected_str},
                     ended=ended,
-                ))
+                )
+            r.sample = data
+            out.append(r)
 
         return out

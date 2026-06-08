@@ -2,10 +2,10 @@ import time
 from typing import List
 
 from src.models import OrderBook
-from tests.validator.config import SNAPSHOT_FRESHNESS_MS
-from tests.validator.results import ErrorType, ProbeResult
+from tools.auditor.config import SNAPSHOT_FRESHNESS_MS
+from tools.auditor.aggregator import ErrorType, ProbeResult
 
-from tests.validator.probes.base import (
+from tools.auditor.probes.base import (
     Probe, ProbeContext, fetch, now_ms, validate_one,
 )
 
@@ -120,10 +120,13 @@ class OrderBookProbe(Probe):
             )
 
         spread = asks[0][0] - bids[0][0] if bids and asks else 0
-        return self.result(
+
+        r = self.result(
             ctx, probe_name, started,
             status="pass",
             error_type=ErrorType.OK,
             message=f"depth={depth}, got {len(bids)}/{len(asks)} bids/asks, top spread={spread:.6g}",
             evidence={"depth": depth, "got_bids": len(bids), "got_asks": len(asks), "spread": spread},
         )
+        r.sample = data
+        return r

@@ -3,10 +3,13 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 
 from pydantic import BaseModel
 
-from tests.validator.config import freshness_threshold_ms, interval_ms, theoretical_max
-from tests.validator.results import ErrorType, ProbeResult
+from tools.auditor.config import (
+    SAMPLE_MAX_ITEMS, THEORETICAL_MAX_RATIO,
+    freshness_threshold_ms, interval_ms, theoretical_max,
+)
+from tools.auditor.aggregator import ErrorType, ProbeResult
 
-from tests.validator.probes.base import (
+from tools.auditor.probes.base import (
     Probe, ProbeContext, check_ascending_ts, fetch, validate_list,
 )
 
@@ -126,9 +129,9 @@ class PaginatedProbe(Probe):
             out.append(self._skip_anchors(ctx))
             return out
 
-        out.append(await self._probe_anchor_past(ctx, "start=1h_ago", 60 * 60 * 1000))
+        out.append(await self._probe_anchor_past(ctx, "before=1h_ago", 60 * 60 * 1000))
         if self.period_ms == 0 or self.period_ms <= 12 * 3_600_000:
-            out.append(await self._probe_anchor_past(ctx, "start=24h_ago", 24 * 60 * 60 * 1000))
+            out.append(await self._probe_anchor_past(ctx, "before=24h_ago", 24 * 60 * 60 * 1000))
         out.append(await self._probe_anchor_future(ctx))
         return out
 
@@ -138,10 +141,10 @@ class PaginatedProbe(Probe):
         if data is None:
             return res
 
-        n = len(data)
+        n       = len(data)
         last_ts = data[-1]["timestamp"]
-        age_s = (ctx.now_ms - last_ts) / 1000
-        ceiling = theoretical_max(self.period_ms, big, retention_ms, ctx.now_ms)
+        age_s   = (ctx.now_ms - last_ts) / 1000
+        ceiling  = theoretical_max(self.period_ms, big, retention_ms, ctx.now_ms)
         findings: List[str] = []
 
         if self.period_ms > 0:
@@ -149,7 +152,7 @@ class PaginatedProbe(Probe):
             if last_ts < ctx.now_ms - threshold:
                 findings.append(f"last record stale: {age_s:.0f}s old (threshold {threshold/1000:.0f}s)")
 
-        if n < int(ceiling * 0.9):
+        if n < int(ceiling * THEORETICAL_MAX_RATIO):
             findings.append(f"got {n}/{big} (theoretical max {ceiling}, retention_ms={retention_ms})")
 
         if findings:
@@ -160,6 +163,8 @@ class PaginatedProbe(Probe):
         else:
             res.message = f"got {n}/{big}, last age={age_s:.0f}s"
             res.evidence.update({"count": n, "age_s": age_s, "ceiling": ceiling})
+
+        res.sample = data[:SAMPLE_MAX_ITEMS]
         return res
 
 
@@ -169,6 +174,9 @@ class PaginatedProbe(Probe):
             res.status = "fail"
             res.error_type = ErrorType.LOGIC
             res.message = f"{sub_name} returned {len(data)}"
+
+        if data is not None:
+            res.sample = data[:SAMPLE_MAX_ITEMS]
         return res
 
 
@@ -178,6 +186,9 @@ class PaginatedProbe(Probe):
             res.status = "fail"
             res.error_type = ErrorType.LOGIC
             res.message = f"{sub_name} returned {len(data)}"
+
+        if data is not None:
+            res.sample = data[:SAMPLE_MAX_ITEMS]
         return res
 
 
@@ -204,20 +215,42 @@ class PaginatedProbe(Probe):
         data, res = await self._probe(ctx, sub_name, {"start": anchor, "limit": 500}, expect_empty_ok=True)
         if data is None:
             return res
+        res.sample = data[:SAMPLE_MAX_ITEMS]
 
         last_ts = data[-1]["timestamp"]
+        n       = len(data)
+
         if last_ts > anchor:
             res.status = "fail"
             res.error_type = ErrorType.LOGIC
             res.message = f"upstream ignored start: last record {(last_ts - anchor)/1000:.0f}s after anchor"
             res.evidence.update({"anchor_ms": anchor, "last_ts": last_ts, "drift_s": (last_ts - anchor) / 1000})
-        elif self.period_ms > 0 and last_ts < anchor - 2 * self.period_ms:
+            return res
+
+        if self.period_ms <= 0:
+            res.message = f"{n} records ending {(anchor - last_ts)/1000:.0f}s before anchor"
+            return res
+
+        if n >= 2:
+            intervals      = [data[i + 1]["timestamp"] - data[i]["timestamp"] for i in range(n - 1)]
+            max_cadence_ms = max(intervals)
+        else:
+            max_cadence_ms = self.period_ms
+
+        tolerance_ms = max(2 * self.period_ms, 2 * max_cadence_ms)
+
+        if last_ts < anchor - tolerance_ms:
             res.status = "warn"
             res.error_type = ErrorType.LOGIC
-            res.message = f"last record {(anchor - last_ts)/1000:.0f}s before anchor (>2 periods)"
-            res.evidence.update({"anchor_ms": anchor, "last_ts": last_ts})
+            res.message = f"last record {(anchor - last_ts)/1000:.0f}s before anchor (tolerance {tolerance_ms/1000:.0f}s)"
+            res.evidence.update({
+                "anchor_ms":      anchor,
+                "last_ts":        last_ts,
+                "max_cadence_ms": int(max_cadence_ms),
+                "tolerance_ms":   int(tolerance_ms),
+            })
         else:
-            res.message = f"{len(data)} records ending {(anchor - last_ts)/1000:.0f}s before anchor"
+            res.message = f"{n} records ending {(anchor - last_ts)/1000:.0f}s before anchor"
         return res
 
 
@@ -226,6 +259,7 @@ class PaginatedProbe(Probe):
         data, res = await self._probe(ctx, "start=future", {"start": anchor, "limit": 100}, expect_empty_ok=False)
         if data is None:
             return res
+        res.sample = data[:SAMPLE_MAX_ITEMS]
 
         last_ts = data[-1]["timestamp"]
         fresh_now = int(time.time() * 1000)

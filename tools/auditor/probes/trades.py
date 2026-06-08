@@ -2,9 +2,10 @@ import time
 from typing import List
 
 from src.models import Trade
-from tests.validator.results import ErrorType, ProbeResult
+from tools.auditor.aggregator import ErrorType, ProbeResult
+from tools.auditor.config import SAMPLE_MAX_ITEMS
 
-from tests.validator.probes.base import (
+from tools.auditor.probes.base import (
     Probe, ProbeContext, check_ascending_ts, fetch, validate_list,
 )
 
@@ -77,7 +78,7 @@ class TradesProbe(Probe):
                 evidence=ev,
             )
 
-        ids = [t["id"] for t in data]
+        ids = [t["id"] for t in data if t.get("id") is not None]
         if len(set(ids)) != len(ids):
             seen, dup = set(), None
             for tid in ids:
@@ -112,19 +113,25 @@ class TradesProbe(Probe):
                 evidence={"limit": 1, "got": n},
             )
 
+        sample = data[:SAMPLE_MAX_ITEMS]
+
         if lim > 1 and n < lim:
-            return self.result(
+            r = self.result(
                 ctx, probe_name, started,
                 status="warn",
                 error_type=ErrorType.LOGIC,
                 message=f"got {n}/{lim} trades (upstream returned fewer than declared cap)",
                 evidence={"limit": lim, "got": n},
             )
+            r.sample = sample
+            return r
 
-        return self.result(
+        r = self.result(
             ctx, probe_name, started,
             status="pass",
             error_type=ErrorType.OK,
             message=f"got {n}/{lim} trades, ascending order",
             evidence={"limit": lim, "got": n},
         )
+        r.sample = sample
+        return r

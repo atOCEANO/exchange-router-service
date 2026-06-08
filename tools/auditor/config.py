@@ -3,19 +3,50 @@ import re
 from typing import Dict, Iterable, Optional, Tuple
 
 
-API_URL                            = os.getenv("API_URL", "http://localhost:8040")
-TIMEOUT                            = float(os.getenv("TIMEOUT", "60.0"))
-WS_TEST_DURATION                   = float(os.getenv("WS_TEST_DURATION", "180.0"))
-MAX_CONCURRENT_EXCHANGES           = int(os.getenv("MAX_CONCURRENT_EXCHANGES", "5"))
-MAX_CONCURRENT_REST_PER_EXCHANGE   = int(os.getenv("MAX_CONCURRENT_REST_PER_EXCHANGE", "4"))
-MAX_CONCURRENT_WS_PER_EXCHANGE     = int(os.getenv("MAX_CONCURRENT_WS_PER_EXCHANGE", "32"))
-MIN_REST_INTERVAL_MS               = float(os.getenv("MIN_REST_INTERVAL_MS", "250"))
-LATENCY_WARN_MS                    = float(os.getenv("LATENCY_WARN_MS", "5000"))
-SNAPSHOT_FRESHNESS_MS              = int(os.getenv("SNAPSHOT_FRESHNESS_MS", "300000"))
+API_URL = os.getenv("API_URL", "http://localhost:8040")
 
+TIMEOUT          = float(os.getenv("TIMEOUT",          "60.0"))
+WS_TEST_DURATION = float(os.getenv("WS_TEST_DURATION", "180.0"))
+WS_OPEN_TIMEOUT  = float(os.getenv("WS_OPEN_TIMEOUT",  "15.0"))
+
+MAX_CONCURRENT_EXCHANGES         = int  (os.getenv("MAX_CONCURRENT_EXCHANGES",         "5"))
+MAX_CONCURRENT_REST_PER_EXCHANGE = int  (os.getenv("MAX_CONCURRENT_REST_PER_EXCHANGE", "4"))
+MAX_CONCURRENT_WS_PER_EXCHANGE   = int  (os.getenv("MAX_CONCURRENT_WS_PER_EXCHANGE",   "32"))
+MIN_REST_INTERVAL_MS             = float(os.getenv("MIN_REST_INTERVAL_MS",             "250"))
+
+LATENCY_WARN_MS       = float(os.getenv("LATENCY_WARN_MS",       "5000"))
+SNAPSHOT_FRESHNESS_MS = int  (os.getenv("SNAPSHOT_FRESHNESS_MS", "300000"))
+THEORETICAL_MAX_RATIO = 0.9
+CROSS_DRIFT_THRESHOLD = 0.0075
+
+SAMPLE_MAX_ITEMS        = 200
+HTML_PRE_MAX_CHARS      = 30_000
+HTTP_BODY_PREVIEW_CHARS = 200
+
+BIG_LIMITS: Dict[str, int] = {
+    "candles":          3000,
+    "agg_trades":       1000,
+    "funding_rate":      500,
+    "liquidations":      500,
+    "open_interest":     500,
+    "long_short_ratio":  500,
+}
+
+WS_MIN_FRAMES: Dict[str, int] = {
+    "orderbook":    10,
+    "ticker":       5,
+    "book_ticker":  5,
+    "trades":       1,
+    "agg_trades":   1,
+    "mark_price":   1,
+    "liquidations": 0,
+}
+
+FRESHNESS_OVERRIDE_MS: Dict[Tuple[str, str, str], int] = {
+    ("kucoin", "inverse", "1m"): 600_000,
+}
 
 CRYPTO_EPOCH_MS = 1_262_304_000_000
-
 
 INTERVAL_MS: Dict[str, int] = {
     "1m":  60_000,
@@ -34,23 +65,6 @@ INTERVAL_MS: Dict[str, int] = {
     "1w":  604_800_000,
     "1M":  2_592_000_000,
 }
-
-
-WS_MIN_FRAMES: Dict[str, int] = {
-    "orderbook":    10,
-    "ticker":       5,
-    "book_ticker":  5,
-    "trades":       1,
-    "agg_trades":   1,
-    "mark_price":   1,
-    "liquidations": 0,
-}
-
-
-FRESHNESS_OVERRIDE_MS: Dict[Tuple[str, str, str], int] = {
-    ("kucoin", "inverse", "1m"): 600_000,
-}
-
 
 _MONTHS    = "JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC"
 _LEVERAGED = re.compile(r"(?:^|[^A-Z])(UP|DOWN|BULL|BEAR|\d+[LS])(?:[^A-Z]|$)")
@@ -82,7 +96,7 @@ def _score_symbol(symbol: str) -> float:
         return -1.0
 
     quote_score = 0.0
-    stripped = re.sub(r"[-_/]?(PERP|PERPETUAL|SWAP)$", "", s)
+    stripped    = re.sub(r"[-_/]?(PERP|PERPETUAL|SWAP)$", "", s)
     for quote, bonus in (("USDT", 30), ("USDC", 25), ("USD", 20)):
         if stripped.endswith(quote) or f"/{quote}" in stripped or f"-{quote}" in stripped or f"_{quote}" in stripped:
             quote_score = bonus
@@ -95,14 +109,14 @@ def _score_symbol(symbol: str) -> float:
 
 def pick_symbol(symbols: Iterable[str]) -> Optional[str]:
     best: Optional[str] = None
-    best_score = 0.0
+    best_score          = 0.0
     for sym in symbols:
         if not isinstance(sym, str):
             continue
         score = _score_symbol(sym)
         if score > best_score:
             best_score = score
-            best = sym
+            best       = sym
     return best
 
 
@@ -113,5 +127,5 @@ def theoretical_max(period_ms: int, big_limit: int, retention_ms: Optional[int],
     ceiling = min(big_limit, age_cap)
     if retention_ms is not None:
         retention_cap = retention_ms // period_ms
-        ceiling = min(ceiling, retention_cap)
+        ceiling       = min(ceiling, retention_cap)
     return max(ceiling, 1)

@@ -1,9 +1,10 @@
 import time
 from typing import List
 
-from tests.validator.results import ErrorType, ProbeResult
+from tools.auditor.aggregator import ErrorType, ProbeResult
+from tools.auditor.config import CROSS_DRIFT_THRESHOLD
 
-from tests.validator.probes.base import Probe, ProbeContext, fetch
+from tools.auditor.probes.base import Probe, ProbeContext, fetch
 
 
 class CrossRouteConsistencyProbe(Probe):
@@ -37,24 +38,26 @@ class CrossRouteConsistencyProbe(Probe):
             if tp and bid and ask and tp > 0:
                 mid = (bid + ask) / 2
                 drift = abs(tp - mid) / tp
-                if drift > 0.005:
-                    out.append(self.result(
+                if drift > CROSS_DRIFT_THRESHOLD:
+                    r = self.result(
                         ctx, "cross:ticker_vs_book", started,
                         status="warn",
                         error_type=ErrorType.LOGIC,
-                        message=f"ticker/book drift {drift*100:.2f}% > 0.5%",
+                        message=f"ticker/book drift {drift*100:.2f}% > {CROSS_DRIFT_THRESHOLD*100:.1f}%",
                         evidence={"ticker_price": tp, "book_mid": mid, "drift_pct": drift * 100},
                         ended=ended,
-                    ))
+                    )
                 else:
-                    out.append(self.result(
+                    r = self.result(
                         ctx, "cross:ticker_vs_book", started,
                         status="pass",
                         error_type=ErrorType.OK,
                         message=f"ticker/book drift {drift*100:.3f}%",
                         evidence={"ticker_price": tp, "book_mid": mid, "drift_pct": drift * 100},
                         ended=ended,
-                    ))
+                    )
+                r.sample = {"ticker": d_t, "book_ticker": d_b}
+                out.append(r)
 
         if m == "linear" and ctx.caps_slice.get("mark_price", {}).get("rest"):
             started = time.time()
@@ -66,22 +69,24 @@ class CrossRouteConsistencyProbe(Probe):
                 if mp and tp and tp > 0:
                     drift = abs(mp - tp) / tp
                     if drift > 0.01:
-                        out.append(self.result(
+                        r = self.result(
                             ctx, "cross:mark_vs_ticker", started,
                             status="warn",
                             error_type=ErrorType.LOGIC,
                             message=f"mark/ticker drift {drift*100:.2f}% > 1%",
                             evidence={"mark_price": mp, "ticker_price": tp, "drift_pct": drift * 100},
                             ended=ended,
-                        ))
+                        )
                     else:
-                        out.append(self.result(
+                        r = self.result(
                             ctx, "cross:mark_vs_ticker", started,
                             status="pass",
                             error_type=ErrorType.OK,
                             message=f"mark/ticker drift {drift*100:.3f}%",
                             evidence={"mark_price": mp, "ticker_price": tp, "drift_pct": drift * 100},
                             ended=ended,
-                        ))
+                        )
+                    r.sample = {"mark_price": d_m, "ticker": d_t}
+                    out.append(r)
 
         return out
