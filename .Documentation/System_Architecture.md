@@ -9,11 +9,14 @@
 
 <sub>
   <a href="../README.md">Introduction</a> &nbsp;•&nbsp; 
+  <a href="Scope.md">Scope</a> &nbsp;•&nbsp; 
   <a href="API_Reference.md">API Reference</a> &nbsp;•&nbsp; 
   <a href="Python_SDK.md">Python SDK</a> &nbsp;•&nbsp; 
+  <a href="Troubleshooting.md">Troubleshooting</a> &nbsp;•&nbsp; 
   <a href="Exchange_Notes.md">Exchange Notes</a> &nbsp;•&nbsp; 
   <b>System Architecture</b> &nbsp;•&nbsp; 
-  <a href="Validator_Guide.md">Validator Guide</a> &nbsp;•&nbsp; 
+  <a href="Capabilities_Contract.md">Capabilities Contract</a> &nbsp;•&nbsp; 
+  <a href="Auditor_Guide.md">Auditor Guide</a> &nbsp;•&nbsp; 
   <a href="Contributor_Guide.md">Contributor Guide</a>
 </sub>
 
@@ -24,16 +27,34 @@
 
 ## System Architecture
 
-The router's core contract, the REST and WebSocket request paths, rate-limit handling, error handling, and the deployment and security constraints that shape how the service should be operated.
+One FastAPI process, one adapter per exchange behind a routing layer that never branches on which exchange it is calling. REST and WebSocket share the port and the adapter instance.
 
 <br>
 <br>
 
 ## Core Design
 
-The router is built around an abstract base contract (`BaseExchange`). Each exchange is an isolated adapter that implements it; the routing core never needs to know which exchange it is talking to. The loader in `src/exchanges/__init__.py` scans the directory at startup, instantiates every `BaseExchange` subclass it finds, and registers them in `EXCHANGE_REGISTRY`. Adding a new exchange is a matter of dropping a compliant adapter into that directory and restarting.
+The router uses an abstract base contract (`BaseExchange`). Each exchange is an isolated adapter that implements it; the routing core never needs to know which exchange it is talking to. The loader in `src/exchanges/__init__.py` scans the directory at startup, instantiates every `BaseExchange` subclass it finds, and registers them in `EXCHANGE_REGISTRY`. Adding a new exchange is a matter of dropping a compliant adapter into that directory and restarting.
+
+The wire contract is pinned to an integer `schema_version` field returned at `GET /`; the full record shapes live in [API Reference](API_Reference.md#response-shapes). Adapters never construct nested value objects by hand: they call shared `build_*` helpers in `src/exchanges/base.py` (`build_qty_value`, `build_volume_value`, `build_oi_value`, `build_funding_current`, `build_funding_historical`, `build_funding_convention`). This keeps the conversion logic in one place and the adapter authoring cost low.
 
 Before deploying outside localhost, see [Security and Exposure](#security-and-exposure).
+
+<br>
+<br>
+
+## Startup Lifecycle
+
+The FastAPI `lifespan` handler in `src/main.py` runs in three phases when the service starts:
+
+1. **Adapter loading.** `load_exchanges()` scans `src/exchanges/` and instantiates every `BaseExchange` subclass. Each adapter's `__init__` is synchronous and lightweight; it does not hit the network.
+2. **Preload.** For every registered adapter, the lifespan handler calls `await adapter.preload()`. `preload()` is a sealed template on `BaseExchange`: if the adapter overrides `_warm()`, the base class spawns it as a background task and returns immediately. The handler does not block; the router accepts traffic right away. Inside `_warm()`, adapters call `await self._step("label", awaitable)` once per logical warm; the base class times each step and emits a structured log timeline (`[adapter] preload: warming X...`, `[adapter] preload: X ready in Ts`, `[adapter] preload: done in Ts`). Cross-adapter parallelism is preserved (each adapter's warm chain runs in its own background task); within an adapter, steps run sequentially so the log reads as a chronological per-adapter timeline. During the warm window any route that depends on the cache being primed falls back to a per-symbol on-demand lookup, so correctness is preserved at the cost of a few extra upstream calls until the warm catches up.
+3. **Yield.** The service is now serving. Shutdown reverses this: stream-manager teardown first, then `adapter.shutdown()` per adapter to close HTTP clients and WS connections.
+
+<div align="center">
+  <img src="imgs/204648.png" alt="Startup lifecycle with background warm" width="80%" />
+  <p style="margin: 0;"><i>Each adapter declares its warm steps in `_warm()`; the base class spawns the chain in a background task and returns immediately, so the router accepts traffic without waiting</i></p>
+</div>
 
 <br>
 <br>
@@ -42,7 +63,12 @@ Before deploying outside localhost, see [Security and Exposure](#security-and-ex
 
 Every REST request follows the same path:
 
-`Client -> FastAPI Route -> Adapter -> Upstream Exchange -> Normalisation -> Response`
+<div align="center">
+  <img src="imgs/204646.png" alt="REST request lifecycle" width="80%" />
+  <p style="margin: 0;"><i>REST lifecycle: route validation, adapter dispatch, retry-aware upstream call, Pydantic normalization, JSON response</i></p>
+</div>
+
+<br>
 
 The route resolves the exchange name to its registered adapter, the adapter makes an async upstream call, and the raw JSON is mapped to a Pydantic model from `src/models.py` before returning. Raw dicts never cross the boundary.
 
@@ -54,6 +80,13 @@ The route resolves the exchange name to its registered adapter, the adapter make
 WebSocket streams do not follow the same path as REST. The `StreamManager` in `src/stream_manager.py` sits between clients and the adapter's streaming methods.
 
 When a client subscribes to a `(channel, symbol)` tuple on an exchange, the manager builds a key of the form `{exchange}:{market_type}:{channel}:{symbol}` and checks whether an upstream task already exists for it.
+
+<div align="center">
+  <img src="imgs/204647.png" alt="WebSocket fan-out lifecycle" width="80%" />
+  <p style="margin: 0;"><i>One upstream WebSocket per (channel, symbol) tuple, fanned out to every attached client; cancelled when the last subscriber leaves</i></p>
+</div>
+
+<br>
 
 1. **First subscriber.** The manager starts an async task that opens a single upstream WebSocket via `adapter.stream_*(market_type, symbol)`. Every message produced by the adapter is fanned out to all local clients registered under the same key.
 2. **Additional subscribers.** New clients attach to the existing task. No new upstream connection is opened, which keeps the router well under per-IP connection limits on exchanges that enforce them.
@@ -67,9 +100,14 @@ This is also why re-subscribing on the same connection is not supported. Each co
 
 ## Rate Limiting
 
-Each adapter holds a dedicated `asyncio.Lock()` and a shared `_backoff_until` timestamp. All requests to the same exchange share a single budget and serialise behind that lock. If the remaining backoff exceeds 30 seconds when a request arrives, the adapter fails the request immediately with a clear error rather than making the caller wait.
+State machine lives here; user-facing behaviour and per-exchange specifics live in [Exchange Notes](Exchange_Notes.md#rate-limit-and-ban-protection); implementation patterns and header names live in [Contributor Guide](Contributor_Guide.md#rate-limit-headers-and-proactive-backoff).
 
-The user-facing patterns (header-driven proactive backoff, reactive backoff on rejection, proactive minimum-spacing) and per-exchange specifics live in [Exchange Notes → Rate-limit and ban protection](Exchange_Notes.md#rate-limit-and-ban-protection). The implementation details (header names, code paths, Kraken's layered retry strategy) live in [Contributor Guide → Rate limit headers and proactive backoff](Contributor_Guide.md#rate-limit-headers-and-proactive-backoff).
+Each adapter holds a shared `_backoff_until` timestamp guarded by an `asyncio.Lock`. Requests run in parallel by default, but every request consults the timestamp before issuing and sleeps until it clears if a backoff window is active. The lock only protects writes to the timestamp; reads are racy but harmless because the worst case is one extra request slipping through the boundary of a window. When the remaining backoff is large, some adapters fail fast with a `ValueError` rather than blocking the caller: Bybit and KuCoin fail at 30s, OKX at 60s. Binance and Kraken sleep through the backoff and retry: Binance uses the upstream's `Retry-After` header (or 5s default) for rate-limit waits with up to 3 retries; Kraken uses exponential backoff with full jitter capped at 60s per attempt, up to 8 retries on Spot REST and 5 on Futures. Per-adapter specifics live in [Exchange Notes](Exchange_Notes.md#rate-limit-and-ban-protection).
+
+<div align="center">
+  <img src="imgs/204651.png" alt="Rate-limit state machine" width="80%" />
+  <p style="margin: 0;"><i>HEALTHY → BACKOFF (transient wait under 30s) → FAIL_FAST (over 30s, request rejected with ValueError → HTTP 400)</i></p>
+</div>
 
 <br>
 <br>
@@ -80,9 +118,9 @@ The router normalizes failures into a small set of HTTP responses. It helps to s
 
 Adapters raise three exception types:
 
-* **`ValueError`** for bad input or upstream validation failures (unknown symbol, out-of-range limit, malformed interval, adapter-side parameter rejections, requests arriving while an active backoff window has more than 30 seconds remaining). A global exception handler in `main.py` converts these into `400 Bad Request`, preserving the message in `detail`. Kraken also uses `ValueError` for exhausted retries on throttling, so callers see `400` with an actionable message rather than an opaque 500.
+* **`ValueError`** for bad input or upstream validation failures (unknown symbol, out-of-range limit, malformed interval, adapter-side parameter rejections, requests arriving while an active backoff window has more than 30 seconds remaining). A global exception handler in `main.py` converts these into `400 Bad Request`, preserving the message in `detail`. Some adapters also use `ValueError` for exhausted retries on throttling (see [Exchange Notes](Exchange_Notes.md#rate-limit-and-ban-protection)), so callers see `400` with an actionable message rather than an opaque 500.
 * **`NotImplementedError`** when the adapter does not implement a method for a given market type. The base class raises this by default, and the route layer catches it and returns `501 Not Implemented`.
-* **plain `Exception`** when retries on upstream HTTP failures (5xx, connection errors, timeouts) are exhausted on Binance, Bybit, KuCoin, or OKX. The message is `"Max retries exceeded for {url}"`. Not caught explicitly, so FastAPI's default handler returns `500 Internal Server Error`.
+* **plain `Exception`** when retries on upstream HTTP failures (5xx, connection errors, timeouts) are exhausted in adapters that surface this as a bare exception. The message is `"Max retries exceeded for {url}"`. Not caught explicitly, so FastAPI's default handler returns `500 Internal Server Error`.
 
 The route layer adds three more responses that adapters never raise themselves:
 
@@ -92,9 +130,21 @@ The route layer adds three more responses that adapters never raise themselves:
 
 One more condition does not correspond to an exception type at all:
 
-* **Upstream rate limiting** (429 or 418, or proactive detection via response headers) causes the adapter to pause all in-flight tasks and wait for the declared backoff window. The client request is delayed, not rejected. When the wait exceeds 30 seconds, the adapter raises `ValueError` instead, which falls under the first bullet above.
+* **Upstream rate limiting** (429 or 418, or proactive detection via response headers) causes the adapter to wait for the declared backoff window before retrying. The client request is delayed, not rejected. When the wait exceeds the adapter's fail-fast threshold (30s on Bybit and KuCoin, 60s on OKX), the adapter raises `ValueError` instead, which falls under the first bullet above. Binance and Kraken do not implement a single fail-fast cutoff; they sleep and retry until the upstream clears or the retry budget exhausts (Kraken bounds total backoff at ~4 minutes).
 
 The `detail` field in error responses always carries the underlying exception message, whether it came from the adapter or the upstream exchange. Nothing is rewritten or swallowed.
+
+<br>
+<br>
+
+## Versioning Policy
+
+The router carries two version numbers, defined in [src/version.py](../src/version.py) and surfaced through separate endpoints.
+
+* **`SERVICE_VERSION`** is the standard semver string (e.g. `"2.0.0"`). It bumps for any user-visible change: a new route, a new field, a behavioural fix, a capability adjustment, a dependency upgrade. Returned at `GET /version` and `GET /`.
+* **`SCHEMA_VERSION`** is a small integer. It bumps only when the wire format breaks consumer code: renaming a field, flattening a nested object into top-level fields, removing a discriminator value, changing the type of a field. Adding an optional field does not bump. Returned at `GET /` and stamped on every auditor `results.json`; the auditor compares served-vs-pinned and fails the suite on drift.
+
+The two version numbers are decoupled on purpose. A wire-compatible bug fix bumps `SERVICE_VERSION` and leaves `SCHEMA_VERSION` untouched, so clients pinned to a schema number do not need to recompile. A genuine wire break bumps both.
 
 <br>
 <br>
