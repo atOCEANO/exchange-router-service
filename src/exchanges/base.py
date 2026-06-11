@@ -16,6 +16,12 @@ from src.models import (
 logger = logging.getLogger(__name__)
 
 
+class UpstreamUnavailableError(ValueError):
+    def __init__(self, message: str, retry_after: Optional[float] = None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 def build_qty_value(native: float, qty_unit: str, contract_size: Optional[float], price: float) -> QtyValue:
     if qty_unit == "contract":
         if contract_size is None:
@@ -290,8 +296,15 @@ class StreamHub:
 
 
 class BaseExchange(ABC):
+    INFO_REFRESH_S = 24 * 60 * 60
+    INFO_RETRY_S   = 60 * 60
+
+
     def __init__(self):
-        pass
+        self._info_cache: Dict[MarketType, Dict[str, SymbolInfo]] = {}
+        self._info_cache_at: Dict[MarketType, float] = {}
+        self._info_cache_lock = asyncio.Lock()
+        self._warm_task: Optional[asyncio.Task] = None
 
 
     @abstractmethod
@@ -349,7 +362,7 @@ class BaseExchange(ABC):
         if type(self)._warm is BaseExchange._warm:
             return
 
-        asyncio.create_task(self._run_warm())
+        self._warm_task = asyncio.create_task(self._run_warm())
 
 
     async def _run_warm(self) -> None:
@@ -383,6 +396,39 @@ class BaseExchange(ABC):
 
     async def _warm(self) -> None:
         return None
+
+
+    async def _fetch_exchange_info(self, market_type: MarketType) -> List[SymbolInfo]:
+        raise NotImplementedError(f"Exchange info fetch not implemented on {self.name}")
+
+
+    async def _ensure_info_cache(self, market_type: MarketType) -> Dict[str, SymbolInfo]:
+        async with self._info_cache_lock:
+            now     = time.monotonic()
+            cached  = self._info_cache.get(market_type)
+            elapsed = now - self._info_cache_at.get(market_type, 0.0)
+
+            if cached is not None and elapsed < self.INFO_REFRESH_S:
+                return cached
+
+            try:
+                infos = await self._fetch_exchange_info(market_type)
+            except Exception:
+                if cached is None:
+                    raise
+                logger.warning(f"[{self.name}] exchange info refresh failed for {market_type.value}; serving cached metadata")
+                self._info_cache_at[market_type] = now - self.INFO_REFRESH_S + self.INFO_RETRY_S
+                return cached
+
+            self._info_cache[market_type] = {info.symbol: info for info in infos}
+            self._info_cache_at[market_type] = now
+
+            return self._info_cache[market_type]
+
+
+    async def _info_for(self, market_type: MarketType, model_symbol: str) -> Optional[SymbolInfo]:
+        cache = await self._ensure_info_cache(market_type)
+        return cache.get(model_symbol)
 
 
     @abstractmethod
