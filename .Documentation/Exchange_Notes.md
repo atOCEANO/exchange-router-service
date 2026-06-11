@@ -118,7 +118,7 @@ Consumers using `ticker.timestamp` to gauge data freshness across exchanges shou
 | OKX | numeric integer string | `"1013326135"` |
 | Bybit | UUID with hyphens | `"f960a6cf-2bcb-5f4e-9881-49a724a253dd"` |
 | KuCoin | large integer string | `"1933627152931"` |
-| Kraken spot | timestamp-based composite | `"1780527941817624999"` |
+| Kraken spot | numeric integer string (upstream `trade_id`; timestamp-based fallback on rows that omit it) | `"61044952"` |
 | Kraken futures | UUID via `uid` | `"ab32ca5f-e761-4a6d-a094-1d3f4aa8693c"` |
 
 Consumers parsing `id` as integer will fail on Bybit and Kraken futures. Always store as string.
@@ -167,7 +167,7 @@ Forced liquidation history is not available via public REST. The endpoints (`/fa
 
 ### COIN-M `qty` and `volume` are in contracts
 
-For COIN-M (inverse) perpetuals, `qty` and `volume` are reported in contracts, not the base asset. For `BTCUSD_PERP`, 1 contract represents 100 USD of notional. The router does not convert. Multiply by the contract multiplier (and divide by `price`) if you need a base-asset volume; consult Binance's COIN-M contract spec for each instrument's multiplier. USD-M (linear) and SPOT report `qty` and `volume` in the base asset directly.
+For COIN-M (inverse) perpetuals, `qty.native` and `volume.native` are reported in contracts, not the base asset. For `BTCUSD_PERP`, 1 contract represents 100 USD of notional. The native count stays in contracts; the same record carries `contract_size` and `usd = native × contract_size` per the standard inverse layout, and the per-instrument multiplier is on `/markets/{symbol}` as `contract_size`. Divide `usd` by `price` if you need a base-asset volume. USD-M (linear) and SPOT report `qty` and `volume` in the base asset directly.
 
 <br>
 <br>
@@ -178,7 +178,7 @@ Bybit uses bare-pair symbols natively (`BTCUSDT`, `ETHUSDT`) on both spot and co
 
 ### IP bans
 
-Bybit returns HTTP 403 (not 429) on persistent rate-limit violations. These are IP bans on the order of 10 minutes. The router fails the triggering request immediately and rejects subsequent requests until the ban window has passed. Soft per-endpoint limits are handled internally with brief backoff and retry.
+Bybit returns HTTP 403 (not 429) on persistent rate-limit violations. These are IP bans on the order of 10 minutes. The router fails the triggering request immediately and rejects subsequent requests with HTTP 503 (plus a `Retry-After` header) until the ban window has passed. Soft per-endpoint limits are handled internally with brief backoff and retry.
 
 ### Inverse `volume24h` and `turnover24h` semantics
 
@@ -203,7 +203,7 @@ Kraken uses legacy asset codes on its REST API: Bitcoin is `XBT`, Dogecoin is `X
 
 ### Candle history limits
 
-The Kraken spot OHLC endpoint has a hard ceiling of 720 candles per request with no pagination support. Requests above this limit silently return only the most recent 720. Linear and inverse candles use the Futures chart API and paginate normally.
+The Kraken spot OHLC endpoint has a hard ceiling of 720 candles per request with no pagination support. Requests above this limit silently return only the most recent 720. Linear and inverse candles use the Futures chart API and paginate normally; the chart API labels candles by bucket open time and includes the in-progress bucket, which the router passes through unchanged, so Kraken futures candle timestamps line up with every other venue's.
 
 ### Inverse and linear `/markets/{symbol}` base/quote derivation
 
