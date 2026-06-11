@@ -78,7 +78,7 @@ async def _warm(self) -> None:
 
 async def _warm_funding_intervals(self, market_type: MarketType) -> None:
     cache = await self._ensure_info_cache(market_type)
-    sem   = asyncio.Semaphore(10)
+    sem   = asyncio.Semaphore(2)
     tasks = [self._warm_one_funding_interval(info, sem) for info in cache.values()]
 
     await asyncio.gather(*tasks, return_exceptions=True)
@@ -92,7 +92,7 @@ async def _warm_one_funding_interval(self, info: SymbolInfo, sem: asyncio.Semaph
             logger.warning(f"funding interval lookup failed for {info.native_symbol}: {e}")
 ```
 
-By convention, `_warm()` (and any `_warm_*` helpers it calls) sits right after `shutdown()` in the adapter file; every existing adapter follows this placement. The `_ensure_info_cache` / `_ensure_*_map` methods referenced in the examples are adapter-internal lazy caches that already exist in every adapter; listing them in `_warm` simply forces eager warming at startup.
+By convention, `_warm()` (and any `_warm_*` helpers it calls) sits right after `shutdown()` in the adapter file; every existing adapter follows this placement. `_ensure_info_cache` and `_info_for` are provided by `BaseExchange` (see [SymbolInfo cache](#symbolinfo-cache-base-provided) below); the `_ensure_*_map` methods referenced in the examples are adapter-internal lazy caches. Listing either kind in `_warm` simply forces eager warming at startup.
 
 Do not override `preload()` directly. The base class seals it; the override point is `_warm()`. If your adapter does not need prebuilding (one bulk endpoint covers all metadata), simply don't override `_warm`.
 
@@ -130,6 +130,7 @@ When iterating without `--reload`, set `--port` on the uvicorn command line dire
 All adapters must inherit from `BaseExchange` in `src/exchanges/base.py`. The following checklist covers everything a compliant adapter needs to satisfy before it can be merged:
 
 - [ ] **Capability Mapping:** Implement `get_capabilities()` returning the full list of supported REST routes and WebSocket channels.
+- [ ] **`_fetch_exchange_info`:** Implement `async def _fetch_exchange_info(market_type) -> List[SymbolInfo]`. The base class owns the cache around it (`_ensure_info_cache`, `_info_for`, the 24h refresh); the adapter only supplies the fetch. Do not declare your own `_info_cache` fields.
 - [ ] **Data Normalization:** Map all raw upstream JSON payloads to the Pydantic models in `src/models.py`.
 - [ ] **Market Routing:** Handle `spot`, `linear`, and `inverse` market types, including any subdomain or parameter differences between them.
 - [ ] **Symbol Normalization:** Implement `get_model_symbol(api_symbol, market_type)` to translate raw exchange symbols to normalized form (e.g. `BTCUSD_PERP` → `BTCUSDT`), and `get_api_symbol(symbol, market_type)` to reverse the translation when constructing upstream requests. Normalized symbols must be bare pairs with no suffixes.
@@ -182,7 +183,7 @@ Do not add adapter-specific fields under a generic name, and do not return raw d
 
 * **Async I/O.** All network calls must use `httpx` or `websockets` in an async context. A blocking call inside an adapter stalls the entire event loop.
 * **No raw dicts across the boundary.** Adapter methods must return Pydantic models from `src/models.py`. If you find yourself wanting to return a `dict`, add a model instead.
-* **Fail with `ValueError` or `NotImplementedError`.** These are the exception types the route layer knows how to translate into HTTP responses (4xx and 501 respectively). Use `ValueError` for bad input and upstream validation failures, `NotImplementedError` for features the adapter does not support on a given market type.
+* **Fail with `ValueError`, `UpstreamUnavailableError`, or `NotImplementedError`.** These are the exception types the route layer knows how to translate into HTTP responses (400, 503, and 501 respectively). Use `ValueError` for bad input and upstream validation failures, `UpstreamUnavailableError` (from `src/exchanges/base.py`, optionally with `retry_after` seconds for the `Retry-After` header) for throttle and ban windows where the caller should retry later, and `NotImplementedError` for features the adapter does not support on a given market type. `UpstreamUnavailableError` subclasses `ValueError`, so existing re-raise paths treat it correctly.
 * **No hand-rolled retry logic at the call site.** `_make_request` (or the adapter's equivalent) handles retries and backoff. Per-call retry loops fight the rate limiter.
 * **Logging via `logging.getLogger("<adapter>_adapter")`.** Keep each adapter's logs isolated so they can be filtered independently.
 
@@ -214,6 +215,10 @@ Once `shutdown()` is correct and `python -m tools.auditor` passes cleanly, the a
 ## Adapter Internals
 
 These are conventions adapter authors follow that are not visible from the user-facing schema. They live here, not in Exchange Notes, because callers do not need them.
+
+### SymbolInfo cache (base-provided)
+
+`BaseExchange` owns the per-market SymbolInfo cache: `_ensure_info_cache(market_type)` and `_info_for(market_type, model_symbol)` live on the base class, backed by a single lock and a refresh policy (`INFO_REFRESH_S = 24h`). A cache older than the refresh window is re-fetched on the next request; if the refresh fetch fails while a cached copy exists, the stale copy is served and the next attempt is deferred by `INFO_RETRY_S = 1h`. The adapter's only obligation is `_fetch_exchange_info(market_type)`, which the base calls both on first use and on refresh, so anything the adapter populates inside it (such as `_funding_interval_cache`) refreshes on the same cadence. Adapters must not declare their own `_info_cache` fields.
 
 ### `_paginate_backwards` helper
 
@@ -299,7 +304,7 @@ Per-exchange implementation specifics:
 
 | Exchange | Header(s) | Trigger |
 | :--- | :--- | :--- |
-| Binance | `x-mbx-used-weight-1m` | back off 2s if used weight > 1150/1200 |
+| Binance | `x-mbx-used-weight-1m` | back off 2s if used weight > 1150/1200; tracked per upstream host (api / fapi / dapi have independent weight buckets) |
 | Bybit | `X-Bapi-Limit-Status`, `X-Bapi-Limit-Reset-Timestamp` | back off until reset if remaining < 10 |
 | KuCoin | none (30s rolling window, no per-response remaining-weight header) | reactive only on HTTP 429 |
 | OKX | none | reactive only on HTTP 429 |
@@ -322,7 +327,7 @@ Kraken's documented rate-limit semantics differ enough from the other exchanges 
 2. **Exponential backoff with full jitter**. Up to 8 retries on Spot REST (5 on Futures) with delays of `2^attempt` seconds capped at 60s, multiplied by `0.5 + random()`. This avoids consecutive retries landing inside the same cooldown window, which Kraken explicitly documents as making the cooldown last longer. Worst-case total backoff is ~4 minutes for the most stubborn cooldowns; most signals clear in ~10-30s.
 3. **Global forward-rate slowdown after rate-limit confirmation**. When HTTP 429/418 or a body-level rate-limit signal fires, `_extra_interval_ms` is set to 1000ms on top of the base 200ms (so 1.2s spacing) for the next 60s. All subsequent calls (not just the failing one) honor this spacing. Per Kraken's docs: "additional calls would be restricted for a few seconds (or possibly longer if calls continue to be made while the rate limits are active)."
 
-When all retries are exhausted, `_make_request` raises `ValueError(f"Kraken throttled or unavailable: {url} (last_status=..., last_body_error=...)")`. The router translates ValueError to HTTP 400 with the message in the body, so callers see actionable detail instead of opaque 500.
+When all retries are exhausted, `_make_request` raises `UpstreamUnavailableError(f"Kraken throttled or unavailable: {url} (last_status=..., last_body_error=...)")`. The router translates it to HTTP 503 with the message in the body, so callers see actionable detail instead of opaque 500.
 
 If a future contributor finds these knobs incorrect for a specific Kraken behavior, the doc reference is `https://docs.kraken.com/api/docs/guides/spot-rest-ratelimits` and `https://support.kraken.com/articles/206548367-what-are-the-api-rate-limits-`.
 
