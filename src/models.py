@@ -331,7 +331,7 @@ class MarkPrice(BaseModel):
 class Trade(BaseModel):
     id: Optional[str] = Field(
         None,
-        description="Exchange-native trade id when available, otherwise adapter-synthesized from event time on exchanges that omit IDs (Kraken spot). Null when neither is available. Not all exchanges produce sortable values; do not rely on lexicographic ordering. Sort by timestamp for chronology.",
+        description="Exchange-native trade id when available, with an adapter-synthesized event-time fallback on rows where the upstream omits it. Null when neither is available. Not all exchanges produce sortable values; do not rely on lexicographic ordering. Sort by timestamp for chronology.",
     )
     symbol: str = Field(
         ...,
@@ -425,7 +425,7 @@ class Candle(BaseModel):
     )
     timestamp: int = Field(
         ...,
-        description="Bucket open time in unix milliseconds on every exchange. Kraken futures emits close-time upstream; the adapter subtracts cycle_ms to normalize.",
+        description="Bucket open time in unix milliseconds on every exchange.",
     )
     open: float = Field(
         ...,
