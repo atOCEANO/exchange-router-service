@@ -67,7 +67,7 @@ Every quantitative record (Trade, Candle, OpenInterest, etc.) carries nested val
 | `GET` | `/{exchange}/status` | Adapter health string. Returns `{"status": "online", "exchange": name}`; does not poll the upstream exchange. | None |
 | `GET` | `/{exchange}/capabilities` | Supported REST routes and WebSocket channels for an adapter. | None |
 | `GET` | `/{exchange}/market_types` | Market types available on the exchange. | None |
-| `GET` | `/{exchange}/{market_type}/markets` | Lite list of every tradable symbol with `base_asset`, `quote_asset`, `qty_unit`, `contract_size`, and `funding.kind`. On `linear` and `inverse`, only perpetuals are returned. Served entirely from the in-memory adapter cache: zero upstream calls per request. | None |
+| `GET` | `/{exchange}/{market_type}/markets` | Lite list of every tradable symbol with `base_asset`, `quote_asset`, `qty_unit`, `contract_size`, and `funding.kind`. On `linear` and `inverse`, only perpetuals are returned. Served from the in-memory adapter cache (refreshed at most once per 24h): no upstream calls on the request path. | None |
 | `GET` | `/{exchange}/{market_type}/markets/{symbol}` | Full `SymbolInfo` for one symbol: precision, order limits, contract size, funding convention. | None |
 
 #### Pricing
@@ -488,6 +488,7 @@ No `quote` field; this metric is dimensionless. `account_scope` carries the upst
 | **422** | Unprocessable Entity | Path or query parameter failed validation (e.g. an unrecognised `market_type` value). |
 | **500** | Internal Error | Upstream connection failure after retries, or unhandled error. |
 | **501** | Not Implemented | Route not supported by the target adapter on this market type. |
+| **503** | Service Unavailable | Upstream rate-limit or ban window active. Carries a `Retry-After` header (seconds) when the adapter knows the wait. Retry later; the request itself was valid. |
 
 <br>
 
