@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from typing import Optional
 from src.exchanges import EXCHANGE_REGISTRY, get_adapter, shutdown_exchanges, startup_exchanges
-from src.exchanges.base import build_oi_value
+from src.exchanges.base import UpstreamUnavailableError, build_oi_value
 from src.models import MarketType
 from src.stream_manager import StreamManager
 from src.version import SCHEMA_VERSION, SERVICE_VERSION
@@ -39,6 +39,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(UpstreamUnavailableError)
+async def upstream_unavailable_exception_handler(_request: Request, exc: UpstreamUnavailableError):
+    headers = {}
+    if exc.retry_after is not None:
+        headers["Retry-After"] = str(max(int(exc.retry_after), 1))
+    return JSONResponse(
+        status_code=503,
+        content={"error": "Upstream Unavailable", "detail": str(exc)},
+        headers=headers,
+    )
 
 
 @app.exception_handler(ValueError)
@@ -73,6 +85,17 @@ def validate_request(exchange: str, market_type: MarketType = None):
     if market_type and market_type not in adapter.supported_market_types:
         raise HTTPException(status_code=400, detail=f"Market type '{market_type.value}' not supported on {exchange}.")
     return adapter
+
+
+def validate_interval(adapter, market_type: MarketType, route: str, label: str, value: str):
+    capabilities  = adapter.get_capabilities() or {}
+    markets_block = capabilities.get("markets", {}) or {}
+    mt_block      = markets_block.get(market_type) or markets_block.get(market_type.value) or {}
+    route_block   = mt_block.get(route) or {}
+    intervals     = route_block.get("intervals")
+
+    if intervals and value not in intervals:
+        raise ValueError(f"{label} '{value}' is not valid for {adapter.name} {market_type.value} {route}.")
 
 
 @app.get("/")
@@ -224,12 +247,14 @@ async def get_agg_trades(exchange: str, market_type: MarketType, symbol: str, st
 @app.get("/{exchange}/{market_type}/candles/{symbol}")
 async def get_candles(exchange: str, market_type: MarketType, symbol: str, interval: str = "1h", start: Optional[int] = None, limit: int = Query(100, ge=1)):
     adapter = validate_request(exchange, market_type)
+    validate_interval(adapter, market_type, "candles", "Interval", interval)
     return await adapter.get_candles(market_type, symbol, interval, start, limit)
 
 
 @app.get("/{exchange}/{market_type}/open_interest/{symbol}")
 async def get_open_interest(exchange: str, market_type: MarketType, symbol: str, period: str = Query("1h"), start: Optional[int] = None, limit: int = Query(30, ge=1)):
     adapter  = validate_request(exchange, market_type)
+    validate_interval(adapter, market_type, "open_interest", "Period", period)
     oi_rows  = await adapter.get_open_interest(market_type, symbol, period, start, limit)
 
     if market_type != MarketType.LINEAR or not oi_rows:
@@ -278,6 +303,7 @@ async def get_liquidations(exchange: str, market_type: MarketType, symbol: str, 
 @app.get("/{exchange}/{market_type}/long_short_ratio/{symbol}")
 async def get_long_short_ratio(exchange: str, market_type: MarketType, symbol: str, period: str = Query("5m"), start: Optional[int] = None, limit: int = Query(30, ge=1)):
     adapter = validate_request(exchange, market_type)
+    validate_interval(adapter, market_type, "long_short_ratio", "Period", period)
     return await adapter.get_long_short_ratio(market_type, symbol, period, start, limit)
 
 
