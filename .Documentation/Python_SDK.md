@@ -42,18 +42,21 @@ from exchange_router_client import ExchangeRouterClient
 from exchange_router_client.funding import funding_paid, per_hour_view
 
 async with ExchangeRouterClient("http://localhost:8040") as client:
-    rows = await client._request("GET", "binance/linear/funding_rate/BTCUSDT", {"limit": 100})
+    df = await client.get_funding_rate("binance", "linear", "BTCUSDT", limit=100)
 
-    print(per_hour_view(rows[0]))
+    print(per_hour_view(df.iloc[-1]))
 
-    t_open  = rows[0]["timestamp"]
-    t_close = rows[-1]["timestamp"]
-    print(funding_paid(rows, t_open, t_close, notional=1_000_000))
+    t_open  = int(df.index[0].value // 1_000_000)
+    t_close = int(df.index[-1].value // 1_000_000)
+    print(funding_paid(df, t_open, t_close, notional=1_000_000))
+
+    mark = await client.get_mark_price("kraken", "linear", "XBTUSD")
+    print(per_hour_view(mark))
 ```
 
 `funding_paid` handles both discrete (settlement events) and continuous (sample integration) correctly. Use it instead of hand-rolling the math.
 
-The helpers operate on the raw wire-format row shape, with the nested `rate: {kind, per_cycle, cycle_ms}` block intact. The DataFrame methods (`get_funding_rate`, etc.) flatten that block into separate columns, which the helpers cannot read; the example above goes through `client._request` to keep the nested structure.
+Both helpers accept every shape the client produces: the DataFrame returned by `get_funding_rate` (timestamps read from the datetime index, rates from the flattened `rate_*` columns), a single row of that DataFrame, the `get_mark_price` dict (rate read from its nested `funding` block), and raw wire-format rows with the nested `rate: {kind, per_cycle, cycle_ms}` block intact.
 
 <br>
 <br>
@@ -244,7 +247,7 @@ The client holds persistent network connections. Use `async with`, or call `awai
 The client raises three exception types depending on where the failure happens:
 
 * `ValueError` for any 4xx response from the router. The message includes the HTTP status and the router's `detail` field.
-* `ConnectionError` when a request keeps failing after `max_retries` attempts. 5xx responses and connection-level errors are retried with linear backoff before this is raised.
+* `ConnectionError` when a request keeps failing after `max_retries` attempts. 5xx responses and connection-level errors are retried with linear backoff before this is raised. This includes the router's `503` (upstream throttle or ban window); if the window outlasts the retry budget, the final `ConnectionError` carries the last status.
 * `RuntimeError` for anything unexpected that is not an HTTP or connection error.
 
 `fetch_multi_candles` is the one exception to this rule. It logs failures per symbol and returns only the symbols that succeeded, so a single failed symbol does not abort the entire batch.
