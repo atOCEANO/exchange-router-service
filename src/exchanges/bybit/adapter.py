@@ -6,7 +6,7 @@ import websockets
 import logging
 from typing import List, AsyncGenerator, Dict, Any, Optional, Callable
 from src.exchanges.base import (
-    BaseExchange, StreamHub,
+    BaseExchange, StreamHub, UpstreamUnavailableError,
     build_qty_value, build_volume_value, build_oi_value,
     build_funding_current, build_funding_historical, build_funding_convention,
 )
@@ -36,9 +36,6 @@ class BybitAdapter(BaseExchange):
 
         self._hubs: Dict[MarketType, StreamHub] = {}
         self._hubs_lock = asyncio.Lock()
-
-        self._info_cache: Dict[MarketType, Dict[str, SymbolInfo]] = {}
-        self._info_cache_lock = asyncio.Lock()
 
         self._funding_interval_cache: Dict[MarketType, Dict[str, int]] = {}
 
@@ -364,19 +361,6 @@ class BybitAdapter(BaseExchange):
         return interval
 
 
-    async def _ensure_info_cache(self, market_type: MarketType) -> Dict[str, SymbolInfo]:
-        async with self._info_cache_lock:
-            if market_type not in self._info_cache:
-                infos = await self._fetch_exchange_info(market_type)
-                self._info_cache[market_type] = {info.symbol: info for info in infos}
-            return self._info_cache[market_type]
-
-
-    async def _info_for(self, market_type: MarketType, model_symbol: str) -> Optional[SymbolInfo]:
-        cache = await self._ensure_info_cache(market_type)
-        return cache.get(model_symbol)
-
-
     async def _make_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Any:
         url = f"{self.rest_url}{endpoint}"
         retries = 3
@@ -385,7 +369,7 @@ class BybitAdapter(BaseExchange):
             if now < self._backoff_until:
                 wait_time = self._backoff_until - now
                 if wait_time > 30:
-                    raise ValueError(f"Bybit IP ban in effect. Retry in {wait_time:.0f}s.")
+                    raise UpstreamUnavailableError(f"Bybit IP ban in effect. Retry in {wait_time:.0f}s.", retry_after=wait_time)
                 await asyncio.sleep(wait_time + random.uniform(0.05, 1.0))
 
             try:
@@ -409,14 +393,17 @@ class BybitAdapter(BaseExchange):
                         continue
                     if data["retCode"] != 0:
                         raise ValueError(f"Bybit API Error ({data['retCode']}): {data['retMsg']}")
-                    return data["result"]
+                    result = data["result"]
+                    if isinstance(result, dict) and "time" in data:
+                        result.setdefault("_envelope_ts", data["time"])
+                    return result
 
                 if resp.status_code == 403:
                     ban_until = time.time() + 600
                     async with self._backoff_lock:
                         self._backoff_until = max(self._backoff_until, ban_until)
                     logger.error(f"Bybit IP ban (403). All requests blocked for 10 min.")
-                    raise ValueError("Bybit IP ban triggered (403). Retry in 10 minutes.")
+                    raise UpstreamUnavailableError("Bybit IP ban triggered (403). Retry in 10 minutes.", retry_after=600)
 
                 if resp.status_code == 429:
                     async with self._backoff_lock:
@@ -550,7 +537,7 @@ class BybitAdapter(BaseExchange):
                 close         = close,
             ),
             price_change_percent = float(t["price24hPcnt"]) * 100,
-            timestamp            = self.normalize_timestamp(t.get("ts") or int(time.time() * 1000)),
+            timestamp            = self.normalize_timestamp(data.get("_envelope_ts") or int(time.time() * 1000)),
         )
 
 
@@ -588,7 +575,7 @@ class BybitAdapter(BaseExchange):
                 contract_size = contract_size,
                 price         = ask_price,
             ),
-            timestamp   = int(time.time() * 1000),
+            timestamp   = self.normalize_timestamp(data.get("_envelope_ts") or int(time.time() * 1000)),
         )
 
 
@@ -725,7 +712,7 @@ class BybitAdapter(BaseExchange):
         quote     = info.quote_asset if info else ""
         cycle_ms  = await self._funding_interval_ms_for(market_type, model_sym)
 
-        ts          = self.normalize_timestamp(t.get("ts") or int(time.time() * 1000))
+        ts          = self.normalize_timestamp(data.get("_envelope_ts") or int(time.time() * 1000))
         next_ft_raw = t.get("nextFundingTime")
         next_ft: Optional[int] = None
         if next_ft_raw:
