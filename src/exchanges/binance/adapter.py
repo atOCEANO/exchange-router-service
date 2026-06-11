@@ -36,7 +36,7 @@ class BinanceAdapter(BaseExchange):
         super().__init__()
         self.http_client = httpx.AsyncClient(timeout=30.0)
 
-        self._backoff_until = 0.0
+        self._backoff_until: Dict[str, float] = {}
         self._backoff_lock = asyncio.Lock()
 
         self.rest_urls = {
@@ -51,9 +51,6 @@ class BinanceAdapter(BaseExchange):
 
         self._hubs: Dict[str, StreamHub] = {}
         self._hubs_lock = asyncio.Lock()
-
-        self._info_cache: Dict[MarketType, Dict[str, SymbolInfo]] = {}
-        self._info_cache_lock = asyncio.Lock()
 
         self._funding_interval_cache: Dict[MarketType, Dict[str, int]] = {}
 
@@ -355,25 +352,14 @@ class BinanceAdapter(BaseExchange):
         return 0
 
 
-    async def _ensure_info_cache(self, market_type: MarketType) -> Dict[str, SymbolInfo]:
-        async with self._info_cache_lock:
-            if market_type not in self._info_cache:
-                infos = await self._fetch_exchange_info(market_type)
-                self._info_cache[market_type] = {info.symbol: info for info in infos}
-            return self._info_cache[market_type]
-
-
-    async def _info_for(self, market_type: MarketType, model_symbol: str) -> Optional[SymbolInfo]:
-        cache = await self._ensure_info_cache(market_type)
-        return cache.get(model_symbol)
-
-
     async def _make_request(self, method: str, url: str, params: Optional[Dict] = None) -> Any:
+        host = url.split("/", 3)[2]
         retries = 3
         while retries > 0:
             now = time.time()
-            if now < self._backoff_until:
-                wait_time = self._backoff_until - now + random.uniform(0.05, 1.0)
+            host_backoff = self._backoff_until.get(host, 0.0)
+            if now < host_backoff:
+                wait_time = host_backoff - now + random.uniform(0.05, 1.0)
                 await asyncio.sleep(wait_time)
 
             try:
@@ -383,9 +369,9 @@ class BinanceAdapter(BaseExchange):
 
                 if used_weight > 1150:
                     async with self._backoff_lock:
-                        if time.time() > self._backoff_until:
-                            self._backoff_until = time.time() + 2
-                    logger.warning(f"High API Weight: {used_weight}/1200. Pausing all requests for 2s...")
+                        if time.time() > self._backoff_until.get(host, 0.0):
+                            self._backoff_until[host] = time.time() + 2
+                    logger.warning(f"High API Weight on {host}: {used_weight}/1200. Pausing its requests for 2s...")
 
                 if resp.status_code == 200:
                     return resp.json()
@@ -394,10 +380,9 @@ class BinanceAdapter(BaseExchange):
                     retry_after = int(resp.headers.get("Retry-After", 5))
 
                     async with self._backoff_lock:
-                        current_wait = max(self._backoff_until, time.time() + retry_after)
-                        self._backoff_until = current_wait
+                        self._backoff_until[host] = max(self._backoff_until.get(host, 0.0), time.time() + retry_after)
 
-                    logger.error(f"Rate Limit Hit ({resp.status_code}). Global backoff set for {retry_after}s.")
+                    logger.error(f"Rate Limit Hit ({resp.status_code}) on {host}. Backoff set for {retry_after}s.")
                     retries -= 1
                     continue
 
@@ -859,7 +844,7 @@ class BinanceAdapter(BaseExchange):
             params = {
                 "symbol":    api_symbol,
                 "limit":     min(limit, per_req),
-                "startTime": max(0, start_time - min(limit, per_req) * default_cadence_ms),
+                "startTime": max(0, start_time - min(limit, per_req) * cycle_ms),
                 "endTime":   start_time,
             }
             return (await call(params))[-limit:]
