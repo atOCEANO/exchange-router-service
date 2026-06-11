@@ -7,7 +7,7 @@ import websockets
 import logging
 from typing import List, AsyncGenerator, Dict, Any, Optional, Callable, Tuple
 from src.exchanges.base import (
-    BaseExchange, StreamHub,
+    BaseExchange, StreamHub, UpstreamUnavailableError,
     build_qty_value, build_volume_value, build_oi_value,
     build_funding_current, build_funding_historical, build_funding_convention,
 )
@@ -41,9 +41,7 @@ class KucoinAdapter(BaseExchange):
         self._hubs: Dict[MarketType, StreamHub] = {}
         self._hubs_lock = asyncio.Lock()
 
-        self._info_cache: Dict[MarketType, Dict[str, SymbolInfo]] = {}
         self._funding_interval_cache: Dict[MarketType, Dict[str, int]] = {}
-        self._info_cache_lock = asyncio.Lock()
 
         self._capabilities = self._build_capabilities()
 
@@ -425,19 +423,6 @@ class KucoinAdapter(BaseExchange):
         return 0
 
 
-    async def _ensure_info_cache(self, market_type: MarketType) -> Dict[str, SymbolInfo]:
-        async with self._info_cache_lock:
-            if market_type not in self._info_cache:
-                infos = await self._fetch_exchange_info(market_type)
-                self._info_cache[market_type] = {info.symbol: info for info in infos}
-            return self._info_cache[market_type]
-
-
-    async def _info_for(self, market_type: MarketType, model_symbol: str) -> Optional[SymbolInfo]:
-        cache = await self._ensure_info_cache(market_type)
-        return cache.get(model_symbol)
-
-
     @staticmethod
     def _ns_to_ms(ts) -> int:
         try:
@@ -471,7 +456,7 @@ class KucoinAdapter(BaseExchange):
             if now < self._backoff_until:
                 wait_time = self._backoff_until - now
                 if wait_time > 30:
-                    raise ValueError(f"KuCoin backoff active. Retry in {wait_time:.0f}s.")
+                    raise UpstreamUnavailableError(f"KuCoin backoff active. Retry in {wait_time:.0f}s.", retry_after=wait_time)
                 await asyncio.sleep(wait_time + random.uniform(0.05, 1.0))
 
             try:
@@ -674,6 +659,9 @@ class KucoinAdapter(BaseExchange):
         is_inverse    = market_type == MarketType.INVERSE
         unit          = "contract" if is_inverse else "base"
 
+        if market_type == MarketType.LINEAR and contract_size is None:
+            raise ValueError(f"Contract size unavailable for {model_sym} on KuCoin linear")
+
         if market_type == MarketType.SPOT:
             data = await self._make_request("GET", self.spot_rest_url, "/api/v1/market/orderbook/level1", {"symbol": api_symbol})
             if not data:
@@ -729,8 +717,8 @@ class KucoinAdapter(BaseExchange):
             qty_unit   = "contract"
             qty_cs     = contract_size
         else:
-            bid_native = bid_sz * (contract_size or 0)
-            ask_native = ask_sz * (contract_size or 0)
+            bid_native = bid_sz * contract_size
+            ask_native = ask_sz * contract_size
             qty_unit   = "base"
             qty_cs     = None
 
@@ -780,11 +768,14 @@ class KucoinAdapter(BaseExchange):
         quote         = info.quote_asset if info else ""
         contract_size = info.contract_size if info else None
 
+        if market_type == MarketType.LINEAR and contract_size is None:
+            raise ValueError(f"Contract size unavailable for {model_sym} on KuCoin linear")
+
         if market_type == MarketType.INVERSE:
             qty_mult    = 1.0
             ob_qty_unit = "contract"
         elif market_type == MarketType.LINEAR:
-            qty_mult    = contract_size or 0
+            qty_mult    = contract_size
             ob_qty_unit = "base"
         else:
             qty_mult    = 1.0
@@ -811,6 +802,9 @@ class KucoinAdapter(BaseExchange):
         is_inverse    = market_type == MarketType.INVERSE
         unit          = "contract" if is_inverse else "base"
 
+        if market_type == MarketType.LINEAR and contract_size is None:
+            raise ValueError(f"Contract size unavailable for {model_sym} on KuCoin linear")
+
         def _build_trade(raw, ts_key):
             side_raw = raw.get("side")
             if side_raw is None:
@@ -828,7 +822,7 @@ class KucoinAdapter(BaseExchange):
                 qty_unit_local = "contract"
                 qty_cs = contract_size
             elif market_type == MarketType.LINEAR:
-                native = size_raw * (contract_size or 0)
+                native = size_raw * contract_size
                 qty_unit_local = "base"
                 qty_cs = None
             else:
@@ -943,6 +937,9 @@ class KucoinAdapter(BaseExchange):
         contract_size = info.contract_size if info else None
         is_inverse    = market_type == MarketType.INVERSE
 
+        if not is_inverse and contract_size is None:
+            raise ValueError(f"Contract size unavailable for {model_sym} on KuCoin linear")
+
         def _parse(rows):
             out = []
             if not isinstance(rows, list):
@@ -961,7 +958,7 @@ class KucoinAdapter(BaseExchange):
                         vol_unit_local = "contract"
                         vol_cs = contract_size
                     else:
-                        vol_native = vol_raw * (contract_size or 0)
+                        vol_native = vol_raw * contract_size
                         vol_unit_local = "base"
                         vol_cs = None
                     out.append(Candle(
@@ -1108,6 +1105,9 @@ class KucoinAdapter(BaseExchange):
         contract_size = info.contract_size if info else None
         is_inverse    = market_type == MarketType.INVERSE
 
+        if not is_inverse and contract_size is None:
+            raise ValueError(f"Contract size unavailable for {model_sym} on KuCoin linear")
+
         def _parse(rows):
             out = []
             for r in rows or []:
@@ -1121,7 +1121,7 @@ class KucoinAdapter(BaseExchange):
                         oi_unit_local = "contract"
                         cs            = contract_size
                     else:
-                        native_value  = raw * (contract_size or 0)
+                        native_value  = raw * contract_size
                         oi_unit_local = "base"
                         cs            = None
                     out.append(OpenInterest(
@@ -1302,6 +1302,9 @@ class KucoinAdapter(BaseExchange):
         is_inverse    = market_type == MarketType.INVERSE
         unit          = "contract" if is_inverse else "base"
 
+        if market_type == MarketType.LINEAR and contract_size is None:
+            raise ValueError(f"Contract size unavailable for {model_sym} on KuCoin linear")
+
         if market_type == MarketType.SPOT:
             topic = f"/market/ticker:{api_symbol}"
             async for msg in self._ws_connect(market_type, topic):
@@ -1337,7 +1340,7 @@ class KucoinAdapter(BaseExchange):
                 vol_unit   = "contract"
                 vol_cs     = contract_size
             else:
-                vol_native = vol_raw * (contract_size or 0)
+                vol_native = vol_raw * contract_size
                 vol_unit   = "base"
                 vol_cs     = None
             yield Ticker(
@@ -1367,6 +1370,9 @@ class KucoinAdapter(BaseExchange):
         contract_size = info.contract_size if info else None
         is_inverse    = market_type == MarketType.INVERSE
         unit          = "contract" if is_inverse else "base"
+
+        if market_type == MarketType.LINEAR and contract_size is None:
+            raise ValueError(f"Contract size unavailable for {model_sym} on KuCoin linear")
 
         if market_type == MarketType.SPOT:
             topic = f"/spotMarket/level1:{api_symbol}"
@@ -1413,8 +1419,8 @@ class KucoinAdapter(BaseExchange):
                 qty_unit_local = "contract"
                 qty_cs = contract_size
             else:
-                bid_native = bid_sz * (contract_size or 0)
-                ask_native = ask_sz * (contract_size or 0)
+                bid_native = bid_sz * contract_size
+                ask_native = ask_sz * contract_size
                 qty_unit_local = "base"
                 qty_cs = None
             yield BookTicker(
@@ -1449,11 +1455,14 @@ class KucoinAdapter(BaseExchange):
         prefix        = "/spotMarket" if market_type == MarketType.SPOT else "/contractMarket"
         topic         = f"{prefix}/level2Depth{size}:{api_symbol}"
 
+        if market_type == MarketType.LINEAR and contract_size is None:
+            raise ValueError(f"Contract size unavailable for {model_sym} on KuCoin linear")
+
         if market_type == MarketType.INVERSE:
             qty_mult = 1.0
             qty_unit = "contract"
         elif market_type == MarketType.LINEAR:
-            qty_mult = contract_size or 0
+            qty_mult = contract_size
             qty_unit = "base"
         else:
             qty_mult = 1.0
@@ -1481,6 +1490,9 @@ class KucoinAdapter(BaseExchange):
         contract_size = info.contract_size if info else None
         is_inverse    = market_type == MarketType.INVERSE
         unit          = "contract" if is_inverse else "base"
+
+        if market_type == MarketType.LINEAR and contract_size is None:
+            raise ValueError(f"Contract size unavailable for {model_sym} on KuCoin linear")
 
         if market_type == MarketType.SPOT:
             topic = f"/market/match:{api_symbol}"
@@ -1528,7 +1540,7 @@ class KucoinAdapter(BaseExchange):
                 qty_unit_local = "contract"
                 qty_cs = contract_size
             else:
-                native = size_raw * (contract_size or 0)
+                native = size_raw * contract_size
                 qty_unit_local = "base"
                 qty_cs = None
             yield Trade(
@@ -1564,7 +1576,7 @@ class KucoinAdapter(BaseExchange):
             mark = float(d.get("markPrice") or 0)
             if not mark and subject != "mark.index.price":
                 continue
-            next_ft_raw = d.get("nextFundingTime") or d.get("granularity")
+            next_ft_raw = d.get("nextFundingTime")
             next_ft: Optional[int] = None
             if next_ft_raw:
                 try:
