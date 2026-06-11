@@ -7,7 +7,7 @@ import websockets
 import logging
 from typing import List, AsyncGenerator, Dict, Any, Optional, Callable, Deque
 from src.exchanges.base import (
-    BaseExchange, StreamHub,
+    BaseExchange, StreamHub, UpstreamUnavailableError,
     build_qty_value, build_volume_value, build_oi_value,
     build_funding_current, build_funding_historical, build_funding_convention,
 )
@@ -71,8 +71,6 @@ class OkxAdapter(BaseExchange):
         self._hub_lock = asyncio.Lock()
         self._topic_args: Dict[str, Dict[str, Any]] = {}
 
-        self._info_cache: Dict[MarketType, Dict[str, SymbolInfo]] = {}
-        self._info_cache_lock = asyncio.Lock()
         self._funding_interval_cache: Dict[str, int] = {}
         self._funding_interval_lock = asyncio.Lock()
 
@@ -95,7 +93,7 @@ class OkxAdapter(BaseExchange):
 
     async def _warm_funding_intervals(self, market_type: MarketType) -> None:
         cache = await self._ensure_info_cache(market_type)
-        sem   = asyncio.Semaphore(10)
+        sem   = asyncio.Semaphore(2)
         tasks = [self._warm_one_funding_interval(info, sem) for info in cache.values()]
 
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -488,19 +486,6 @@ class OkxAdapter(BaseExchange):
         return len(value.split(".")[1].rstrip("0"))
 
 
-    async def _ensure_info_cache(self, market_type: MarketType) -> Dict[str, SymbolInfo]:
-        async with self._info_cache_lock:
-            if market_type not in self._info_cache:
-                infos = await self._fetch_exchange_info(market_type)
-                self._info_cache[market_type] = {info.symbol: info for info in infos}
-            return self._info_cache[market_type]
-
-
-    async def _info_for(self, market_type: MarketType, model_symbol: str) -> Optional[SymbolInfo]:
-        cache = await self._ensure_info_cache(market_type)
-        return cache.get(model_symbol)
-
-
     async def _funding_interval_ms_for(self, inst_id: str) -> Optional[int]:
         async with self._funding_interval_lock:
             if inst_id in self._funding_interval_cache:
@@ -529,52 +514,51 @@ class OkxAdapter(BaseExchange):
         bucket = self._bucket_rubik if "/rubik/stat/" in endpoint else self._bucket_default
         retries = 3
 
-        async with self._request_sem:
-            while retries > 0:
-                now = time.time()
-                if now < self._backoff_until:
-                    wait_time = self._backoff_until - now
-                    if wait_time > 60:
-                        raise ValueError(f"OKX backoff active. Retry in {wait_time:.0f}s.")
-                    await asyncio.sleep(wait_time + random.uniform(0.05, 1.0))
+        while retries > 0:
+            now = time.time()
+            if now < self._backoff_until:
+                wait_time = self._backoff_until - now
+                if wait_time > 60:
+                    raise UpstreamUnavailableError(f"OKX backoff active. Retry in {wait_time:.0f}s.", retry_after=wait_time)
+                await asyncio.sleep(wait_time + random.uniform(0.05, 1.0))
 
-                await bucket.acquire()
-
-                try:
+            try:
+                async with self._request_sem:
+                    await bucket.acquire()
                     resp = await self.http_client.request(method, url, params=params)
 
-                    if resp.status_code == 429:
-                        retry_after_hdr = resp.headers.get("Retry-After")
-                        try:
-                            wait_s = max(float(retry_after_hdr), 2.0) if retry_after_hdr else 10.0
-                        except (TypeError, ValueError):
-                            wait_s = 10.0
-                        async with self._backoff_lock:
-                            self._backoff_until = max(self._backoff_until, time.time() + wait_s)
-                        logger.warning(f"OKX rate limit (429) on {endpoint}. Backing off {wait_s:.1f}s.")
-                        retries -= 1
-                        continue
-
-                    if resp.status_code == 200:
-                        body = resp.json()
-                        code = body.get("code", "0")
-                        if code != "0":
-                            raise ValueError(f"OKX API Error ({code}): {body.get('msg', 'Unknown error')}")
-                        return body.get("data", [])
-
-                    resp.raise_for_status()
-
-                except httpx.HTTPStatusError as e:
-                    logger.error(f"HTTP Error: {e}")
-                    raise e
-                except Exception as e:
-                    if isinstance(e, ValueError):
-                        raise e
-                    logger.error(f"Request Error: {e}")
+                if resp.status_code == 429:
+                    retry_after_hdr = resp.headers.get("Retry-After")
+                    try:
+                        wait_s = max(float(retry_after_hdr), 2.0) if retry_after_hdr else 10.0
+                    except (TypeError, ValueError):
+                        wait_s = 10.0
+                    async with self._backoff_lock:
+                        self._backoff_until = max(self._backoff_until, time.time() + wait_s)
+                    logger.warning(f"OKX rate limit (429) on {endpoint}. Backing off {wait_s:.1f}s.")
                     retries -= 1
-                    await asyncio.sleep(1)
+                    continue
 
-            raise Exception(f"Max retries exceeded for {url}")
+                if resp.status_code == 200:
+                    body = resp.json()
+                    code = body.get("code", "0")
+                    if code != "0":
+                        raise ValueError(f"OKX API Error ({code}): {body.get('msg', 'Unknown error')}")
+                    return body.get("data", [])
+
+                resp.raise_for_status()
+
+            except httpx.HTTPStatusError as e:
+                logger.error(f"HTTP Error: {e}")
+                raise e
+            except Exception as e:
+                if isinstance(e, ValueError):
+                    raise e
+                logger.error(f"Request Error: {e}")
+                retries -= 1
+                await asyncio.sleep(1)
+
+        raise Exception(f"Max retries exceeded for {url}")
 
 
     async def _paginate_backwards(self, fetch_func_by_end: Callable, total_limit: int, limit_per_req: int) -> List[Any]:
@@ -701,9 +685,12 @@ class OkxAdapter(BaseExchange):
         bid_raw       = float(t.get("bidSz") or 0)
         ask_raw       = float(t.get("askSz") or 0)
 
+        if market_type == MarketType.LINEAR and contract_size is None:
+            raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
+
         if market_type == MarketType.LINEAR:
-            bid_native = bid_raw * (contract_size or 0)
-            ask_native = ask_raw * (contract_size or 0)
+            bid_native = bid_raw * contract_size
+            ask_native = ask_raw * contract_size
             qty_unit   = "base"
             qty_cs     = None
         elif market_type == MarketType.INVERSE:
@@ -754,8 +741,11 @@ class OkxAdapter(BaseExchange):
         quote         = info.quote_asset if info else ""
         contract_size = info.contract_size if info else None
 
+        if market_type == MarketType.LINEAR and contract_size is None:
+            raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
+
         if market_type == MarketType.LINEAR:
-            mult      = contract_size or 0
+            mult      = contract_size
             bids_rows = [[float(p), float(q) * mult] for p, q, *_ in b.get("bids", [])]
             asks_rows = [[float(p), float(q) * mult] for p, q, *_ in b.get("asks", [])]
             ob_qty_unit = "base"
@@ -791,12 +781,15 @@ class OkxAdapter(BaseExchange):
         quote         = info.quote_asset if info else ""
         contract_size = info.contract_size if info else None
 
+        if market_type == MarketType.LINEAR and contract_size is None:
+            raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
+
         trades = []
         for t in data:
             price    = float(t["px"])
             sz_raw   = float(t["sz"])
             if market_type == MarketType.LINEAR:
-                native = sz_raw * (contract_size or 0)
+                native = sz_raw * contract_size
                 qty_unit_local = "base"
                 qty_cs = None
             elif market_type == MarketType.INVERSE:
@@ -1090,6 +1083,9 @@ class OkxAdapter(BaseExchange):
         quote         = info.quote_asset if info else ""
         contract_size = info.contract_size if info else None
 
+        if market_type == MarketType.LINEAR and contract_size is None:
+            raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
+
         def _parse(rows):
             out = []
             for entry in rows:
@@ -1102,7 +1098,7 @@ class OkxAdapter(BaseExchange):
                     price  = float(d["bkPx"])
                     sz_raw = float(d["sz"])
                     if market_type == MarketType.LINEAR:
-                        native = sz_raw * (contract_size or 0)
+                        native = sz_raw * contract_size
                         qty_unit_local = "base"
                         qty_cs = None
                     elif market_type == MarketType.INVERSE:
@@ -1331,6 +1327,9 @@ class OkxAdapter(BaseExchange):
         quote         = info.quote_asset if info else ""
         contract_size = info.contract_size if info else None
 
+        if market_type == MarketType.LINEAR and contract_size is None:
+            raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
+
         async for msg in self._ws_connect([{"channel": "bbo-tbt", "instId": api_symbol}]):
             for b in msg.get("data", []):
                 bids = b.get("bids", [])
@@ -1343,8 +1342,8 @@ class OkxAdapter(BaseExchange):
                 ask_raw   = float(asks[0][1])
 
                 if market_type == MarketType.LINEAR:
-                    bid_native = bid_raw * (contract_size or 0)
-                    ask_native = ask_raw * (contract_size or 0)
+                    bid_native = bid_raw * contract_size
+                    ask_native = ask_raw * contract_size
                     qty_unit   = "base"
                     qty_cs     = None
                 elif market_type == MarketType.INVERSE:
@@ -1388,8 +1387,11 @@ class OkxAdapter(BaseExchange):
         contract_size = info.contract_size if info else None
         channel       = "bbo-tbt" if depth <= 1 else "books5" if depth <= 5 else "books"
 
+        if market_type == MarketType.LINEAR and contract_size is None:
+            raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
+
         if market_type == MarketType.LINEAR:
-            qty_mult    = contract_size or 0
+            qty_mult    = contract_size
             ob_qty_unit = "base"
         elif market_type == MarketType.INVERSE:
             qty_mult    = 1.0
@@ -1441,12 +1443,15 @@ class OkxAdapter(BaseExchange):
         quote         = info.quote_asset if info else ""
         contract_size = info.contract_size if info else None
 
+        if market_type == MarketType.LINEAR and contract_size is None:
+            raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
+
         async for msg in self._ws_connect([{"channel": "trades", "instId": api_symbol}]):
             for t in msg.get("data", []):
                 price  = float(t["px"])
                 sz_raw = float(t["sz"])
                 if market_type == MarketType.LINEAR:
-                    native = sz_raw * (contract_size or 0)
+                    native = sz_raw * contract_size
                     qty_unit_local = "base"
                     qty_cs = None
                 elif market_type == MarketType.INVERSE:
@@ -1504,6 +1509,9 @@ class OkxAdapter(BaseExchange):
         quote         = info.quote_asset if info else ""
         contract_size = info.contract_size if info else None
 
+        if market_type == MarketType.LINEAR and contract_size is None:
+            raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
+
         async for msg in self._ws_connect([{"channel": "liquidation-orders", "instType": "SWAP"}]):
             for entry in msg.get("data", []):
                 if entry.get("instId") != api_symbol:
@@ -1515,7 +1523,7 @@ class OkxAdapter(BaseExchange):
                     price  = float(d["bkPx"])
                     sz_raw = float(d["sz"])
                     if market_type == MarketType.LINEAR:
-                        native = sz_raw * (contract_size or 0)
+                        native = sz_raw * contract_size
                         qty_unit_local = "base"
                         qty_cs = None
                     elif market_type == MarketType.INVERSE:
