@@ -41,8 +41,7 @@ The request reached an adapter, and the adapter rejected it. The `detail` field 
 Common causes:
 
 * **Unknown symbol on this exchange or market type.** Spot symbols on Kraken use legacy codes (`XBTUSDT`, not `BTCUSDT`). Some venues' linear/inverse symbols differ from spot (Binance inverse needs a `_PERP`-stripped form; OKX uses dash-separated pairs internally). Check `GET /{exchange}/{market_type}/markets` for the canonical list.
-* **Parameter out of range.** `limit` below 1, `depth` below 1, or an `interval` the venue does not support on this route. Check `GET /{exchange}/capabilities` for the accepted values.
-* **Active backoff window exceeds the adapter's fail-fast threshold.** When upstream rate-limit cooldowns push the next available slot more than 30s into the future on Bybit or KuCoin, or 60s on OKX, the adapter fails fast rather than blocking the caller. Wait for the window to clear and retry. Binance and Kraken instead block-and-retry (Kraken's retry budget caps total wait at ~4 minutes), so on those venues a long upstream cooldown surfaces as a slow response rather than a 400.
+* **Parameter out of range.** `limit` below 1, `depth` below 1, or an `interval` / `period` the venue does not declare for this route. The router validates `interval` and `period` against the capability map before dispatching, so an undeclared value returns `400` with a message like `Interval '2m' is not valid for kraken spot candles.` Check `GET /{exchange}/capabilities` for the accepted values.
 
 ### `404 Not Found`
 
@@ -77,6 +76,10 @@ Common causes:
 * Calling `long_short_ratio` on Bybit spot, KuCoin, or any spot market.
 
 Always check `GET /{exchange}/capabilities` before relying on a route. The capability map is the contract.
+
+### `503 Service Unavailable`
+
+The upstream exchange is throttling or has banned the router's IP, and the wait exceeds the adapter's fail-fast threshold (30s on Bybit and KuCoin, 60s on OKX, retry-budget exhaustion on Kraken). The request itself was valid; retry after the window clears. The response carries a `Retry-After` header (seconds) when the adapter knows the wait, and the `detail` field names the venue and the remaining time. Binance does not fail fast; on Binance a long upstream cooldown surfaces as a slow response instead.
 
 <br>
 <br>
@@ -133,7 +136,7 @@ The `id` field is an opaque string. Each venue uses its own format:
 | Binance, OKX | numeric integer string | `"6354281581"` |
 | Bybit | UUID with hyphens | `"f960a6cf-2bcb-..."` |
 | KuCoin | large integer string | `"1933627152931"` |
-| Kraken spot | timestamp-based composite | `"1780527941817624999"` |
+| Kraken spot | numeric integer string (upstream `trade_id`) | `"61044952"` |
 | Kraken futures | UUID via upstream `uid` | `"ab32ca5f-..."` |
 
 Treat `id` as identity-only; do not parse as integer. The full table lives in [Exchange Notes → Trade id formats](Exchange_Notes.md#trade-id-formats).
