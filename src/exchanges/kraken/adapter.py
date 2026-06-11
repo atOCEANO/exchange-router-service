@@ -7,7 +7,7 @@ import websockets
 import logging
 from typing import List, AsyncGenerator, Dict, Any, Optional, Tuple
 from src.exchanges.base import (
-    BaseExchange, StreamHub,
+    BaseExchange, StreamHub, UpstreamUnavailableError,
     build_qty_value, build_volume_value, build_oi_value,
     build_funding_current, build_funding_historical, build_funding_convention,
 )
@@ -21,6 +21,9 @@ logger = logging.getLogger("kraken_adapter")
 
 
 class KrakenAdapter(BaseExchange):
+    FUT_TICKERS_TTL_S = 1.0
+
+
     def __init__(self):
         super().__init__()
         self.http_client = httpx.AsyncClient(timeout=30.0)
@@ -47,8 +50,9 @@ class KrakenAdapter(BaseExchange):
         self._hubs_lock = asyncio.Lock()
         self._topic_payloads: Dict[str, Dict[str, Any]] = {}
 
-        self._info_cache: Dict[MarketType, Dict[str, SymbolInfo]] = {}
-        self._info_cache_lock = asyncio.Lock()
+        self._fut_tickers_data: Optional[Any] = None
+        self._fut_tickers_at   = 0.0
+        self._fut_tickers_lock = asyncio.Lock()
 
         self._capabilities = self._build_capabilities()
 
@@ -429,19 +433,6 @@ class KrakenAdapter(BaseExchange):
         return 0
 
 
-    async def _ensure_info_cache(self, market_type: MarketType) -> Dict[str, SymbolInfo]:
-        async with self._info_cache_lock:
-            if market_type not in self._info_cache:
-                infos = await self._fetch_exchange_info(market_type)
-                self._info_cache[market_type] = {info.symbol: info for info in infos}
-            return self._info_cache[market_type]
-
-
-    async def _info_for(self, market_type: MarketType, model_symbol: str) -> Optional[SymbolInfo]:
-        cache = await self._ensure_info_cache(market_type)
-        return cache.get(model_symbol)
-
-
     @staticmethod
     def _decimal_places(value: float) -> int:
         if not value or value <= 0:
@@ -509,25 +500,25 @@ class KrakenAdapter(BaseExchange):
 
 
     async def _await_throttle(self, url: str, params: Optional[Dict]) -> None:
-        async with self._rate_lock:
-            now = time.time()
-            delays = []
+        while True:
+            async with self._rate_lock:
+                now = time.time()
+                delays = []
 
-            if now < self._backoff_until:
-                delays.append(self._backoff_until - now)
+                if now < self._backoff_until:
+                    delays.append(self._backoff_until - now)
 
-            global_interval_ms = self._base_interval_ms
-            if now < self._slowdown_until:
-                global_interval_ms += self._extra_interval_ms
-            if self._last_request_at > 0:
-                since = now - self._last_request_at
-                interval_s = global_interval_ms / 1000.0
-                if since < interval_s:
-                    delays.append(interval_s - since)
+                global_interval_ms = self._base_interval_ms
+                if now < self._slowdown_until:
+                    global_interval_ms += self._extra_interval_ms
+                if self._last_request_at > 0:
+                    since = now - self._last_request_at
+                    interval_s = global_interval_ms / 1000.0
+                    if since < interval_s:
+                        delays.append(interval_s - since)
 
-            endpoint = self._pair_endpoint(url)
-            if endpoint and isinstance(params, dict):
-                pair = params.get("pair")
+                endpoint = self._pair_endpoint(url)
+                pair     = params.get("pair") if endpoint and isinstance(params, dict) else None
                 if pair:
                     last = self._last_pair_call_at.get((endpoint, str(pair)), 0.0)
                     if last > 0:
@@ -536,21 +527,15 @@ class KrakenAdapter(BaseExchange):
                         if since < pair_interval_s:
                             delays.append(pair_interval_s - since)
 
-            wait = max(delays) if delays else 0.0
+                wait = max(delays) if delays else 0.0
 
-        if wait > 0:
-            await asyncio.sleep(wait + random.uniform(0.05, 1.0))
+                if wait <= 0:
+                    self._last_request_at = now
+                    if pair:
+                        self._last_pair_call_at[(endpoint, str(pair))] = now
+                    return
 
-
-    async def _record_request(self, url: str, params: Optional[Dict]) -> None:
-        async with self._rate_lock:
-            now = time.time()
-            self._last_request_at = now
-            endpoint = self._pair_endpoint(url)
-            if endpoint and isinstance(params, dict):
-                pair = params.get("pair")
-                if pair:
-                    self._last_pair_call_at[(endpoint, str(pair))] = now
+            await asyncio.sleep(wait + random.uniform(0.01, 0.1))
 
 
     async def _set_backoff(self, attempt: int, retry_until: Optional[float], strong: bool) -> float:
@@ -577,7 +562,6 @@ class KrakenAdapter(BaseExchange):
 
             try:
                 resp = await self.http_client.request(method, url, params=params)
-                await self._record_request(url, params)
                 last_status = resp.status_code
 
                 if resp.status_code in (429, 418, 502, 503, 504, 520):
@@ -630,7 +614,21 @@ class KrakenAdapter(BaseExchange):
                 wait = await self._set_backoff(attempt, None, strong=False)
                 logger.warning(f"Kraken {url} request error: {e}, backing off {wait:.1f}s (attempt {attempt + 1}/{max_retries})")
 
-        raise ValueError(f"Kraken throttled or unavailable: {url} (last_status={last_status}, last_body_error={last_body_error})")
+        raise UpstreamUnavailableError(f"Kraken throttled or unavailable: {url} (last_status={last_status}, last_body_error={last_body_error})")
+
+
+    async def _futures_tickers(self) -> Any:
+        async with self._fut_tickers_lock:
+            now = time.monotonic()
+            if self._fut_tickers_data is not None and now - self._fut_tickers_at < self.FUT_TICKERS_TTL_S:
+                return self._fut_tickers_data
+
+            data = await self._make_request("GET", f"{self.futures_rest_url}/tickers")
+
+            self._fut_tickers_data = data
+            self._fut_tickers_at   = time.monotonic()
+
+            return data
 
 
     @staticmethod
@@ -781,7 +779,7 @@ class KrakenAdapter(BaseExchange):
                 timestamp            = int(time.time() * 1000),
             )
 
-        data       = await self._make_request("GET", f"{self.futures_rest_url}/tickers")
+        data       = await self._futures_tickers()
         server_ts  = self.normalize_timestamp(data["serverTime"]) if data.get("serverTime") else int(time.time() * 1000)
         is_inverse = market_type == MarketType.INVERSE
         unit       = "contract" if is_inverse else "base"
@@ -856,7 +854,7 @@ class KrakenAdapter(BaseExchange):
                 timestamp   = self.normalize_timestamp(bids[0][2]),
             )
 
-        data      = await self._make_request("GET", f"{self.futures_rest_url}/tickers")
+        data      = await self._futures_tickers()
         server_ts = self.normalize_timestamp(data["serverTime"]) if data.get("serverTime") else int(time.time() * 1000)
 
         for t in data.get("tickers", []):
@@ -949,9 +947,10 @@ class KrakenAdapter(BaseExchange):
             raw = data[pair_key]
             trades = []
             for i, t in enumerate(raw):
-                price = float(t[0])
+                price    = float(t[0])
+                trade_id = str(t[6]) if len(t) > 6 else str(int(t[2] * 1000000)) + str(i)
                 trades.append(Trade(
-                    id          = str(int(t[2] * 1000000)) + str(i),
+                    id          = trade_id,
                     symbol      = model_sym,
                     market_type = market_type,
                     quote       = quote,
@@ -1059,7 +1058,6 @@ class KrakenAdapter(BaseExchange):
                 "1w": 604800,
             }
             interval_secs = interval_secs_map.get(interval, 3600)
-            interval_ms = interval_secs * 1000
             now_secs = int(time.time())
             anchor_secs = int(start_time / 1000) if start_time else now_secs
             from_ts = anchor_secs - limit * interval_secs
@@ -1080,8 +1078,7 @@ class KrakenAdapter(BaseExchange):
                 added = 0
                 last_ts_secs = from_ts
                 for b in batch:
-                    upstream_close_ms = self.normalize_timestamp(b["time"])
-                    ts_ms = upstream_close_ms - interval_ms
+                    ts_ms = self.normalize_timestamp(b["time"])
                     if ts_ms not in seen_ts:
                         seen_ts.add(ts_ms)
                         close = float(b["close"])
@@ -1124,7 +1121,7 @@ class KrakenAdapter(BaseExchange):
         info       = await self._info_for(market_type, model_sym)
         quote      = info.quote_asset if info else ""
 
-        data      = await self._make_request("GET", f"{self.futures_rest_url}/tickers")
+        data      = await self._futures_tickers()
         server_ts = self.normalize_timestamp(data["serverTime"]) if data.get("serverTime") else int(time.time() * 1000)
 
         for t in data.get("tickers", []):
@@ -1237,24 +1234,6 @@ class KrakenAdapter(BaseExchange):
         results.sort(key=lambda x: x.timestamp)
         if start_time:
             results = [r for r in results if r.timestamp <= start_time]
-
-        if results and oi_unit != "contract":
-            bucket_ms = interval_secs * 1000
-            now_bucket_start = (int(time.time() * 1000) // bucket_ms) * bucket_ms
-            latest = results[-1]
-            if latest.timestamp == now_bucket_start:
-                try:
-                    t = await self.get_ticker(market_type, symbol)
-                    patched = build_oi_value(
-                        native          = latest.open_interest.native,
-                        oi_unit         = latest.open_interest.unit,
-                        contract_size   = latest.open_interest.contract_size,
-                        candle_close    = t.price,
-                        candle_close_ts = latest.timestamp,
-                    )
-                    results[-1] = latest.model_copy(update={"open_interest": patched})
-                except Exception:
-                    pass
 
         return results[-limit:]
 
@@ -1709,15 +1688,20 @@ class KrakenAdapter(BaseExchange):
                 mark = float(data["markPrice"])
                 idx_raw = data.get("indexPrice")
                 idx_price: Optional[float] = float(idx_raw) if idx_raw is not None else None
-                rate_raw = data.get("funding_rate")
-                rate: Optional[float] = float(rate_raw) if rate_raw is not None else None
+                rel_raw = data.get("relative_funding_rate")
+                rel_rate: Optional[float] = float(rel_raw) if rel_raw is not None else None
+                if rel_rate is None:
+                    abs_raw = data.get("funding_rate")
+                    if abs_raw is not None and mark > 0:
+                        abs_rate = float(abs_raw)
+                        rel_rate = abs_rate / mark if market_type == MarketType.LINEAR else abs_rate * mark
                 ts = self.normalize_timestamp(data.get("time", time.time()))
 
                 funding_block = None
-                if rate is not None:
+                if rel_rate is not None:
                     funding_block = build_funding_current(
                         kind           = "continuous",
-                        per_cycle      = rate,
+                        per_cycle      = rel_rate,
                         cycle_ms       = 3_600_000,
                         valid_until_ts = ts + 3_600_000,
                     )
