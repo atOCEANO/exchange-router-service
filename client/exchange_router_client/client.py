@@ -1,249 +1,217 @@
-import httpx
-import websockets
-import json
-import pandas as pd
 import asyncio
-import logging
-from typing import Optional, List, Dict, Any
+import queue
+import threading
+from typing import Any, Dict, List, Optional
+
+import pandas as pd
+
+from ._core import AsyncCore
+from .batch import BatchResult
+from .handle import SyncMarket
 
 
-logger = logging.getLogger("ExchangeRouterClient")
+class _LoopThread:
+
+    def __init__(self):
+        self._loop   = asyncio.new_event_loop()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
+
+
+    def run(self, coro) -> Any:
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
+
+
+    def iterate(self, async_gen):
+        sentinel = object()
+        items: "queue.Queue" = queue.Queue()
+        handle: Dict[str, Any] = {}
+
+        async def pump():
+            handle["task"] = asyncio.current_task()
+            try:
+                async for item in async_gen:
+                    items.put(item)
+            except Exception as error:
+                items.put(error)
+            finally:
+                await async_gen.aclose()
+                items.put(sentinel)
+
+        future = asyncio.run_coroutine_threadsafe(pump(), self._loop)
+
+        try:
+            while True:
+                item = items.get()
+                if item is sentinel:
+                    break
+                if isinstance(item, BaseException):
+                    raise item
+                yield item
+        finally:
+            future.cancel()
+            task = handle.get("task")
+            if task is not None:
+                self._loop.call_soon_threadsafe(task.cancel)
+
+
+    def stop(self) -> None:
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=5)
 
 
 class ExchangeRouterClient:
 
-    def __init__(self,
-                 base_url: str = "http://localhost:8040",
-                 timeout: int = 30,
-                 max_retries: int = 3):
-        self.base_url    = base_url.rstrip("/")
-        self.timeout     = timeout
-        self.max_retries = max_retries
-        self.client      = httpx.AsyncClient(timeout=timeout)
+    def __init__(self, base_url: str = "http://localhost:8040", timeout: int = 30, max_retries: int = 3, verbose: bool = True):
+        self._loop = _LoopThread()
+        self._core = AsyncCore(base_url=base_url, timeout=timeout, max_retries=max_retries, verbose=verbose)
 
 
-    async def close(self):
-        await self.client.aclose()
+    @property
+    def verbose(self) -> bool:
+        return self._core.verbose
 
 
-    async def __aenter__(self):
+    @verbose.setter
+    def verbose(self, value: bool) -> None:
+        self._core.verbose = value
+
+
+    def close(self) -> None:
+        self._loop.run(self._core.close())
+        self._loop.stop()
+
+
+    def __enter__(self) -> "ExchangeRouterClient":
         return self
 
 
-    async def __aexit__(self, _exc_type, _exc_val, _exc_tb):
-        await self.close()
+    def __exit__(self, _exc_type, _exc_val, _exc_tb) -> None:
+        self.close()
 
 
-    async def _request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Any:
-        url        = f"{self.base_url}/{endpoint}"
-        attempt    = 0
-        last_error: Optional[str] = None
+    def get_status(self) -> Dict:
+        return self._loop.run(self._core.get_status())
 
-        while attempt < self.max_retries:
-            try:
-                response = await self.client.request(method, url, params=params)
-                response.raise_for_status()
-                return response.json()
 
-            except httpx.HTTPStatusError as e:
-                if 400 <= e.response.status_code < 500:
-                    try:
-                        detail = e.response.json().get("detail", str(e))
-                    except Exception:
-                        detail = str(e)
-                    raise ValueError(f"Router API Error ({e.response.status_code}): {detail}")
+    def get_version(self) -> str:
+        return self._loop.run(self._core.get_version())
 
-                last_error = f"HTTP {e.response.status_code}"
-                logger.warning(f"Server Error {e.response.status_code}. Retrying ({attempt+1}/{self.max_retries})...")
-                attempt += 1
-                await asyncio.sleep(1 * attempt)
 
-            except httpx.TransportError as e:
-                last_error = f"{type(e).__name__}: {e}"
-                logger.warning(f"Transport Error: {e}. Retrying ({attempt+1}/{self.max_retries})...")
-                attempt += 1
-                await asyncio.sleep(1 * attempt)
+    def get_exchanges(self) -> List[str]:
+        return self._loop.run(self._core.get_exchanges())
 
-            except Exception as e:
-                raise RuntimeError(f"Unexpected Error: {e}")
 
-        raise ConnectionError(f"Request to {url} failed after {self.max_retries} attempts (last error: {last_error}).")
+    def get_market_types(self, exchange: str) -> List[str]:
+        return self._loop.run(self._core.get_market_types(exchange))
 
 
-    def _normalize_frame(self, data: List[Dict], time_col: str = "timestamp") -> pd.DataFrame:
-        if not data:
-            return pd.DataFrame()
+    def get_capabilities(self, exchange: str) -> Dict:
+        return self._loop.run(self._core.get_capabilities(exchange))
 
-        df = pd.json_normalize(data, sep="_")
 
-        if time_col in df.columns:
-            df["datetime"] = pd.to_datetime(df[time_col], unit="ms")
-            df.set_index("datetime", inplace=True)
-            df.drop(columns=[time_col], inplace=True)
+    def get_markets(self, exchange: str, market_type: str) -> Dict:
+        return self._loop.run(self._core.get_markets(exchange, market_type))
 
-        df.columns = [c.lower() for c in df.columns]
 
-        numeric_cols = ["open", "high", "low", "close", "volume", "volume_native", "volume_usd", "volume_contract_size", "qty_native", "qty_usd", "qty_contract_size", "bid_qty_native", "bid_qty_usd", "bid_qty_contract_size", "ask_qty_native", "ask_qty_usd", "ask_qty_contract_size", "open_interest_native", "open_interest_usd", "open_interest_contract_size", "rate_per_cycle", "rate_cycle_ms"]
-        for c in numeric_cols:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
+    def get_symbol_info(self, exchange: str, market_type: str, symbol: str) -> Dict:
+        return self._loop.run(self._core.get_symbol_info(exchange, market_type, symbol))
 
-        return df
 
+    def get_ticker(self, exchange: str, market_type: str, symbol: str, verbose: Optional[bool] = None) -> Dict:
+        return self._loop.run(self._core.get_ticker(exchange, market_type, symbol, verbose))
 
-    async def get_status(self) -> Dict:
-        return await self._request("GET", "status")
 
+    def get_book_ticker(self, exchange: str, market_type: str, symbol: str, verbose: Optional[bool] = None) -> Dict:
+        return self._loop.run(self._core.get_book_ticker(exchange, market_type, symbol, verbose))
 
-    async def get_version(self) -> str:
-        data = await self._request("GET", "version")
-        return data.get("version", "")
 
+    def get_mark_price(self, exchange: str, market_type: str, symbol: str, verbose: Optional[bool] = None) -> Dict:
+        return self._loop.run(self._core.get_mark_price(exchange, market_type, symbol, verbose))
 
-    async def get_exchanges(self) -> List[str]:
-        data = await self._request("GET", "exchanges")
-        return data.get("exchanges", [])
 
+    def get_orderbook(self, exchange: str, market_type: str, symbol: str, depth: int = 20, verbose: Optional[bool] = None):
+        return self._loop.run(self._core.get_orderbook(exchange, market_type, symbol, depth, verbose))
 
-    async def get_market_types(self, exchange: str) -> List[str]:
-        data = await self._request("GET", f"{exchange}/market_types")
-        return data.get("market_types", [])
 
+    def get_candles(self, exchange: str, market_type: str, symbol: str, interval: str = "1h", limit: int = 100, start: Optional[int] = None, verbose: Optional[bool] = None) -> pd.DataFrame:
+        return self._loop.run(self._core.get_candles(exchange, market_type, symbol, interval, limit, start, verbose))
 
-    async def get_capabilities(self, exchange: str) -> Dict:
-        return await self._request("GET", f"{exchange}/capabilities")
 
+    def get_trades(self, exchange: str, market_type: str, symbol: str, limit: int = 100, verbose: Optional[bool] = None) -> pd.DataFrame:
+        return self._loop.run(self._core.get_trades(exchange, market_type, symbol, limit, verbose))
 
-    async def get_markets(self, exchange: str, market_type: str) -> Dict:
-        return await self._request("GET", f"{exchange}/{market_type}/markets")
 
+    def get_agg_trades(self, exchange: str, market_type: str, symbol: str, limit: int = 500, start: Optional[int] = None, verbose: Optional[bool] = None) -> pd.DataFrame:
+        return self._loop.run(self._core.get_agg_trades(exchange, market_type, symbol, limit, start, verbose))
 
-    async def get_symbol_info(self, exchange: str, market_type: str, symbol: str) -> Dict:
-        return await self._request("GET", f"{exchange}/{market_type}/markets/{symbol}")
 
+    def get_funding_rate(self, exchange: str, market_type: str, symbol: str, limit: int = 100, start: Optional[int] = None, verbose: Optional[bool] = None) -> pd.DataFrame:
+        return self._loop.run(self._core.get_funding_rate(exchange, market_type, symbol, limit, start, verbose))
 
-    async def get_ticker(self, exchange: str, market_type: str, symbol: str) -> Dict:
-        return await self._request("GET", f"{exchange}/{market_type}/ticker/{symbol}")
 
+    def get_open_interest(self, exchange: str, market_type: str, symbol: str, period: str = "1h", limit: int = 30, start: Optional[int] = None, verbose: Optional[bool] = None) -> pd.DataFrame:
+        return self._loop.run(self._core.get_open_interest(exchange, market_type, symbol, period, limit, start, verbose))
 
-    async def get_book_ticker(self, exchange: str, market_type: str, symbol: str) -> Dict:
-        return await self._request("GET", f"{exchange}/{market_type}/book_ticker/{symbol}")
 
+    def get_liquidations(self, exchange: str, market_type: str, symbol: str, limit: int = 100, start: Optional[int] = None, verbose: Optional[bool] = None) -> pd.DataFrame:
+        return self._loop.run(self._core.get_liquidations(exchange, market_type, symbol, limit, start, verbose))
 
-    async def get_orderbook(self, exchange: str, market_type: str, symbol: str, depth: int = 20) -> Dict:
-        return await self._request("GET", f"{exchange}/{market_type}/orderbook/{symbol}", {"depth": depth})
 
+    def get_long_short_ratio(self, exchange: str, market_type: str, symbol: str, period: str = "5m", limit: int = 30, start: Optional[int] = None, verbose: Optional[bool] = None) -> pd.DataFrame:
+        return self._loop.run(self._core.get_long_short_ratio(exchange, market_type, symbol, period, limit, start, verbose))
 
-    async def get_mark_price(self, exchange: str, market_type: str, symbol: str) -> Dict:
-        return await self._request("GET", f"{exchange}/{market_type}/mark_price/{symbol}")
 
+    def market(self, exchange: str, market_type: str, symbol: str) -> SyncMarket:
+        return SyncMarket(self, exchange, market_type, symbol)
 
-    async def get_candles(self,
-                          exchange: str,
-                          market_type: str,
-                          symbol: str,
-                          interval: str = "1h",
-                          limit: int = 100,
-                          start: Optional[int] = None) -> pd.DataFrame:
-        params = {"interval": interval, "limit": limit}
-        if start is not None:
-            params["start"] = start
 
-        data = await self._request("GET", f"{exchange}/{market_type}/candles/{symbol}", params)
-        return self._normalize_frame(data)
+    def markets(self, exchange: str, market_type: str) -> List[SyncMarket]:
+        data = self.get_markets(exchange, market_type)
+        return [SyncMarket(self, exchange, market_type, m["symbol"]) for m in data["markets"]]
 
 
-    async def get_trades(self, exchange: str, market_type: str, symbol: str, limit: int = 100) -> pd.DataFrame:
-        params = {"limit": limit}
+    def candles_many(self, exchange: str, market_type: str, symbols: List[str], interval: str = "1h", limit: int = 100, start: Optional[int] = None, verbose: Optional[bool] = None, max_concurrent: int = 8) -> BatchResult:
+        return self._loop.run(self._core.fetch_many("candles", exchange, market_type, symbols, verbose=verbose, max_concurrent=max_concurrent, interval=interval, limit=limit, start=start))
 
-        data = await self._request("GET", f"{exchange}/{market_type}/trades/{symbol}", params)
-        return self._normalize_frame(data)
 
+    def trades_many(self, exchange: str, market_type: str, symbols: List[str], limit: int = 100, verbose: Optional[bool] = None, max_concurrent: int = 8) -> BatchResult:
+        return self._loop.run(self._core.fetch_many("trades", exchange, market_type, symbols, verbose=verbose, max_concurrent=max_concurrent, limit=limit))
 
-    async def get_agg_trades(self, exchange: str, market_type: str, symbol: str, start: Optional[int] = None, limit: int = 500) -> pd.DataFrame:
-        params = {"limit": limit}
-        if start is not None:
-            params["start"] = start
 
-        data = await self._request("GET", f"{exchange}/{market_type}/agg_trades/{symbol}", params)
-        return self._normalize_frame(data)
+    def agg_trades_many(self, exchange: str, market_type: str, symbols: List[str], limit: int = 500, start: Optional[int] = None, verbose: Optional[bool] = None, max_concurrent: int = 8) -> BatchResult:
+        return self._loop.run(self._core.fetch_many("agg_trades", exchange, market_type, symbols, verbose=verbose, max_concurrent=max_concurrent, limit=limit, start=start))
 
 
-    async def get_funding_rate(self, exchange: str, market_type: str, symbol: str, start: Optional[int] = None, limit: int = 100) -> pd.DataFrame:
-        params = {"limit": limit}
-        if start is not None:
-            params["start"] = start
+    def funding_rate_many(self, exchange: str, market_type: str, symbols: List[str], limit: int = 100, start: Optional[int] = None, verbose: Optional[bool] = None, max_concurrent: int = 8) -> BatchResult:
+        return self._loop.run(self._core.fetch_many("funding_rate", exchange, market_type, symbols, verbose=verbose, max_concurrent=max_concurrent, limit=limit, start=start))
 
-        data = await self._request("GET", f"{exchange}/{market_type}/funding_rate/{symbol}", params)
-        return self._normalize_frame(data)
 
+    def open_interest_many(self, exchange: str, market_type: str, symbols: List[str], period: str = "1h", limit: int = 30, start: Optional[int] = None, verbose: Optional[bool] = None, max_concurrent: int = 8) -> BatchResult:
+        return self._loop.run(self._core.fetch_many("open_interest", exchange, market_type, symbols, verbose=verbose, max_concurrent=max_concurrent, period=period, limit=limit, start=start))
 
-    async def get_open_interest(self, exchange: str, market_type: str, symbol: str, period: str = "1h", start: Optional[int] = None, limit: int = 30) -> pd.DataFrame:
-        params = {"period": period, "limit": limit}
-        if start is not None:
-            params["start"] = start
 
-        data = await self._request("GET", f"{exchange}/{market_type}/open_interest/{symbol}", params)
-        return self._normalize_frame(data)
+    def liquidations_many(self, exchange: str, market_type: str, symbols: List[str], limit: int = 100, start: Optional[int] = None, verbose: Optional[bool] = None, max_concurrent: int = 8) -> BatchResult:
+        return self._loop.run(self._core.fetch_many("liquidations", exchange, market_type, symbols, verbose=verbose, max_concurrent=max_concurrent, limit=limit, start=start))
 
 
-    async def get_liquidations(self, exchange: str, market_type: str, symbol: str, start: Optional[int] = None, limit: int = 100) -> pd.DataFrame:
-        params = {"limit": limit}
-        if start is not None:
-            params["start"] = start
+    def long_short_ratio_many(self, exchange: str, market_type: str, symbols: List[str], period: str = "5m", limit: int = 30, start: Optional[int] = None, verbose: Optional[bool] = None, max_concurrent: int = 8) -> BatchResult:
+        return self._loop.run(self._core.fetch_many("long_short_ratio", exchange, market_type, symbols, verbose=verbose, max_concurrent=max_concurrent, period=period, limit=limit, start=start))
 
-        data = await self._request("GET", f"{exchange}/{market_type}/liquidations/{symbol}", params)
-        return self._normalize_frame(data)
 
+    def fetch_multi_candles(self, exchange: str, market_type: str, symbols: List[str], interval: str = "1h", limit: int = 1000, start: Optional[int] = None, max_concurrent: int = 4) -> Dict[str, pd.DataFrame]:
+        result = self.candles_many(exchange, market_type, symbols, interval=interval, limit=limit, start=start, max_concurrent=max_concurrent)
+        return result.data()
 
-    async def get_long_short_ratio(self, exchange: str, market_type: str, symbol: str, period: str = "5m", start: Optional[int] = None, limit: int = 30) -> pd.DataFrame:
-        params = {"period": period, "limit": limit}
-        if start is not None:
-            params["start"] = start
 
-        data = await self._request("GET", f"{exchange}/{market_type}/long_short_ratio/{symbol}", params)
-        return self._normalize_frame(data)
+    def stream(self, exchange: str, market_type: str, channel: str, symbol: str, reconnect: bool = True):
+        return self._loop.iterate(self._core.stream(exchange, market_type, channel, symbol, reconnect))
 
 
-    async def fetch_multi_candles(self,
-                                  exchange: str,
-                                  market_type: str,
-                                  symbols: List[str],
-                                  interval: str = "1h",
-                                  limit: int = 1000,
-                                  start: Optional[int] = None,
-                                  max_concurrent: int = 4) -> Dict[str, pd.DataFrame]:
-        results   = {}
-        semaphore = asyncio.Semaphore(max_concurrent)
-
-        logger.info(f"Fetching {len(symbols)} assets from {exchange}...")
-
-        async def _fetch(sym: str):
-            async with semaphore:
-                try:
-                    df = await self.get_candles(exchange, market_type, sym, interval, limit, start)
-                    return sym, df
-                except Exception as e:
-                    logger.error(f"Failed to fetch {sym}: {e}")
-                    return sym, pd.DataFrame()
-
-        tasks        = [_fetch(sym) for sym in symbols]
-        fetched_data = await asyncio.gather(*tasks)
-
-        for sym, df in fetched_data:
-            if not df.empty:
-                results[sym] = df
-
-        return results
-
-
-    async def subscribe(self, exchange: str, market_type: str, channel: str, symbol: str):
-        ws_url = self.base_url.replace("http", "ws", 1) + f"/ws/{exchange}/{market_type}"
-
-        async with websockets.connect(ws_url) as ws:
-            payload = {"channel": channel, "symbol": symbol}
-            await ws.send(json.dumps(payload))
-
-            while True:
-                msg = await ws.recv()
-                yield json.loads(msg)
+    def subscribe(self, exchange: str, market_type: str, channel: str, symbol: str):
+        return self._loop.iterate(self._core.subscribe(exchange, market_type, channel, symbol))
