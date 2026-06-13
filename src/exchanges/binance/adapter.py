@@ -1003,7 +1003,7 @@ class BinanceAdapter(BaseExchange):
             s_status = s.get("status") or s.get("contractStatus")
             if s_status != "TRADING":
                 continue
-            if market_type != MarketType.SPOT and s.get("contractType") != "PERPETUAL":
+            if market_type != MarketType.SPOT and s.get("contractType") not in ("PERPETUAL", "TRADIFI_PERPETUAL"):
                 continue
 
             min_qty: Optional[float] = None
