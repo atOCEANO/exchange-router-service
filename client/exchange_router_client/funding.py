@@ -20,8 +20,26 @@ def _rate_fields(row: Any) -> Tuple[str, float, float]:
     raise ValueError("Unrecognized funding row shape; expected a wire row, a flattened row, or a funding DataFrame row")
 
 
+def _clean_frame_rows(df: pd.DataFrame) -> List[Tuple[int, str, float, float]]:
+    kind       = df.attrs.get("funding_kind", "discrete")
+    attr_cycle = df.attrs.get("cycle_ms")
+    has_column = "cycle_ms" in df.columns
+
+    out = []
+    for idx, row in df.iterrows():
+        ts        = int(pd.Timestamp(idx).value // 1_000_000)
+        per_cycle = float(row["rate"])
+        cycle_ms  = float(row["cycle_ms"]) if has_column and pd.notna(row["cycle_ms"]) else float(attr_cycle)
+        out.append((ts, kind, per_cycle, cycle_ms))
+
+    return out
+
+
 def _normalized_rows(rows: Any) -> List[Tuple[int, str, float, float]]:
     if isinstance(rows, pd.DataFrame):
+        if "rate" in rows.columns:
+            return _clean_frame_rows(rows)
+
         out = []
         for idx, row in rows.iterrows():
             kind, per_cycle, cycle_ms = _rate_fields(row)
@@ -36,6 +54,9 @@ def _normalized_rows(rows: Any) -> List[Tuple[int, str, float, float]]:
 
 
 def per_hour_view(funding_row: Any) -> float:
+    if isinstance(funding_row, pd.Series) and "funding_per_hour" in funding_row.index:
+        return float(funding_row["funding_per_hour"])
+
     _, per_cycle, cycle_ms = _rate_fields(funding_row)
     return per_cycle / (cycle_ms / 3_600_000)
 
