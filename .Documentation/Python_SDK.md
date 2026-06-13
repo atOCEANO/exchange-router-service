@@ -2,7 +2,7 @@
 
 
 <div style="padding-top: 0px;">
-  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.8+-blue.svg" alt="Python 3.8+" /></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.9+-blue.svg" alt="Python 3.9+" /></a>
   <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/FastAPI-0.123.0-05998b.svg?logo=fastapi&logoColor=white" alt="FastAPI" /></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
 </div>
@@ -27,36 +27,17 @@
 
 ## Python SDK
 
-The Python SDK is a thin async client over the router's REST and WebSocket interfaces. List-returning methods (trades, agg trades, candles, funding rate, open interest, liquidations, long/short ratio) return `pandas.DataFrame` objects indexed by datetime. Point-in-time snapshots (ticker, book ticker, orderbook, mark price) return plain dicts. Discovery methods return dicts.
+The SDK (`exchange-router-client` 3.0) is a translation layer over the router's REST and WebSocket interfaces. It is synchronous by default: methods return their data directly, with no `await`. The sync client runs the async machinery on a private background event loop, so the same code works in a plain script and in a Jupyter cell without `asyncio.run` or top-level `await`. An `AsyncExchangeRouterClient` with the same surface is available when you want concurrency.
 
-The client supports `async with` for guaranteed cleanup, or you can call `await client.close()` manually.
+Return shapes follow one rule, so you never have to remember what a call hands back:
 
-### Schema and DataFrame layout
-
-The wire format uses nested value objects; the full spec is in [API Reference](API_Reference.md#response-shapes). The SDK flattens those objects via `pd.json_normalize(sep="_")` before constructing the DataFrame, so a Candle row's `volume: {native, unit, contract_size, usd, usd_basis: {method, close, close_ts}}` becomes the columns `volume_native, volume_unit, volume_contract_size, volume_usd, volume_usd_basis_method, volume_usd_basis_close, volume_usd_basis_close_ts`. The resulting per-route column lists are documented under [DataFrame output](#dataframe-output).
-
-### Helpers for funding math
-
-```python
-from exchange_router_client import ExchangeRouterClient
-from exchange_router_client.funding import funding_paid, per_hour_view
-
-async with ExchangeRouterClient("http://localhost:8040") as client:
-    df = await client.get_funding_rate("binance", "linear", "BTCUSDT", limit=100)
-
-    print(per_hour_view(df.iloc[-1]))
-
-    t_open  = int(df.index[0].value // 1_000_000)
-    t_close = int(df.index[-1].value // 1_000_000)
-    print(funding_paid(df, t_open, t_close, notional=1_000_000))
-
-    mark = await client.get_mark_price("kraken", "linear", "XBTUSD")
-    print(per_hour_view(mark))
-```
-
-`funding_paid` handles both discrete (settlement events) and continuous (sample integration) correctly. Use it instead of hand-rolling the math.
-
-Both helpers accept every shape the client produces: the DataFrame returned by `get_funding_rate` (timestamps read from the datetime index, rates from the flattened `rate_*` columns), a single row of that DataFrame, the `get_mark_price` dict (rate read from its nested `funding` block), and raw wire-format rows with the nested `rate: {kind, per_cycle, cycle_ms}` block intact.
+| Kind | Returns |
+|---|---|
+| Time series (candles, trades, agg_trades, funding_rate, open_interest, liquidations, long_short_ratio) | `pandas.DataFrame`, datetime index, sorted oldest-first |
+| Point snapshot (ticker, book_ticker, mark_price, symbol_info) | `dict` |
+| Order book | `(bids, asks)`, two `price, qty` DataFrames |
+| Batch (`*_many`) | `BatchResult`, behaves like a dict over the symbols that returned |
+| Discovery (exchanges, market_types, capabilities, markets) | `dict` / `list` |
 
 <br>
 <br>
@@ -76,35 +57,33 @@ cd client
 pip install -e .
 ```
 
+Requires Python 3.9+.
+
 <br>
 <br>
 
 ## Quick Start
 
-The SDK is async. The examples below use top-level `await`, which works in Jupyter and Python 3.10+ REPLs. In a normal `.py` script, wrap calls in `asyncio.run(...)`.
-
-The client holds persistent network connections, so it must be released when you are done with it. Two ways to do that:
-
-**Explicit close** (preferred):
+No `await`. This runs identically in a script and in a notebook.
 
 ```python
 from exchange_router_client import ExchangeRouterClient
 
 client = ExchangeRouterClient("http://localhost:8040")
 
-df = await client.get_candles(exchange="binance", market_type="spot", symbol="BTCUSDT", interval="1h", limit=100)
+df = client.get_candles("binance", "spot", "BTCUSDT", interval="1h", limit=100)
 print(df.head())
 
-await client.close()
+client.close()
 ```
 
-**Context manager** (auto-close on exit, useful in scripts where you want guaranteed cleanup even on exception):
+The client holds persistent connections, so release it when done. Use a `with` block for guaranteed cleanup:
 
 ```python
 from exchange_router_client import ExchangeRouterClient
 
-async with ExchangeRouterClient(base_url="http://localhost:8040") as client:
-    df = await client.get_candles(exchange="binance", market_type="spot", symbol="BTCUSDT", interval="1h", limit=100)
+with ExchangeRouterClient("http://localhost:8040") as client:
+    df = client.get_candles("binance", "spot", "BTCUSDT", interval="1h", limit=100)
     print(df.head())
 ```
 
@@ -113,471 +92,287 @@ The `start` parameter, where applicable, follows the [router's pagination contra
 <br>
 <br>
 
-## Examples
+## The market handle
 
-Four end-to-end recipes against a running router at `http://localhost:8040`. Each is written for a Jupyter cell or `python -i` REPL (top-level `await`); for a `.py` script, wrap the body in `asyncio.run(...)`.
-
-### 10000 1-minute candles in a single call
-
-`get_candles` is one SDK call but the router paginates upstream behind the scenes. Binance's per-page cap on `/api/v3/klines` is 1000 records (1500 on the USDM/COINM futures endpoints), so asking for 10000 spot candles triggers ~10 upstream requests inside the adapter. Rate-limit headers are watched, back-off is applied if needed, and same-millisecond duplicates are deduped. You wait once, you get one DataFrame, you do not get banned.
+Binding the exchange, market type, and symbol once avoids repeating them on every call.
 
 ```python
-import time
-from exchange_router_client import ExchangeRouterClient
+m = client.market("kraken", "linear", "XBTUSD")
 
-client = ExchangeRouterClient("http://localhost:8040")
+candles = m.candles("1h", 500)
+funding = m.funding_rate(limit=200)
+mark    = m.mark_price()
+book    = m.orderbook(depth=50)
 
-t0 = time.time()
-df = await client.get_candles(
-    exchange="binance",
-    market_type="spot",
-    symbol="BTCUSDT",
-    interval="1m",
-    limit=10000,
-)
-elapsed = time.time() - t0
-
-print(f"Got {len(df)} 1m candles in {elapsed:.1f}s")
-print(f"Range: {df.index.min()} to {df.index.max()}")
-
-await client.close()
+m.info()          # full SymbolInfo dict
+m.quote           # "USD"
+m.funding_kind    # "discrete" | "continuous" | None
+m.exchange, m.market_type, m.symbol
 ```
 
-The same pattern applies to every paginated route (`agg_trades`, `funding_rate`, `open_interest`, `liquidations`, `long_short_ratio`). Pass `start` to anchor the window at a specific past timestamp instead of "now".
+Iterate every market in a category as handles:
+
+```python
+for m in client.markets("binance", "linear"):
+    oi = m.open_interest("1h", 30)
+```
+
+The handle forwards to the flat `client.get_*` methods, which remain available for one-off calls and for code that iterates raw symbol strings.
 
 <br>
+<br>
 
-### Daily candles for every spot market in parallel
+## DataFrame output
 
-`fetch_multi_candles` discovers the symbol list with `get_markets` (which returns the lite-list dict), then runs up to `max_concurrent` candle fetches in parallel. Symbols that fail are dropped from the result, so iterate `data_map.items()` rather than assuming every input symbol returned data.
+Series methods return a `pandas.DataFrame` with:
+
+* a `DatetimeIndex` built from the response `timestamp` (Unix milliseconds, UTC, timezone-naive), sorted oldest-first, so `df.iloc[-1]` is always the newest row,
+* short, lowercased columns,
+* per-query constants moved out of the rows into `df.attrs`,
+* numeric columns coerced to numbers, text columns (`side`, `id`, the trade-id fields) left as objects,
+* an empty `DataFrame` for an empty response, never `None`.
+
+Columns that are null for the whole market type by design are dropped, not carried as a column of nulls. For example `contract_size` never appears on spot or linear (it is a constant in `df.attrs` on inverse). Values that are null only on some rows (a linear open-interest row whose candle-close join missed) stay as `NaN` and trigger a warning; the SDK never fills them.
+
+`df.attrs` is a convenience, not a contract: pandas drops it across `merge`, `groupby`, and `concat`. Nothing you need per-row lives there, and the values it holds are constant for the query, so they are recoverable from the call you made.
+
+Columns and attrs per route:
+
+| Route | Columns | `df.attrs` |
+|---|---|---|
+| candles | `open, high, low, close, volume, volume_usd` | `interval, volume_unit, usd_basis` |
+| trades | `price, qty, qty_usd, side, id` | `qty_unit` |
+| agg_trades | `price, qty, qty_usd, side, agg_id, first_trade_id, last_trade_id` | `qty_unit` |
+| funding_rate | `rate, funding_per_hour` | `funding_kind, cycle_ms` |
+| open_interest | `open_interest, open_interest_usd` | `interval, oi_unit, usd_basis` |
+| liquidations | `price, qty, qty_usd, side` | `qty_unit` |
+| long_short_ratio | `ratio, long_account, short_account` | `interval, account_scope` |
+
+Every frame also carries `exchange`, `market_type`, `symbol`, `quote`, `schema_version`, and `warnings` in `df.attrs`. On inverse markets the units become `contract` and `contract_size` is added to `df.attrs`; the `*_usd` columns are then exact (price-independent) rather than approximate.
+
+`funding_per_hour` is a derived column: `per_cycle` normalized to a one-hour rate, so funding compares directly across venues with different cycle lengths. `cycle_ms` lives in `df.attrs` when it is constant across the window, and appears as a column (with a warning) only if the funding cycle changed mid-window.
+
+```python
+df = client.get_candles("binance", "spot", "BTCUSDT", interval="1h", limit=3)
+```
+
+```
+                       open      high      low     close    volume    volume_usd
+datetime
+2026-06-13 07:00:00  64010.1  64120.0  63980.2  64088.7    812.34   5.20e7
+2026-06-13 08:00:00  64088.7  64200.5  64050.0  64175.3    934.12   5.99e7
+2026-06-13 09:00:00  64175.3  64310.0  64120.0  64290.1   1002.55   6.44e7
+
+df.attrs
+{'exchange': 'binance', 'market_type': 'spot', 'symbol': 'BTCUSDT', 'quote': 'USDT',
+ 'interval': '1h', 'volume_unit': 'base', 'usd_basis': 'close', 'schema_version': 3, 'warnings': []}
+```
+
+<br>
+<br>
+
+## Warnings
+
+The SDK tells you when a result is missing data, approximate, or degraded, so you do not analyze it by accident. `verbose=True` is the default.
+
+```python
+client = ExchangeRouterClient("http://localhost:8040", verbose=True)
+```
+
+Set `verbose=False` once for a quiet client, or override per call:
+
+```python
+df = client.get_open_interest("binance", "linear", "BTCUSDT", verbose=False)
+```
+
+Warnings fire only when a result deviates from the clean case you would expect, never for facts that are always true of a market type (so `volume_usd` being a close-based approximation on every linear candle is recorded in `df.attrs['usd_basis']`, not shouted on every call). They surface through Python's `warnings` module under the `RouterDataWarning` category, so a test can promote them to errors and a consumer can filter them. They are also attached to the result:
+
+```python
+df = client.get_open_interest("binance", "linear", "BTCUSDT", period="5m", limit=30)
+df.attrs["warnings"]
+# ['2 of 30 rows have usd=NaN (join missed; native is populated)']
+```
+
+What warns: open-interest rows with null `usd`, fewer rows than requested on a paginated route, a mark price with no index or no funding, an opaque long/short scope (the account columns are dropped), trades with null ids, a funding cycle that changed mid-window, a non-USD quote currency, and an empty response.
+
+<br>
+<br>
+
+## Batch fetching
+
+The `*_many` methods fetch many symbols concurrently (the sync client still runs them in parallel under the hood) and return a `BatchResult` that behaves like a dict for the common case where everything worked, with the diagnostics there when you need them.
+
+```python
+symbols = [m["symbol"] for m in client.get_markets("binance", "linear")["markets"]]
+
+result = client.open_interest_many("binance", "linear", symbols, period="1h", limit=100)
+
+for symbol, df in result.items():     # every symbol that returned data
+    ...
+
+result.ok          # {symbol: DataFrame}                clean
+result.degraded    # {symbol: (DataFrame, [warnings])}   returned with gaps
+result.failed      # {symbol: exception}                 never returned
+print(result.report())
+```
+
+```
+100 requested: 97 ok, 2 degraded, 1 failed
+  degraded
+    APTUSDT    3 of 100 rows have usd=NaN (join missed)
+    SEIUSDT   11 of 100 rows have usd=NaN (join missed)
+  failed
+    FOOUSDT   BadRequest: ...
+```
+
+A symbol is `degraded` when its response raised a `RouterDataWarning`, `failed` when the request raised, `ok` otherwise. In a batch the warnings collect into the manifest instead of flooding the output, so a 500-symbol fetch produces one summary line, not 500.
+
+There is a `*_many` for every series route (`candles_many`, `trades_many`, `agg_trades_many`, `funding_rate_many`, `open_interest_many`, `liquidations_many`, `long_short_ratio_many`). `fetch_multi_candles` is kept as a deprecated alias for `candles_many` that returns the plain `{symbol: DataFrame}` dict of the 2.x release.
+
+<br>
+<br>
+
+## Helpers for funding math
 
 ```python
 from exchange_router_client import ExchangeRouterClient
+from exchange_router_client.funding import funding_paid, per_hour_view
 
-client = ExchangeRouterClient("http://localhost:8040")
+with ExchangeRouterClient("http://localhost:8040") as client:
+    df = client.get_funding_rate("binance", "linear", "BTCUSDT", limit=100)
 
-markets_info = await client.get_markets(exchange="binance", market_type="spot")
-symbols      = [m["symbol"] for m in markets_info["markets"]]
-print(f"Discovered {markets_info['count']} spot markets")
+    print(per_hour_view(df.iloc[-1]))
 
-data_map = await client.fetch_multi_candles(
-    exchange="binance",
-    market_type="spot",
-    symbols=symbols,
-    interval="1d",
-    limit=100,
-    max_concurrent=4,
-)
+    t_open  = int(df.index[0].value // 1_000_000)
+    t_close = int(df.index[-1].value // 1_000_000)
+    print(funding_paid(df, t_open, t_close, notional=1_000_000))
 
-print(f"Fetched {len(data_map)} of {len(symbols)}")
-print(data_map["BTCUSDT"].tail())
-
-await client.close()
+    mark = client.get_mark_price("kraken", "linear", "XBTUSD")
+    print(per_hour_view(mark))
 ```
 
+These are plain functions, not coroutines, so they are never awaited. `funding_paid` handles both discrete (settlement events) and continuous (sample integration) funding correctly. Use it instead of hand-rolling the math.
+
+Both helpers accept every shape the client produces: the DataFrame returned by `get_funding_rate`, a single row of it, the `get_mark_price` dict (rate read from its nested `funding` block), and raw wire-format rows. `per_hour_view` reads the frame's own `funding_per_hour` column when given a funding row.
+
+<br>
 <br>
 
-### Best bid and ask across every registered exchange
+## Errors
 
-The unified schema makes cross-exchange comparison straightforward: every adapter returns the same `BookTicker` shape. The only friction is symbol naming. Some venues keep legacy base-currency codes literal (Bitcoin as `XBT`, for example) while others use the modern codes (`BTC`), so build a per-exchange symbol map for whichever pair you are querying. Pairs spelled the same everywhere (`ETH`, `SOL`, `DOGE`) skip the per-exchange map.
+The client raises a small typed tree, so failures are programmable without parsing message strings. Every error carries `.status` (the HTTP status, where applicable) and `.detail`.
+
+| Exception | When |
+|---|---|
+| `BadRequest` | `400`, including an interval or period the route does not declare |
+| `NotFound` | `404`, an unknown exchange |
+| `RateLimited` | `429` |
+| `UpstreamUnavailable` | `503`, carries `.retry_after` |
+| `NotSupported` | the route is not exposed on this exchange and market, caught before the request, or a server `501` |
+| `RouterUnreachable` | transport failure, or retries exhausted |
+
+```python
+from exchange_router_client import NotSupported, UpstreamUnavailable
+
+try:
+    df = client.get_funding_rate("binance", "spot", "BTCUSDT")
+except NotSupported as e:
+    ...
+except UpstreamUnavailable as e:
+    time.sleep(e.retry_after or 5)
+```
+
+All of these inherit from `RouterError`, so `except RouterError` catches everything. The client retries `429` and transient `5xx` with jittered backoff, honoring the `Retry-After` header the router sends on `503`; if the window outlasts the retry budget it raises `UpstreamUnavailable` carrying that `retry_after` so you can wait the rest.
+
+Symbol validity is left to the server, which normalizes case and separators. A bad symbol surfaces as one of the errors above on the call, rather than a client-side guess that could falsely reject a valid symbol.
+
+<br>
+<br>
+
+## Asynchronous client
+
+For real concurrency, use `AsyncExchangeRouterClient`. It exposes the same methods and the same handle, with `await`.
 
 ```python
 import asyncio
-from exchange_router_client import ExchangeRouterClient
+from exchange_router_client import AsyncExchangeRouterClient
 
-SYMBOL_BY_EXCHANGE = {
-    "binance": "BTCUSDT",
-    "bybit":   "BTCUSDT",
-    "kraken":  "XBTUSDT",
-    "kucoin":  "BTCUSDT",
-    "okx":     "BTCUSDT",
-}
+async def main():
+    async with AsyncExchangeRouterClient("http://localhost:8040") as client:
+        df = await client.get_candles("binance", "spot", "BTCUSDT", "1m", 10000)
 
-client = ExchangeRouterClient("http://localhost:8040")
+        m = client.market("binance", "linear", "BTCUSDT")
+        funding = await m.funding_rate(limit=200)
 
-quotes = await asyncio.gather(*[
-    client.get_book_ticker(exchange=ex, market_type="spot", symbol=sym)
-    for ex, sym in SYMBOL_BY_EXCHANGE.items()
-])
+        results = await client.candles_many("binance", "spot", ["BTCUSDT", "ETHUSDT"], interval="1d")
 
-for ex, q in zip(SYMBOL_BY_EXCHANGE, quotes):
-    print(f"{ex:8s}  bid {q['bid_price']:>12.2f}  ask {q['ask_price']:>12.2f}")
-
-best_bid = max(quotes, key=lambda q: q["bid_price"])
-best_ask = min(quotes, key=lambda q: q["ask_price"])
-print(f"Cross-exchange spread: {best_ask['ask_price'] - best_bid['bid_price']:.2f}")
-
-await client.close()
+asyncio.run(main())
 ```
 
-<br>
-
-### Subscribe to a ticker with auto-reconnect
-
-The router closes the WebSocket with code `1011` when the upstream exchange disconnects. The SDK surfaces this as `websockets.ConnectionClosed` from the `subscribe` async iterator. Catch it, sleep briefly, and re-enter the loop. The `StreamManager` shares any upstream connection across clients, so reconnect cost is local-only. The cell loops indefinitely; interrupt the kernel to stop.
-
-```python
-import asyncio
-import websockets
-from exchange_router_client import ExchangeRouterClient
-
-client = ExchangeRouterClient("http://localhost:8040")
-
-while True:
-    try:
-        async for msg in client.subscribe("binance", "spot", "ticker", "BTCUSDT"):
-            vol_usd = msg["volume_24h"]["usd"]
-            print(f"{msg['symbol']}  {msg['price']:>10.2f}  vol24h_usd={vol_usd:.0f}")
-    except websockets.ConnectionClosed as e:
-        print(f"connection closed (code={e.code}); reconnecting in 2s")
-        await asyncio.sleep(2)
-```
+The batch methods on the sync client already run their fetches concurrently, so reach for the async client only when you are driving your own event loop.
 
 <br>
 <br>
 
-## Reference
+## Real-time streams
 
-The client holds persistent network connections. Use `async with`, or call `await client.close()` when done to release resources.
+`stream` yields messages as dicts and reconnects automatically when the upstream drops (the router closes the socket with code `1011`).
+
+```python
+for msg in client.stream("binance", "spot", "ticker", "BTCUSDT"):
+    print(msg["symbol"], msg["price"])
+```
+
+Pass `reconnect=False` to have the iterator raise `websockets.ConnectionClosed` on a drop instead. `subscribe` is the same without reconnect. One subscription per connection: to change channel or symbol, leave the loop and start a new one. On the async client these are `async for`.
 
 <br>
-
-### Errors
-
-The client raises three exception types depending on where the failure happens:
-
-* `ValueError` for any 4xx response from the router. The message includes the HTTP status and the router's `detail` field.
-* `ConnectionError` when a request keeps failing after `max_retries` attempts. 5xx responses and connection-level errors are retried with linear backoff before this is raised. This includes the router's `503` (upstream throttle or ban window); if the window outlasts the retry budget, the final `ConnectionError` carries the last status.
-* `RuntimeError` for anything unexpected that is not an HTTP or connection error.
-
-`fetch_multi_candles` is the one exception to this rule. It logs failures per symbol and returns only the symbols that succeeded, so a single failed symbol does not abort the entire batch.
-
 <br>
 
-### DataFrame output
+## Symbols
 
-Market data methods that return a `pd.DataFrame` follow the same conventions:
-
-* The index is a `DatetimeIndex` built from the response `timestamp` (Unix milliseconds). The index is timezone-naive and represents UTC.
-* Column names are lowercased.
-* Nested wire-format objects are **flattened with `pd.json_normalize(sep="_")`**. A Candle row's `volume: {native, unit, contract_size, usd, usd_basis: {method, close, close_ts}}` becomes the columns `volume_native, volume_unit, volume_contract_size, volume_usd, volume_usd_basis_method, volume_usd_basis_close, volume_usd_basis_close_ts`. A documented allow-list of numeric columns (OHLCV, `qty_native`/`qty_usd`/`qty_contract_size`, `bid_qty_*`, `ask_qty_*`, `volume_native`/`volume_usd`/`volume_contract_size`, `open_interest_native`/`open_interest_usd`/`open_interest_contract_size`, `rate_per_cycle`, `rate_cycle_ms`) is coerced via `pd.to_numeric`; values that cannot be parsed become `NaN`. Other columns stay as Python objects.
-* For most analyses, the `*_usd` columns are what you want (already in quote-currency); the `*_native` columns preserve the upstream value for traceability.
-* An empty response returns an empty `DataFrame`, not `None`.
+The router exposes routing-facing symbols: the exchange-native symbol with any contract-type prefix stripped, so Kraken `PF_XBTUSD` (linear) and `PI_XBTUSD` (inverse) are both addressed as `XBTUSD`, told apart by `market_type`, and Binance COIN-M `BTCUSD_PERP` is `BTCUSD`. Base-currency codes are never translated: Kraken stays `XBT`, not `BTC`. The SDK passes symbols through unchanged. The canonical list for any venue and market type is `client.get_markets(...)`, and each row carries `base_asset` and `quote_asset`; build a per-venue map when you compare venues whose base codes differ.
 
 <br>
-
-### Discovery Methods
-
-**`get_status`**
-Returns a small dict with the service health: `{"status": "ok", "service": "exchange-router-service"}`. For the list of active adapters, use `get_exchanges`.
-
-```python
-await client.get_status()
-```
-
-**Parameters:** None
-
-**`get_version`**
-Returns the running service version as a plain string.
-
-```python
-await client.get_version()
-```
-
-**Parameters:** None
-
-**`get_exchanges`**
-Lists every enabled exchange adapter registered in the router.
-
-```python
-await client.get_exchanges()
-```
-
-**Parameters:** None
-
-**`get_market_types`**
-Returns the market categories supported by a specific exchange.
-
-```python
-await client.get_market_types(exchange: str)
-```
-
-**Parameters:**
-* `exchange` *(str)*: Adapter name (e.g., `"binance"`).
-
-**`get_capabilities`**
-Returns the full feature map for an adapter. For each market type, every route declares whether REST and WebSocket are exposed, plus route-specific constraints (`max_limit`, `retention_ms`, `paginated`, supported `intervals`, orderbook `depths`/`max_depth`). The exact fields per route type are documented in the [Capabilities Contract](Capabilities_Contract.md).
-
-```python
-await client.get_capabilities(exchange: str)
-```
-
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-
-**`get_markets`**
-Returns the lite-list metadata for every tradable symbol in a market type, as a dict. Each entry carries `symbol`, `base_asset`, `quote_asset`, `qty_unit`, `contract_size` (null on spot/linear), and `funding` (null on spot, `{"kind": "discrete"|"continuous"}` on futures). Served entirely from the in-memory adapter cache: zero upstream calls per request. On `linear` and `inverse`, only perpetuals are included; dated and quarterly futures are excluded.
-
-```python
-result  = await client.get_markets(exchange="binance", market_type="linear")
-count   = result["count"]
-symbols = [m["symbol"] for m in result["markets"]]
-```
-
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-* `market_type` *(str)*: `"spot"`, `"linear"`, or `"inverse"`.
-
-**Returns:** `Dict` with keys `exchange`, `market_type`, `count`, `markets`.
-
-**`get_symbol_info`**
-Returns the full `SymbolInfo` for one symbol: precision, order limits, contract size, and the funding convention.
-
-```python
-await client.get_symbol_info(exchange: str, market_type: str, symbol: str)
-```
-
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-* `market_type` *(str)*: `"spot"`, `"linear"`, or `"inverse"`.
-* `symbol` *(str)*: Routing-facing symbol (e.g. `"BTCUSDT"`, `"BTCUSD"`, or an `XBT`-prefixed form on venues that keep legacy base-currency codes).
-
-**Returns:** `Dict`.
-
 <br>
 
-### Pricing
+## Method reference
 
-**`get_ticker`**
-Returns the latest price and 24h rolling window statistics.
+Signatures are for the sync client. The async client is identical with `await`, and `markets()`, `stream()`, and `subscribe()` become `async`.
 
-```python
-await client.get_ticker(exchange: str, market_type: str, symbol: str)
-```
+**Discovery.** `get_status()`, `get_version()`, `get_exchanges()`, `get_market_types(exchange)`, `get_capabilities(exchange)`, `get_markets(exchange, market_type)`, `get_symbol_info(exchange, market_type, symbol)`.
 
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-* `market_type` *(str)*: `"spot"`, `"linear"`, or `"inverse"`.
-* `symbol` *(str)*: Trading pair (e.g., `"BTCUSDT"`).
+**Snapshots (return dicts).** `get_ticker(exchange, market_type, symbol)`, `get_book_ticker(...)`, `get_mark_price(...)`.
 
-**`get_book_ticker`**
-Returns the current best bid and ask price/quantity.
+**Order book (returns `(bids, asks)`).** `get_orderbook(exchange, market_type, symbol, depth=20)`.
+
+**Series (return DataFrames).**
 
 ```python
-await client.get_book_ticker(exchange: str, market_type: str, symbol: str)
+get_candles(exchange, market_type, symbol, interval="1h", limit=100, start=None)
+get_trades(exchange, market_type, symbol, limit=100)
+get_agg_trades(exchange, market_type, symbol, limit=500, start=None)
+get_funding_rate(exchange, market_type, symbol, limit=100, start=None)
+get_open_interest(exchange, market_type, symbol, period="1h", limit=30, start=None)
+get_liquidations(exchange, market_type, symbol, limit=100, start=None)
+get_long_short_ratio(exchange, market_type, symbol, period="5m", limit=30, start=None)
 ```
 
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-* `market_type` *(str)*: Market category.
-* `symbol` *(str)*: Trading pair.
+**Handles.** `market(exchange, market_type, symbol)`, `markets(exchange, market_type)`.
+
+**Batch (return `BatchResult`).** `candles_many`, `trades_many`, `agg_trades_many`, `funding_rate_many`, `open_interest_many`, `liquidations_many`, `long_short_ratio_many`, each taking the same per-route parameters plus `max_concurrent=8`.
+
+**Streams.** `stream(exchange, market_type, channel, symbol, reconnect=True)`, `subscribe(exchange, market_type, channel, symbol)`. Channels: `ticker`, `book_ticker`, `trades`, `agg_trades`, `orderbook`, `mark_price`, `liquidations`. Check `get_capabilities` to confirm a channel is supported.
+
+Every series and snapshot method also takes `verbose` to override the client default for that call.
 
 <br>
-
-### Trades
-
-**`get_trades`**
-Returns recent public trade executions as a DataFrame. Does not accept `start`; the upstream `/trades` endpoints across all supported exchanges return only the most recent N executions.
-
-```python
-await client.get_trades(exchange: str, market_type: str, symbol: str, limit: int = 100)
-```
-
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-* `market_type` *(str)*: Market category.
-* `symbol` *(str)*: Trading pair.
-* `limit` *(int)*: Number of trades to return.
-
-**Returns:** `pd.DataFrame` indexed by datetime.
-
-**`get_agg_trades`**
-Returns aggregated trade data.
-
-```python
-await client.get_agg_trades(exchange: str, market_type: str, symbol: str, start: Optional[int] = None, limit: int = 500)
-```
-
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-* `market_type` *(str)*: Market category.
-* `symbol` *(str)*: Trading pair.
-* `start` *(int)*: Optional inclusive upper bound (Unix ms). Returns records with `ts <= start`, walking back. Omit for the most recent.
-* `limit` *(int)*: Number of results to return.
-
-**Returns:** `pd.DataFrame` indexed by datetime.
-
 <br>
 
-### Orderbook
+## Migrating from 2.x
 
-**`get_orderbook`**
-Returns the current L2 orderbook snapshot.
-
-```python
-await client.get_orderbook(exchange: str, market_type: str, symbol: str, depth: int = 20)
-```
-
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-* `market_type` *(str)*: Market category.
-* `symbol` *(str)*: Trading pair.
-* `depth` *(int)*: Number of price levels to return (default: 20).
-
-<br>
-
-### Historical Data
-
-**`get_candles`**
-Returns historical OHLCV data as a DataFrame indexed by datetime.
-
-```python
-await client.get_candles(exchange: str, market_type: str, symbol: str, interval: str = "1h", limit: int = 100, start: Optional[int] = None)
-```
-
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-* `market_type` *(str)*: `"spot"`, `"linear"`, or `"inverse"`.
-* `symbol` *(str)*: Trading pair (e.g., `"BTCUSDT"`).
-* `interval` *(str)*: Timeframe (e.g., `"1m"`, `"5m"`, `"1h"`, `"1d"`).
-* `limit` *(int)*: Number of candles to return (default: 100).
-* `start` *(int)*: Optional inclusive upper bound (Unix ms). Returns candles with `ts <= start`, walking back. Omit for the most recent.
-
-**`fetch_multi_candles`**
-Batch variant of `get_candles`. Fetches OHLCV for many symbols concurrently, with a semaphore capping parallel requests.
-
-```python
-results = await client.fetch_multi_candles(
-    exchange: str,
-    market_type: str,
-    symbols: List[str],
-    interval: str = "1h",
-    limit: int = 1000,
-    start: Optional[int] = None,
-    max_concurrent: int = 4
-)
-```
-
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-* `market_type` *(str)*: Market category.
-* `symbols` *(List[str])*: List of trading pairs to fetch.
-* `interval` *(str)*: Timeframe (default: `"1h"`).
-* `limit` *(int)*: Candles per symbol (default: 1000).
-* `start` *(int)*: Optional inclusive upper bound (Unix ms), applied to every symbol. Omit for the most recent candles per symbol.
-* `max_concurrent` *(int)*: Max simultaneous requests (default: 4).
-
-**Returns:** `Dict[str, pd.DataFrame]` keyed by symbol. Symbols that fail are omitted, so always iterate `results.items()` instead of assuming all input symbols are present.
-
-```python
-results = await client.fetch_multi_candles("binance", "spot", ["BTCUSDT", "ETHUSDT", "SOLUSDT"], interval="1h", limit=500)
-
-for symbol, df in results.items():
-    print(symbol, df.shape)
-```
-
-<br>
-
-### Futures
-
-**`get_mark_price`**
-Returns the mark price, index price, and current funding view. The response carries a nested `funding: {kind, per_cycle, cycle_ms, valid_until_ts}` block where `kind` is `"discrete"` (charged at `valid_until_ts`) or `"continuous"` (accrued per `cycle_ms`, sampled at the row's timestamp). Per-venue funding model is documented in [Exchange Notes](Exchange_Notes.md). Use the SDK's `funding_paid` helper to compute time-weighted funding cost without branching on `kind` by hand. Linear and inverse only.
-
-```python
-await client.get_mark_price(exchange: str, market_type: str, symbol: str)
-```
-
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-* `market_type` *(str)*: `"linear"` or `"inverse"`.
-* `symbol` *(str)*: Trading pair.
-
-**Returns:** `Dict` with top-level `symbol, market_type, quote, mark_price, index_price, funding, timestamp`.
-
-**`get_funding_rate`**
-Returns funding rate history for perpetual contracts.
-
-```python
-await client.get_funding_rate(exchange: str, market_type: str, symbol: str, start: Optional[int] = None, limit: int = 100)
-```
-
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-* `market_type` *(str)*: `"linear"` or `"inverse"`.
-* `symbol` *(str)*: Trading pair.
-* `start` *(int)*: Optional inclusive upper bound (Unix ms). Returns records with `ts <= start`, walking back. Omit for the most recent.
-* `limit` *(int)*: Number of results to return.
-
-**Returns:** `pd.DataFrame` indexed by datetime.
-
-**`get_open_interest`**
-Returns open interest history. After `pd.json_normalize`, the DataFrame carries `open_interest_native` (raw upstream value), `open_interest_unit` (`"base"` on linear, `"contract"` on inverse), `open_interest_contract_size` (null on linear, populated on inverse), `open_interest_usd` (quote-currency notional), and `open_interest_usd_basis_method` (`"candle_close"` on linear, joined server-side; `"contract_size"` on inverse). On linear markets the route handler fetches matching candles after the OI rows arrive (sequential, not parallel) and joins them by timestamp to fill the `_usd` column. If the join misses, `_usd` is `null` but `_native` is always populated.
-
-```python
-await client.get_open_interest(exchange: str, market_type: str, symbol: str, period: str = "1h", start: Optional[int] = None, limit: int = 30)
-```
-
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-* `market_type` *(str)*: `"linear"` or `"inverse"`.
-* `symbol` *(str)*: Trading pair.
-* `period` *(str)*: Data interval (e.g., `"1h"`).
-* `start` *(int)*: Optional inclusive upper bound (Unix ms). Returns records with `ts <= start`, walking back. Omit for the most recent.
-* `limit` *(int)*: Number of results to return (default: 30).
-
-**Returns:** `pd.DataFrame` indexed by datetime.
-
-**`get_liquidations`**
-Returns recent forced liquidation events.
-
-```python
-await client.get_liquidations(exchange: str, market_type: str, symbol: str, start: Optional[int] = None, limit: int = 100)
-```
-
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-* `market_type` *(str)*: `"linear"` or `"inverse"`.
-* `symbol` *(str)*: Trading pair.
-* `start` *(int)*: Optional inclusive upper bound (Unix ms). Returns records with `ts <= start`, walking back. Omit for the most recent.
-* `limit` *(int)*: Number of results to return.
-
-**Returns:** `pd.DataFrame` indexed by datetime.
-
-**`get_long_short_ratio`**
-Returns global long/short account ratio history. Some venues' upstream endpoints ignore `start`; see [Exchange Notes](Exchange_Notes.md) for the per-venue caveats.
-
-```python
-await client.get_long_short_ratio(exchange: str, market_type: str, symbol: str, period: str = "5m", start: Optional[int] = None, limit: int = 30)
-```
-
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-* `market_type` *(str)*: `"linear"` or `"inverse"`.
-* `symbol` *(str)*: Trading pair.
-* `period` *(str)*: Data interval (e.g., `"5m"`, `"1h"`).
-* `start` *(int)*: Optional inclusive upper bound (Unix ms). Returns records with `ts <= start`, walking back. Omit for the most recent.
-* `limit` *(int)*: Number of data points (default: 30).
-
-**Returns:** `pd.DataFrame` indexed by datetime.
-
-<br>
-
-### Real-time Streams
-
-**`subscribe`**
-Connects to a WebSocket feed and yields messages as an async generator. One subscription per connection. To switch channels or symbols, exit the iterator and open a new one.
-
-```python
-async for msg in client.subscribe("binance", "spot", "ticker", "BTCUSDT"):
-    print(msg)
-```
-
-**Parameters:**
-* `exchange` *(str)*: Adapter name.
-* `market_type` *(str)*: `"spot"`, `"linear"`, or `"inverse"`.
-* `channel` *(str)*: One of `"ticker"`, `"book_ticker"`, `"trades"`, `"agg_trades"`, `"orderbook"`, `"mark_price"`, `"liquidations"`. Check `get_capabilities` first to confirm the channel is supported on that exchange and market type.
-* `symbol` *(str)*: Trading pair.
-
-**Yields:** `Dict[str, Any]`. Each message matches the shape of the equivalent REST response. A `ticker` subscription yields the same fields as `get_ticker`, an `orderbook` subscription yields the same fields as `get_orderbook`, and so on.
-
-If the upstream exchange connection drops, the server closes the WebSocket with code `1011`. The generator will raise `websockets.ConnectionClosed`, which you should catch and handle by re-subscribing.
+* The default client is now synchronous. Drop `await` and `async with`; use the client directly or with a plain `with`. For the old async behavior, switch the import to `AsyncExchangeRouterClient`, which keeps `await` and `async with`.
+* `get_orderbook` now returns `(bids, asks)` as two DataFrames instead of a dict.
+* DataFrame columns are shorter and the conversion provenance moved to `df.attrs`, so code that referenced the old flattened names such as `volume_usd_basis_close_ts` needs updating; the per-query constants are now in `df.attrs` and the rest are the short columns.
+* `fetch_multi_candles` still works and returns the same `{symbol: DataFrame}` dict; new code should prefer `candles_many`, which returns a `BatchResult`.
+* 4xx errors now raise typed exceptions (`BadRequest`, `NotFound`, and so on) rather than a single `ValueError`. All inherit from `RouterError`.
+* The wire schema is unchanged, so any code reading the raw response shapes is unaffected.
