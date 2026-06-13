@@ -2,7 +2,7 @@
 
 
 <div style="padding-top: 0px;">
-  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.8+-blue.svg" alt="Python 3.8+" /></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.9+-blue.svg" alt="Python 3.9+" /></a>
   <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/FastAPI-0.123.0-05998b.svg?logo=fastapi&logoColor=white" alt="FastAPI" /></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
 </div>
@@ -276,7 +276,7 @@ This variable lives in `.env` and is consumed by `docker-compose.yml` in the `po
 
 ## Python SDK
 
-A thin async client over the router's REST and WebSocket interfaces. Historical and time-series methods return `pandas.DataFrame` objects indexed by datetime; point-in-time snapshots (ticker, book ticker, orderbook, mark price) return plain dicts. See [Exchange Notes](.Documentation/Exchange_Notes.md) for fields whose units vary across exchanges.
+A synchronous client (`exchange-router-client`) over the router's REST and WebSocket interfaces, with an async client for concurrency. Time-series methods return `pandas.DataFrame` objects indexed by datetime; point-in-time snapshots (ticker, book ticker, mark price) return dicts; the order book returns two `price, qty` frames. It is sync by default, so the same code runs in a script and in a Jupyter cell with no `await`. See [Exchange Notes](.Documentation/Exchange_Notes.md) for fields whose units vary across exchanges.
 
 ```bash
 pip install git+https://github.com/atOCEANO/exchange-router-service.git#subdirectory=client
@@ -285,37 +285,25 @@ pip install git+https://github.com/atOCEANO/exchange-router-service.git#subdirec
 ```python
 from exchange_router_client import ExchangeRouterClient
 
-client = ExchangeRouterClient("http://localhost:8040")
-
-df = await client.get_candles("binance", "spot", "BTCUSDT", interval="1h", limit=500)
-print(df.tail())
-
-await client.close()
+with ExchangeRouterClient("http://localhost:8040") as client:
+    df = client.get_candles("binance", "spot", "BTCUSDT", interval="1h", limit=500)
+    print(df.tail())
 ```
 
-**Fetch candles for every symbol on an exchange in one call:**
+**Fetch candles for every symbol on an exchange, with an integrity manifest:**
 
 ```python
 from exchange_router_client import ExchangeRouterClient
 
-client = ExchangeRouterClient("http://localhost:8040")
+with ExchangeRouterClient("http://localhost:8040") as client:
+    symbols = [m["symbol"] for m in client.get_markets("binance", "spot")["markets"]]
 
-markets_info = await client.get_markets(exchange="binance", market_type="spot")
-symbols = [m["symbol"] for m in markets_info["markets"]]
-print(f"Discovered {markets_info['count']} spot markets")
+    result = client.candles_many("binance", "spot", symbols, interval="1d", limit=1000)
 
-data_map = await client.fetch_multi_candles(
-    exchange="binance",
-    market_type="spot",
-    symbols=symbols,
-    interval="1d",
-    limit=1000,
-    max_concurrent=5,
-)
-print(f"Fetched {len(data_map)} markets")
-print(data_map["BTCUSDT"].tail())
-
-await client.close()
+    print(result.report())
+    print(result["BTCUSDT"].tail())
 ```
 
-**Full method reference, DataFrame column layout, and end-to-end recipes are in the [Python SDK](.Documentation/Python_SDK.md) docs.**
+`result` behaves like a dict over the symbols that returned, with `.ok`, `.degraded`, and `.failed` for triage.
+
+**Full method reference, DataFrame column layout, warnings, and end-to-end recipes are in the [Python SDK](.Documentation/Python_SDK.md) docs.**
