@@ -211,7 +211,7 @@ The Kraken Futures `/instruments` endpoint returns `baseCurrency`/`quoteCurrency
 
 ### Spot `price_change_percent` is "since UTC midnight", not rolling 24h
 
-Kraken's spot ticker exposes `o` = "today's opening price" (UTC midnight) but no rolling 24h-ago open. The router fills `Ticker.open_24h` with that field and computes `price_change_percent` as `(price - o) / o * 100`. So during the early hours of the UTC day the change reads as a much smaller window than rolling-24h venues. Cross-exchange diffs around 00:00–04:00 UTC will show Kraken with a noticeably smaller `|price_change_percent|` than venues that use a true rolling-24h window. Fetching a 24h-ago candle to derive a true rolling change is one extra request per ticker call; the router does not pay that cost on every snapshot.
+Kraken's spot ticker exposes `o` = "today's opening price" (UTC midnight) but no rolling 24h-ago open. The router fills `Ticker.open_24h` with that field and computes `price_change_percent` as `(price - o) / o * 100`. So during the early hours of the UTC day the change reads as a much smaller window than rolling-24h venues. Cross-exchange diffs around 00:00-04:00 UTC will show Kraken with a noticeably smaller `|price_change_percent|` than venues that use a true rolling-24h window. Fetching a 24h-ago candle to derive a true rolling change is one extra request per ticker call; the router does not pay that cost on every snapshot.
 
 ### Inverse `vol24h` and `volumeQuote` semantics
 
@@ -228,7 +228,7 @@ Kraken Futures uses [continuous funding](API_Reference.md#interpretation-fields)
 
 <br>
 
-Kraken's upstream exposes funding rates as an **absolute** value (`fundingRate`, in counter-currency per contract per period) on `/tickers`, not the dimensionless per-period rate that discrete-funding venues typically report. The historical-funding-rates endpoint exposes a `relativeFundingRate` field that **is** dimensionless and per-period. The adapter uses `relativeFundingRate` directly in `get_funding_rate`, and in `get_mark_price` converts the absolute `fundingRate` via `relative = fundingRate / markPrice` (linear `PF_*`) or `relative = fundingRate × markPrice` (inverse `PI_*`). After conversion, Kraken funding rates land in the same `~10⁻⁵–10⁻⁴` per-hour-equivalent range as discrete venues' per-cycle figures.
+Kraken's upstream exposes funding rates as an **absolute** value (`fundingRate`, in counter-currency per contract per period) on `/tickers`, not the dimensionless per-period rate that discrete-funding venues typically report. The historical-funding-rates endpoint exposes a `relativeFundingRate` field that **is** dimensionless and per-period. The adapter uses `relativeFundingRate` directly in `get_funding_rate`, and in `get_mark_price` converts the absolute `fundingRate` via `relative = fundingRate / markPrice` (linear `PF_*`) or `relative = fundingRate × markPrice` (inverse `PI_*`). After conversion, Kraken funding rates land in the same `~10⁻⁵-10⁻⁴` per-hour-equivalent range as discrete venues' per-cycle figures.
 
 For cross-exchange comparison without branching on `kind`, use the SDK's `per_hour_view(row)` helper (see [Python SDK → Helpers](Python_SDK.md#helpers-for-funding-math)). For computing funding paid by a position over a window, use `funding_paid(rows, t_open, t_close, notional)`.
 
