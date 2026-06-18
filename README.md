@@ -301,7 +301,7 @@ This variable lives in `.env` and is consumed by `docker-compose.yml` in the `po
 
 ## Python SDK
 
-A synchronous client (`exchange-router-client`) over the router's REST and WebSocket interfaces, with an async client for concurrency. Time-series methods return `pandas.DataFrame` objects indexed by datetime; point-in-time snapshots (ticker, book ticker, mark price) return dicts; the order book returns two `price, qty` frames. It is sync by default, so the same code runs in a script and in a Jupyter cell with no `await`. See [Exchange Notes](.Documentation/Exchange_Notes.md) for fields whose units vary across exchanges.
+A synchronous client (`exchange-router-client`) over the router's REST and WebSocket interfaces, with an async client for concurrency. Time-series methods return `pandas.DataFrame` objects indexed by datetime; point-in-time snapshots (ticker, book ticker, mark price) return a flat `Row` with attribute access; the order book returns one tidy `side, price, qty` frame. It is sync by default, so the same code runs in a script and in a Jupyter cell with no `await`. See [Exchange Notes](.Documentation/Exchange_Notes.md) for fields whose units vary across exchanges.
 
 ```bash
 pip install git+https://github.com/atOCEANO/exchange-router-service.git#subdirectory=client
