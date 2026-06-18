@@ -142,7 +142,7 @@ The `detail` field in error responses always carries the underlying exception me
 
 The router carries two version numbers, defined in [src/version.py](../src/version.py) and surfaced through separate endpoints.
 
-* **`SERVICE_VERSION`** is the standard semver string (e.g. `"2.0.0"`). It bumps for any user-visible change: a new route, a new field, a behavioural fix, a capability adjustment, a dependency upgrade. Returned at `GET /version` and `GET /`.
+* **`SERVICE_VERSION`** is the standard semver string (`MAJOR.MINOR.PATCH`). It bumps for any user-visible change: a new route, a new field, a behavioural fix, a capability adjustment, a dependency upgrade. Returned at `GET /version` and `GET /`.
 * **`SCHEMA_VERSION`** is a small integer. It bumps only when the wire format breaks consumer code: renaming a field, flattening a nested object into top-level fields, removing a discriminator value, changing the type of a field. Adding an optional field does not bump. Returned at `GET /` and stamped on every auditor `results.json`; the auditor compares served-vs-pinned and fails the suite on drift.
 
 The two version numbers are decoupled on purpose. A wire-compatible bug fix bumps `SERVICE_VERSION` and leaves `SCHEMA_VERSION` untouched, so clients pinned to a schema number do not need to recompile. A genuine wire break bumps both.

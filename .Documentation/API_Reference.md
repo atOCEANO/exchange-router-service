@@ -156,7 +156,7 @@ The SDK helpers (`per_hour_view`, `funding_paid`) already branch on these fields
 ```json
 {
   "service": "exchange-router-service",
-  "version": "2.0.0",
+  "version": "x.y.z",
   "status": "ok",
   "schema_version": 3,
   "exchanges": [
