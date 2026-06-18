@@ -10,6 +10,8 @@ def _rate_fields(row: Any) -> Tuple[str, float, float]:
             return block["kind"], float(block["per_cycle"]), float(block["cycle_ms"])
         if "rate_per_cycle" in row:
             return row["rate_kind"], float(row["rate_per_cycle"]), float(row["rate_cycle_ms"])
+        if row.get("funding_per_cycle") is not None:
+            return row["funding_kind"], float(row["funding_per_cycle"]), float(row["funding_cycle_ms"])
 
     if isinstance(row, pd.Series):
         if "rate_per_cycle" in row.index:
@@ -55,6 +57,9 @@ def _normalized_rows(rows: Any) -> List[Tuple[int, str, float, float]]:
 
 def per_hour_view(funding_row: Any) -> float:
     if isinstance(funding_row, pd.Series) and "funding_per_hour" in funding_row.index:
+        return float(funding_row["funding_per_hour"])
+
+    if isinstance(funding_row, Mapping) and funding_row.get("funding_per_hour") is not None:
         return float(funding_row["funding_per_hour"])
 
     _, per_cycle, cycle_ms = _rate_fields(funding_row)

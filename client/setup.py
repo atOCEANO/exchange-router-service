@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="exchange-router-client",
-    version="3.0.0",
+    version="4.0.0",
     description="Client SDK for the Exchange Router Service",
     packages=find_packages(),
     install_requires=[

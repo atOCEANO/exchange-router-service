@@ -24,24 +24,26 @@
 
 ## Python SDK
 
-The SDK (`exchange-router-client` 3.0) is a translation layer over the router's REST and WebSocket interfaces. It is synchronous by default: methods return their data directly, with no `await`. The sync client runs the async machinery on a private background event loop, so the same code works in a plain script and in a Jupyter cell without `asyncio.run` or top-level `await`. An `AsyncExchangeRouterClient` with the same surface is available when you want concurrency.
+The SDK (`exchange-router-client` 4.0) is a translation layer over the router's REST and WebSocket interfaces. It is synchronous by default: methods return their data directly, with no `await`. The sync client runs the async machinery on a private background event loop, so the same code works in a plain script and in a Jupyter cell without `asyncio.run` or top-level `await`. An `AsyncExchangeRouterClient` with the same surface is available when you want concurrency.
 
-Return shapes follow one rule, so you never have to remember what a call hands back:
+The return surface follows one rule, so you never have to remember what a call hands back:
+
+> Anything tabular is a pandas **DataFrame** with flat, stable columns. A single quote is a flat **Row** you read with `t.price`. Batches are a **BatchResult**. Every quantity is named the same way everywhere: `x` (native), `x_usd` (quote notional), `x_unit` (what `x` counts).
 
 | Kind | Returns |
 |---|---|
-| Time series (candles, trades, agg_trades, funding_rate, open_interest, liquidations, long_short_ratio) | `pandas.DataFrame`, datetime index, sorted oldest-first |
-| Point snapshot (ticker, book_ticker, mark_price, symbol_info) | `dict` |
-| Order book | `(bids, asks)`, two `price, qty` DataFrames |
+| Time series (candles, trades, agg_trades, funding_rate, open_interest, liquidations, long_short_ratio) | `pandas.DataFrame`, datetime index, sorted oldest-first, flat stable columns |
+| Point snapshot (ticker, book_ticker, mark_price, symbol_info) | `Row`, a flat `dict` with attribute access and a `.raw` wire-dict escape hatch |
+| Order book | one `DataFrame` with columns `side, price, qty` |
 | Batch (`*_many`) | `BatchResult`, behaves like a dict over the symbols that returned |
 | Discovery (exchanges, market_types, capabilities, markets) | `dict` / `list` |
+
+If you are coming from 3.x, see [Migrating from 3.x](#migrating-from-3x); the wire schema is unchanged, only the client's return shapes moved.
 
 <br>
 <br>
 
 ## Installation
-
-Install directly from the repository:
 
 ```bash
 pip install git+https://github.com/atOCEANO/exchange-router-service.git#subdirectory=client
@@ -66,23 +68,12 @@ No `await`. This runs identically in a script and in a notebook.
 ```python
 from exchange_router_client import ExchangeRouterClient
 
-client = ExchangeRouterClient("http://localhost:8040")
-
-df = client.get_candles("binance", "spot", "BTCUSDT", interval="1h", limit=100)
-print(df.head())
-
-client.close()
-```
-
-The client holds persistent connections, so release it when done. Use a `with` block for guaranteed cleanup:
-
-```python
-from exchange_router_client import ExchangeRouterClient
-
 with ExchangeRouterClient("http://localhost:8040") as client:
     df = client.get_candles("binance", "spot", "BTCUSDT", interval="1h", limit=100)
-    print(df.head())
+    print(df.tail())
 ```
+
+The client holds persistent connections, so release it when done. The `with` block above guarantees cleanup; outside one, call `client.close()`.
 
 The `start` parameter, where applicable, follows the [router's pagination contract](API_Reference.md#pagination-semantics): pass the oldest timestamp you already have to walk further back.
 
@@ -101,7 +92,7 @@ funding = m.funding_rate(limit=200)
 mark    = m.mark_price()
 book    = m.orderbook(depth=50)
 
-m.info()          # full SymbolInfo dict
+m.info()          # full SymbolInfo as a Row
 m.quote           # "USD"
 m.funding_kind    # "discrete" | "continuous" | None
 m.exchange, m.market_type, m.symbol
@@ -119,35 +110,32 @@ The handle forwards to the flat `client.get_*` methods, which remain available f
 <br>
 <br>
 
-## DataFrame output
+## Series: the DataFrame
 
-Series methods return a `pandas.DataFrame` with:
+Series methods return a plain `pandas.DataFrame`. Nothing is wrapped, so `concat`, `merge`, `resample`, `to_parquet`, and pickling all work normally. The frame has:
 
-* a `DatetimeIndex` built from the response `timestamp` (Unix milliseconds, UTC, timezone-naive), sorted oldest-first, so `df.iloc[-1]` is always the newest row,
-* short, lowercased columns,
-* per-query constants moved out of the rows into `df.attrs`,
+* a `DatetimeIndex` built from `timestamp` (Unix milliseconds, UTC, timezone-naive), sorted oldest-first, so `df.iloc[-1]` is the newest row,
+* short, lowercased, **flat** columns,
+* a **stable** column set: a route always returns the same columns, NaN where a value is absent (no column that appears or disappears with the data),
+* per-query constants in `df.attrs`, read right after the call,
 * numeric columns coerced to numbers, text columns (`side`, `id`, the trade-id fields) left as objects,
-* an empty `DataFrame` for an empty response, never `None`.
+* an empty DataFrame (with the route's columns) for an empty response, never `None`.
 
-Columns that are null for the whole market type by design are dropped, not carried as a column of nulls. For example `contract_size` never appears on spot or linear (it is a constant in `df.attrs` on inverse). Values that are null only on some rows (a linear open-interest row whose candle-close join missed) stay as `NaN` and trigger a warning; the SDK never fills them.
+Columns and `df.attrs` per route:
 
-`df.attrs` is a convenience, not a contract: pandas drops it across `merge`, `groupby`, and `concat`. Nothing you need per-row lives there, and the values it holds are constant for the query, so they are recoverable from the call you made.
-
-Columns and attrs per route:
-
-| Route | Columns | `df.attrs` |
+| Route | Columns | `df.attrs` constants |
 |---|---|---|
-| candles | `open, high, low, close, volume, volume_usd` | `interval, volume_unit, usd_basis` |
-| trades | `price, qty, qty_usd, side, id` | `qty_unit` |
-| agg_trades | `price, qty, qty_usd, side, agg_id, first_trade_id, last_trade_id` | `qty_unit` |
-| funding_rate | `rate, funding_per_hour` | `funding_kind, cycle_ms` |
-| open_interest | `open_interest, open_interest_usd` | `interval, oi_unit, usd_basis` |
-| liquidations | `price, qty, qty_usd, side` | `qty_unit` |
+| candles | `open, high, low, close, volume, volume_usd` | `quote, interval, volume_unit, contract_size, usd_basis` |
+| trades | `price, qty, qty_usd, side, id` | `quote, qty_unit, contract_size` |
+| agg_trades | `price, qty, qty_usd, side, agg_id, first_trade_id, last_trade_id` | `quote, qty_unit, contract_size` |
+| funding_rate | `rate, funding_per_hour, cycle_ms` | `quote, funding_kind` |
+| open_interest | `open_interest, open_interest_usd` | `quote, interval, oi_unit, contract_size, usd_basis` |
+| liquidations | `price, qty, qty_usd, side` | `quote, qty_unit, contract_size` |
 | long_short_ratio | `ratio, long_account, short_account` | `interval, account_scope` |
 
-Every frame also carries `exchange`, `market_type`, `symbol`, `quote`, `schema_version`, and `warnings` in `df.attrs`. On inverse markets the units become `contract` and `contract_size` is added to `df.attrs`; the `*_usd` columns are then exact (price-independent) rather than approximate.
+Every frame's `attrs` also carries `exchange, market_type, symbol, schema_version, warnings`.
 
-`funding_per_hour` is a derived column: `per_cycle` normalized to a one-hour rate, so funding compares directly across venues with different cycle lengths. `cycle_ms` lives in `df.attrs` when it is constant across the window, and appears as a column (with a warning) only if the funding cycle changed mid-window.
+`funding_per_hour` is `per_cycle` normalized to a one-hour rate, so funding compares directly across venues with different cycle lengths. `cycle_ms` is always a column (it can vary mid-window); a change within the window raises a warning. On `long_short_ratio`, `long_account` and `short_account` are always columns and come back `NaN` on venues that expose only the ratio (`account_scope == "opaque"`).
 
 ```python
 df = client.get_candles("binance", "spot", "BTCUSDT", interval="1h", limit=3)
@@ -161,8 +149,87 @@ datetime
 2026-06-13 09:00:00  64175.3  64310.0  64120.0  64290.1   1002.55   6.44e7
 
 df.attrs
-{'exchange': 'binance', 'market_type': 'spot', 'symbol': 'BTCUSDT', 'quote': 'USDT',
- 'interval': '1h', 'volume_unit': 'base', 'usd_basis': 'close', 'schema_version': 3, 'warnings': []}
+{'exchange': 'binance', 'market_type': 'spot', 'symbol': 'BTCUSDT',
+ 'schema_version': 3, 'warnings': [], 'quote': 'USDT', 'interval': '1h',
+ 'volume_unit': 'base', 'contract_size': None, 'usd_basis': 'close'}
+```
+
+`df.attrs` holds constants for the query, read them right after the call. pandas drops `attrs` across `merge` / `groupby` / `concat`, but you rarely need them back: the comparable `*_usd` column is first-class, so cross-venue work uses it and never touches `unit`. When you do want provenance to survive a `concat`, see [with_provenance](#provenance-across-a-concat).
+
+<br>
+<br>
+
+## Snapshots: the Row
+
+`get_ticker`, `get_book_ticker`, `get_mark_price`, and `get_symbol_info` return a `Row`: a flat `dict` subclass with attribute access. It is a real dict, so it pickles, JSON-dumps, and drops into `pd.DataFrame([...])`. The nested value objects from the wire are flattened to `x` / `x_usd` / `x_unit`. The original nested wire dict is on `.raw`.
+
+```python
+t = client.get_ticker("binance", "linear", "BTCUSDT")
+
+t.price             # 72154.30
+t.volume_24h        # 12345.67        (native)
+t.volume_24h_usd    # 890123456.78
+t.volume_24h_unit   # "base"
+t["price"]          # key access works too; it is a dict
+t.timestamp         # Timestamp('2024-04-11 15:00:00')   (UTC, tz-naive)
+t.raw               # the original nested wire dict, untouched
+
+rows = [client.get_ticker("binance", "linear", s) for s in symbols]
+pd.DataFrame(rows)  # one row per symbol, for free
+```
+
+Mark price flattens funding and adds a per-hour figure:
+
+```python
+mp = client.get_mark_price("kraken", "linear", "XBTUSD")
+mp.mark_price            # 72153.85
+mp.index_price           # 72150.10   (or None)
+mp.funding_kind          # "continuous"
+mp.funding_per_cycle     # 0.0000118
+mp.funding_per_hour      # 0.0000118  (derived, comparable across venues)
+```
+
+Row keys per snapshot (missing values are `None`, never absent):
+
+| Snapshot | Keys |
+|---|---|
+| ticker | `symbol, market_type, quote, price, open_24h, high_24h, low_24h, volume_24h, volume_24h_usd, volume_24h_unit, price_change_percent, timestamp` |
+| book_ticker | `symbol, market_type, quote, bid_price, bid_qty, bid_qty_usd, ask_price, ask_qty, ask_qty_usd, qty_unit, timestamp` |
+| mark_price | `symbol, market_type, quote, mark_price, index_price, funding_kind, funding_per_cycle, funding_cycle_ms, funding_per_hour, funding_valid_until_ts, timestamp` |
+| symbol_info | `symbol, native_symbol, base_asset, quote_asset, price_precision, quantity_precision, min_qty, max_qty, min_notional, qty_unit, contract_size, funding_kind` |
+
+<br>
+<br>
+
+## Order book
+
+`get_orderbook` returns one tidy `DataFrame` with columns `side, price, qty` (`side` is `"bid"` or `"ask"`), bids best-first then asks best-first. `quote`, `qty_unit`, and `timestamp` are in `df.attrs`.
+
+```python
+ob = client.get_orderbook("binance", "linear", "BTCUSDT", depth=20)
+
+bids   = ob[ob.side == "bid"]
+asks   = ob[ob.side == "ask"]
+spread = asks.price.min() - bids.price.max()
+ob.attrs["qty_unit"]    # "base"
+```
+
+<br>
+<br>
+
+## Provenance across a concat
+
+`df.attrs` does not survive `pd.concat`. When you stitch frames from several venues and need per-row provenance, `with_provenance` promotes the constants to columns first:
+
+```python
+from exchange_router_client import with_provenance
+
+frames = [
+    with_provenance(client.get_candles("binance", "linear",  "BTCUSDT", interval="1h", limit=500)),
+    with_provenance(client.get_candles("bybit",   "inverse", "BTCUSD",  interval="1h", limit=500)),
+]
+both = pd.concat(frames)
+both.groupby("exchange")["volume_usd"].sum()   # exchange, symbol, quote, unit ride per-row
 ```
 
 <br>
@@ -182,22 +249,22 @@ Set `verbose=False` once for a quiet client, or override per call:
 df = client.get_open_interest("binance", "linear", "BTCUSDT", verbose=False)
 ```
 
-Warnings fire only when a result deviates from the clean case you would expect, never for facts that are always true of a market type (so `volume_usd` being a close-based approximation on every linear candle is recorded in `df.attrs['usd_basis']`, not shouted on every call). They surface through Python's `warnings` module under the `RouterDataWarning` category, so a test can promote them to errors and a consumer can filter them. They are also attached to the result:
+Warnings fire only when a result deviates from the clean case you would expect, never for facts that are always true of a market type. They surface through Python's `warnings` module under the `RouterDataWarning` category, so a test can promote them to errors and a consumer can filter them. They are also attached to the result's `df.attrs["warnings"]`.
 
 ```python
 df = client.get_open_interest("binance", "linear", "BTCUSDT", period="5m", limit=30)
 df.attrs["warnings"]
-# ['2 of 30 rows have usd=NaN (join missed; native is populated)']
+# ['open_interest binance/linear/BTCUSDT: 2 of 30 rows have usd=NaN (join missed; native is populated)']
 ```
 
-What warns: open-interest rows with null `usd`, fewer rows than requested on a paginated route, a mark price with no index or no funding, an opaque long/short scope (the account columns are dropped), trades with null ids, a funding cycle that changed mid-window, a non-USD quote currency, and an empty response.
+What warns: open-interest rows with `NaN` `usd`, fewer rows than requested on a paginated route, a mark price with no index or no funding, an opaque long/short scope (the account columns are `NaN`), trades with null ids, a funding cycle that changed mid-window, a non-USD quote currency, and an empty response.
 
 <br>
 <br>
 
 ## Batch fetching
 
-The `*_many` methods fetch many symbols concurrently (the sync client still runs them in parallel under the hood) and return a `BatchResult` that behaves like a dict for the common case where everything worked, with the diagnostics there when you need them.
+The `*_many` methods fetch many symbols concurrently (the sync client still runs them in parallel under the hood) and return a `BatchResult` that behaves like a dict for the common case where everything worked, with diagnostics there when you need them. Each value is a DataFrame.
 
 ```python
 symbols = [m["symbol"] for m in client.get_markets("binance", "linear")["markets"]]
@@ -207,9 +274,9 @@ result = client.open_interest_many("binance", "linear", symbols, period="1h", li
 for symbol, df in result.items():     # every symbol that returned data
     ...
 
-result.ok          # {symbol: DataFrame}                clean
-result.degraded    # {symbol: (DataFrame, [warnings])}   returned with gaps
-result.failed      # {symbol: exception}                 never returned
+result.ok          # {symbol: DataFrame}                 clean
+result.degraded    # {symbol: (DataFrame, [warnings])}    returned with gaps
+result.failed      # {symbol: exception}                  never returned
 print(result.report())
 ```
 
@@ -222,9 +289,7 @@ print(result.report())
     FOOUSDT   BadRequest: ...
 ```
 
-A symbol is `degraded` when its response raised a `RouterDataWarning`, `failed` when the request raised, `ok` otherwise. In a batch the warnings collect into the manifest instead of flooding the output, so a 500-symbol fetch produces one summary line, not 500.
-
-There is a `*_many` for every series route (`candles_many`, `trades_many`, `agg_trades_many`, `funding_rate_many`, `open_interest_many`, `liquidations_many`, `long_short_ratio_many`). `fetch_multi_candles` is kept as a deprecated alias for `candles_many` that returns the plain `{symbol: DataFrame}` dict of the 2.x release.
+A symbol is `degraded` when its response raised a `RouterDataWarning`, `failed` when the request raised, `ok` otherwise. There is a `*_many` for every series route (`candles_many`, `trades_many`, `agg_trades_many`, `funding_rate_many`, `open_interest_many`, `liquidations_many`, `long_short_ratio_many`). `fetch_multi_candles` remains as a deprecated alias for `candles_many` that returns the plain `{symbol: DataFrame}` dict.
 
 <br>
 <br>
@@ -248,9 +313,7 @@ with ExchangeRouterClient("http://localhost:8040") as client:
     print(per_hour_view(mark))
 ```
 
-These are plain functions, not coroutines, so they are never awaited. `funding_paid` handles both discrete (settlement events) and continuous (sample integration) funding correctly. Use it instead of hand-rolling the math.
-
-Both helpers accept every shape the client produces: the DataFrame returned by `get_funding_rate`, a single row of it, the `get_mark_price` dict (rate read from its nested `funding` block), and raw wire-format rows. `per_hour_view` reads the frame's own `funding_per_hour` column when given a funding row.
+These are plain functions, not coroutines, so they are never awaited. `funding_paid` handles both discrete (settlement events) and continuous (sample integration) funding correctly. Both helpers accept every shape the client produces: the `get_funding_rate` DataFrame, a single row of it, the `get_mark_price` Row (rate read from its flat `funding_*` fields), and raw wire-format rows.
 
 <br>
 <br>
@@ -320,7 +383,7 @@ for msg in client.stream("binance", "spot", "ticker", "BTCUSDT"):
     print(msg["symbol"], msg["price"])
 ```
 
-Pass `reconnect=False` to have the iterator raise `websockets.ConnectionClosed` on a drop instead. `subscribe` is the same without reconnect. One subscription per connection: to change channel or symbol, leave the loop and start a new one. On the async client these are `async for`.
+Stream messages are the raw wire dicts (the same shapes as the REST response bodies), not `Row` objects. Pass `reconnect=False` to have the iterator raise `websockets.ConnectionClosed` on a drop instead. `subscribe` is the same without reconnect. One subscription per connection: to change channel or symbol, leave the loop and start a new one. On the async client these are `async for`.
 
 <br>
 <br>
@@ -336,11 +399,11 @@ The router exposes routing-facing symbols: the exchange-native symbol with any c
 
 Signatures are for the sync client. The async client is identical with `await`, and `markets()`, `stream()`, and `subscribe()` become `async`.
 
-**Discovery.** `get_status()`, `get_version()`, `get_exchanges()`, `get_market_types(exchange)`, `get_capabilities(exchange)`, `get_markets(exchange, market_type)`, `get_symbol_info(exchange, market_type, symbol)`.
+**Discovery.** `get_status()`, `get_version()`, `get_exchanges()`, `get_market_types(exchange)`, `get_capabilities(exchange)`, `get_markets(exchange, market_type)`.
 
-**Snapshots (return dicts).** `get_ticker(exchange, market_type, symbol)`, `get_book_ticker(...)`, `get_mark_price(...)`.
+**Snapshots (return `Row`).** `get_ticker(exchange, market_type, symbol)`, `get_book_ticker(...)`, `get_mark_price(...)`, `get_symbol_info(exchange, market_type, symbol)`.
 
-**Order book (returns `(bids, asks)`).** `get_orderbook(exchange, market_type, symbol, depth=20)`.
+**Order book (returns a `DataFrame`).** `get_orderbook(exchange, market_type, symbol, depth=20)`.
 
 **Series (return DataFrames).**
 
@@ -360,16 +423,20 @@ get_long_short_ratio(exchange, market_type, symbol, period="5m", limit=30, start
 
 **Streams.** `stream(exchange, market_type, channel, symbol, reconnect=True)`, `subscribe(exchange, market_type, channel, symbol)`. Channels: `ticker`, `book_ticker`, `trades`, `agg_trades`, `orderbook`, `mark_price`, `liquidations`. Check `get_capabilities` to confirm a channel is supported.
 
+**Provenance helper.** `with_provenance(df)` returns a copy with `exchange`, `symbol`, `quote`, and `unit` promoted to columns.
+
 Every series and snapshot method also takes `verbose` to override the client default for that call.
 
 <br>
 <br>
 
-## Migrating from 2.x
+## Migrating from 3.x
 
-* The default client is now synchronous. Drop `await` and `async with`; use the client directly or with a plain `with`. For the old async behavior, switch the import to `AsyncExchangeRouterClient`, which keeps `await` and `async with`.
-* `get_orderbook` now returns `(bids, asks)` as two DataFrames instead of a dict.
-* DataFrame columns are shorter and the conversion provenance moved to `df.attrs`, so code that referenced the old flattened names such as `volume_usd_basis_close_ts` needs updating; the per-query constants are now in `df.attrs` and the rest are the short columns.
-* `fetch_multi_candles` still works and returns the same `{symbol: DataFrame}` dict; new code should prefer `candles_many`, which returns a `BatchResult`.
-* 4xx errors now raise typed exceptions (`BadRequest`, `NotFound`, and so on) rather than a single `ValueError`. All inherit from `RouterError`.
-* The wire schema is unchanged, so any code reading the raw response shapes is unaffected.
+The wire schema is unchanged, so any code reading the raw response bodies (or stream messages) is unaffected. The client return shapes changed:
+
+* **Snapshots are now a flat `Row`, not a nested dict.** `t["volume_24h"]["native"]` becomes `t.volume_24h` (or `t["volume_24h"]`); the nested object is on `t.raw`. Funding on `get_mark_price` is flat: `mp.funding_per_cycle`, `mp.funding_kind`, plus the derived `mp.funding_per_hour`.
+* **`get_orderbook` returns one DataFrame, not `(bids, asks)`.** Split with `ob[ob.side == "bid"]` and `ob[ob.side == "ask"]`.
+* **Series columns are stable.** `cycle_ms` is always a column on funding, and `long_account` / `short_account` are always columns on long/short ratio (NaN when opaque). Code that did `KeyError`-prone column access now works.
+* **`df.attrs` keys are unchanged in spirit** but the conversion provenance stays in `attrs`; for per-row provenance across a `concat`, use `with_provenance`.
+* **`get_symbol_info` returns a `Row`** with `funding_kind` instead of a nested `funding` block.
+* **4xx errors** still raise the typed `RouterError` tree from 3.x.

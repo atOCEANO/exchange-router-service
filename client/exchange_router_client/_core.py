@@ -8,6 +8,7 @@ import pandas as pd
 import websockets
 
 from . import frames
+from . import rows
 from ._warnings import emit
 from .batch import BatchResult
 from .errors import BadRequest, NotSupported, RouterError, RouterUnreachable, error_for_status
@@ -192,21 +193,21 @@ class AsyncCore:
         return await self._request("GET", f"{exchange}/{market_type}/markets")
 
 
-    async def get_symbol_info(self, exchange: str, market_type: str, symbol: str) -> Dict:
-        return await self._request("GET", f"{exchange}/{market_type}/markets/{symbol}")
+    async def get_symbol_info(self, exchange: str, market_type: str, symbol: str) -> rows.Row:
+        return rows.symbol_info_row(await self._request("GET", f"{exchange}/{market_type}/markets/{symbol}"))
 
 
-    async def get_ticker(self, exchange: str, market_type: str, symbol: str, verbose: Optional[bool] = None) -> Dict:
+    async def get_ticker(self, exchange: str, market_type: str, symbol: str, verbose: Optional[bool] = None) -> rows.Row:
         await self._preflight(exchange, market_type, "ticker", symbol=symbol)
-        return await self._request("GET", f"{exchange}/{market_type}/ticker/{symbol}")
+        return rows.ticker_row(await self._request("GET", f"{exchange}/{market_type}/ticker/{symbol}"))
 
 
-    async def get_book_ticker(self, exchange: str, market_type: str, symbol: str, verbose: Optional[bool] = None) -> Dict:
+    async def get_book_ticker(self, exchange: str, market_type: str, symbol: str, verbose: Optional[bool] = None) -> rows.Row:
         await self._preflight(exchange, market_type, "book_ticker", symbol=symbol)
-        return await self._request("GET", f"{exchange}/{market_type}/book_ticker/{symbol}")
+        return rows.book_ticker_row(await self._request("GET", f"{exchange}/{market_type}/book_ticker/{symbol}"))
 
 
-    async def get_mark_price(self, exchange: str, market_type: str, symbol: str, verbose: Optional[bool] = None) -> Dict:
+    async def get_mark_price(self, exchange: str, market_type: str, symbol: str, verbose: Optional[bool] = None) -> rows.Row:
         v = self.verbose if verbose is None else verbose
 
         await self._preflight(exchange, market_type, "mark_price", symbol=symbol, verbose=v)
@@ -219,30 +220,17 @@ class AsyncCore:
             warnings.append(f"mark_price {exchange}/{market_type}/{symbol}: funding is null (upstream omitted it)")
         emit(warnings, v)
 
-        return data
+        return rows.mark_price_row(data)
 
 
-    async def get_orderbook(self, exchange: str, market_type: str, symbol: str, depth: int = 20, verbose: Optional[bool] = None):
+    async def get_orderbook(self, exchange: str, market_type: str, symbol: str, depth: int = 20, verbose: Optional[bool] = None) -> pd.DataFrame:
         v = self.verbose if verbose is None else verbose
 
         await self._preflight(exchange, market_type, "orderbook", symbol=symbol, depth=depth, verbose=v)
         data = await self._request("GET", f"{exchange}/{market_type}/orderbook/{symbol}", {"depth": depth})
 
-        bids = pd.DataFrame(data.get("bids", []), columns=["price", "qty"])
-        asks = pd.DataFrame(data.get("asks", []), columns=["price", "qty"])
-
-        meta = {
-            "exchange":    exchange,
-            "market_type": market_type,
-            "symbol":      symbol,
-            "quote":       data.get("quote"),
-            "qty_unit":    data.get("qty_unit"),
-            "timestamp":   data.get("timestamp"),
-        }
-        bids.attrs.update(meta)
-        asks.attrs.update(meta)
-
-        return bids, asks
+        ctx = {"exchange": exchange, "market_type": market_type, "symbol": symbol}
+        return frames.orderbook(data, ctx)
 
 
     async def get_candles(self, exchange: str, market_type: str, symbol: str, interval: str = "1h", limit: int = 100, start: Optional[int] = None, verbose: Optional[bool] = None) -> pd.DataFrame:

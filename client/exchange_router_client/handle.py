@@ -87,5 +87,4 @@ class SyncMarket(_BaseMarket):
 
     @property
     def funding_kind(self) -> Optional[str]:
-        funding = self.info().get("funding")
-        return funding.get("kind") if funding else None
+        return self.info().get("funding_kind")
