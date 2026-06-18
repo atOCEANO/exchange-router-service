@@ -9,13 +9,10 @@
 
 <sub>
   <a href="../README.md">Introduction</a> &nbsp;•&nbsp; 
-  <a href="Scope.md">Scope</a> &nbsp;•&nbsp; 
   <a href="API_Reference.md">API Reference</a> &nbsp;•&nbsp; 
   <a href="Python_SDK.md">Python SDK</a> &nbsp;•&nbsp; 
-  <a href="Troubleshooting.md">Troubleshooting</a> &nbsp;•&nbsp; 
   <b>Exchange Notes</b> &nbsp;•&nbsp; 
   <a href="System_Architecture.md">System Architecture</a> &nbsp;•&nbsp; 
-  <a href="Capabilities_Contract.md">Capabilities Contract</a> &nbsp;•&nbsp; 
   <a href="Auditor_Guide.md">Auditor Guide</a> &nbsp;•&nbsp; 
   <a href="Contributor_Guide.md">Contributor Guide</a>
 </sub>
@@ -54,9 +51,18 @@ Examples of the mapping: `BTCUSD` (model) ↔ `BTCUSD_PERP` (upstream), `XBTUSD`
 
 For `linear` and `inverse` market types, both `/markets` and `/markets/{symbol}` return perpetual contracts only. Quarterly and dated futures are excluded by every adapter. Spot markets are unaffected and return every active pair.
 
-### Empty fields mean "upstream did not provide"
+### Data fidelity rule
 
-`SymbolInfo` fields like `min_notional`, `max_qty`, `base_asset`, `quote_asset` default to `0` or `""` when the upstream does not return them. They are never invented or computed. Each exchange's section below documents which fields are missing on that exchange.
+The router never invents data. When an upstream omits a field, the router surfaces the gap honestly rather than guessing:
+
+* Missing string fields come back as `""`.
+* Missing numeric fields come back as `0` or `null`, depending on the model.
+* Missing list responses come back as `[]`, never a synthesized "best guess".
+* Queries past upstream retention return an empty list.
+
+`SymbolInfo` fields like `min_notional`, `max_qty`, `base_asset`, and `quote_asset` follow this rule: they default to `0` or `""` when the upstream does not return them, and each exchange's section below documents which fields tend to be missing. A consumer reading `0` on a rarely-populated field should not read it as "the exchange said zero"; it usually means the exchange did not return the field at all.
+
+The same rule applies to derived values such as `usd` on `open_interest`: on linear markets it is joined from a same-period candle's close, and if that join misses, `usd` comes back `null` with `native` still populated. The router does not substitute a stale close, a ticker price, or a back-of-envelope estimate.
 
 ### Open interest units differ by exchange and market
 

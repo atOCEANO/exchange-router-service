@@ -9,13 +9,10 @@
 
 <sub>
   <a href="../README.md">Introduction</a> &nbsp;•&nbsp; 
-  <a href="Scope.md">Scope</a> &nbsp;•&nbsp; 
   <b>API Reference</b> &nbsp;•&nbsp; 
   <a href="Python_SDK.md">Python SDK</a> &nbsp;•&nbsp; 
-  <a href="Troubleshooting.md">Troubleshooting</a> &nbsp;•&nbsp; 
   <a href="Exchange_Notes.md">Exchange Notes</a> &nbsp;•&nbsp; 
   <a href="System_Architecture.md">System Architecture</a> &nbsp;•&nbsp; 
-  <a href="Capabilities_Contract.md">Capabilities Contract</a> &nbsp;•&nbsp; 
   <a href="Auditor_Guide.md">Auditor Guide</a> &nbsp;•&nbsp; 
   <a href="Contributor_Guide.md">Contributor Guide</a>
 </sub>
@@ -505,6 +502,14 @@ Parameter validation errors also carry an `error` field set to `"Invalid Request
 ```
 
 The router never masks upstream error detail. If the underlying exchange returns a specific message, it is passed through in `detail`.
+
+**Common causes by code:**
+
+* **400** reached an adapter and was rejected. Usually an unknown symbol for this exchange or market type (Kraken spot uses legacy codes like `XBTUSDT`, not `BTCUSDT`; check `GET /{exchange}/{market_type}/markets` for the canonical list), or a parameter out of range (`limit` or `depth` below 1, or an `interval` / `period` the venue does not declare; check `GET /{exchange}/capabilities`).
+* **404** means the exchange name in the path is not registered: a typo, or an adapter that failed to load at startup (check the router's stdout for `Failed to load adapter`).
+* **500** usually means upstream HTTP retries were exhausted (5xx, connection error, timeout), or an adapter bug that escaped the request loop. A reproducible 500 is a bug report.
+* **501** means the route is not supported on this exchange and market, per the capability map: for example `funding_rate` or `mark_price` on spot, `liquidations` on KuCoin or Kraken, `long_short_ratio` on Bybit spot or any spot market.
+* **503** means the upstream is throttling or has banned the IP and the wait exceeds the adapter's fail-fast threshold (30s on Bybit and KuCoin, 60s on OKX, retry-budget exhaustion on Kraken). The request was valid; retry after the `Retry-After` window. Binance does not fail fast, so on Binance a long cooldown surfaces as a slow response instead.
 
 <br>
 <br>

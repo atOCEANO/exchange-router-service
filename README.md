@@ -9,13 +9,10 @@
 
 <sub>
   <b>Introduction</b> &nbsp;•&nbsp; 
-  <a href=".Documentation/Scope.md">Scope</a> &nbsp;•&nbsp; 
   <a href=".Documentation/API_Reference.md">API Reference</a> &nbsp;•&nbsp; 
   <a href=".Documentation/Python_SDK.md">Python SDK</a> &nbsp;•&nbsp; 
-  <a href=".Documentation/Troubleshooting.md">Troubleshooting</a> &nbsp;•&nbsp; 
   <a href=".Documentation/Exchange_Notes.md">Exchange Notes</a> &nbsp;•&nbsp; 
   <a href=".Documentation/System_Architecture.md">System Architecture</a> &nbsp;•&nbsp; 
-  <a href=".Documentation/Capabilities_Contract.md">Capabilities Contract</a> &nbsp;•&nbsp; 
   <a href=".Documentation/Auditor_Guide.md">Auditor Guide</a> &nbsp;•&nbsp; 
   <a href=".Documentation/Contributor_Guide.md">Contributor Guide</a>
 </sub>
@@ -31,7 +28,7 @@ The `exchange-router-service` is **a drop-in container that normalizes public cr
 
 Field names, units, funding conventions, and pagination semantics differ from one exchange to the next. The router does that translation in the adapter layer, so callers see the same `Ticker`, `Candle`, `OrderBook`, `MarkPrice`, `FundingRate` shape regardless of which exchange served the request. It also handles the parts every integration needs: pagination for large historical pulls, request-weight throttling to prevent IP bans, and persistent connection management for WebSocket streams. Adding a new exchange means dropping in a new adapter, with no changes to the routing core.
 
-**Stateless and keyless.** The service handles public market data only. It places no orders, holds no API keys, manages no accounts, and persists nothing to disk. If you need authentication or private endpoints, this is not it. See [Scope](.Documentation/Scope.md) for the full list of non-goals and deployment assumptions before pointing real traffic at it.
+**Stateless and keyless.** The service handles public market data only. It places no orders, holds no API keys, manages no accounts, and persists nothing to disk. If you need authentication or private endpoints, this is not it. See [Scope](#scope) for the full list of non-goals and deployment assumptions before pointing real traffic at it.
 
 <br>
 
@@ -45,6 +42,34 @@ Field names, units, funding conventions, and pagination semantics differ from on
 Clients talk to one endpoint, the router routes requests to the right exchange adapter, and the adapter normalizes the response into a schema that is identical across exchanges. REST and WebSocket both sit on the same port, and the same adapter instance serves both, so a client written against Binance spot works against Bybit linear with a single path change.
 
 The wire format carries nested value objects on every quantitative record: each `qty`, `volume`, or `open_interest` field comes back as `{native, unit, contract_size?, usd, usd_basis?}` so a single record contains both the raw upstream value and a quote-currency notional with the conversion basis spelled out. Funding uses a `kind: "discrete" | "continuous"` discriminator so a position-PnL calculation branches on the funding model itself, with no exchange-specific code. See [API Reference](.Documentation/API_Reference.md) for the wire-format spec with worked response examples, and [Exchange Notes](.Documentation/Exchange_Notes.md) for per-exchange semantic quirks.
+
+<br>
+<br>
+
+## Scope
+
+Public market data from every registered exchange adapter, normalized to one schema. No orders, no auth, no persistence. The boundaries below are deliberate, so they are worth knowing before pointing real traffic at the service.
+
+### What it does not do
+
+* **No orders.** Read-only. There are no order-placement, cancellation, position-management, or transfer endpoints.
+* **No account access.** No authentication, no API keys, no account-state queries. Every endpoint is public market data.
+* **No persistence.** No database, no cache, no on-disk state. Every request hits upstream, and a restart loses only in-flight requests and WebSocket sessions.
+* **No historical archive.** History is fetched from upstream on demand, bounded by each venue's own retention. The router never stores rows past the response.
+* **No inbound rate limiting.** Outbound rate-limit respect, which keeps the router from being banned by upstreams, is enforced per adapter. Inbound limits, quotas, and per-client throttling belong in a reverse proxy.
+* **No observability.** Logs go to stdout via Python `logging`. Metrics and traces are not emitted. Wrap the service at the edge if you need them.
+* **No invented data.** When an upstream omits a field, the router surfaces the gap (`null`, `0`, or an empty list), never a derived or fabricated value. See the [data fidelity rule](.Documentation/Exchange_Notes.md#data-fidelity-rule) in Exchange Notes.
+
+### Deployment posture
+
+Designed for localhost or a trusted network: no TLS termination, no authentication, no inbound rate limiting, and `allow_origins=["*"]` so any local client works during development. Run one instance per upstream IP, since rate-limit state is in-memory per adapter. For external exposure, put the router behind a reverse proxy that adds TLS, an origin allowlist, and an inbound rate limit. The full operator detail is in [System Architecture](.Documentation/System_Architecture.md#deployment-notes).
+
+### When this is not the right fit
+
+* You need authenticated endpoints (orders, balances, deposits). Use the upstream SDK directly.
+* You need long-term historical storage. Build a separate ingestion pipeline; the router fetches on demand but does not retain.
+* You need sub-millisecond latency. The router adds a normalization layer and a process boundary, so co-locate with the exchange or use a direct client if microseconds matter.
+* You need to expose a public service to untrusted clients. The router has no auth and no inbound throttle. Wrap it in a proxy that supplies both, or pick a service designed for that role.
 
 <br>
 <br>

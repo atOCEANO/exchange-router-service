@@ -9,13 +9,10 @@
 
 <sub>
   <a href="../README.md">Introduction</a> &nbsp;•&nbsp; 
-  <a href="Scope.md">Scope</a> &nbsp;•&nbsp; 
   <a href="API_Reference.md">API Reference</a> &nbsp;•&nbsp; 
   <a href="Python_SDK.md">Python SDK</a> &nbsp;•&nbsp; 
-  <a href="Troubleshooting.md">Troubleshooting</a> &nbsp;•&nbsp; 
   <a href="Exchange_Notes.md">Exchange Notes</a> &nbsp;•&nbsp; 
   <a href="System_Architecture.md">System Architecture</a> &nbsp;•&nbsp; 
-  <a href="Capabilities_Contract.md">Capabilities Contract</a> &nbsp;•&nbsp; 
   <b>Auditor Guide</b> &nbsp;•&nbsp; 
   <a href="Contributor_Guide.md">Contributor Guide</a>
 </sub>
