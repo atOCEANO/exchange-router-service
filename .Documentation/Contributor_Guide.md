@@ -196,6 +196,8 @@ For exchange-specific behaviors (rate limit tiers, symbol translation quirks, AP
 
 Adapter compliance is validated via the auditor package at `tools/auditor/` (see [Auditor Guide](Auditor_Guide.md)). The runner reads `/{exchange}/capabilities` and runs only the probes that apply to the features the adapter claims to support, so an honest capabilities map is the difference between a clean test run and noise. All declared endpoints must pass before submitting a Pull Request.
 
+The suite runs locally, not in CI: exchange APIs block the datacenter IPs that hosted runners issue from, so a GitHub Actions run fails on refused connections rather than real defects. See [Auditor Guide](Auditor_Guide.md#why-the-suite-runs-locally-not-in-ci) for the full reasoning.
+
 See [Auditor Guide](Auditor_Guide.md) for the full probe catalogue, env knobs, concurrency model, run output, and CLI examples.
 
 <br>

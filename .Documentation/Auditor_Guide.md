@@ -231,6 +231,13 @@ Inside Docker, prepend `docker exec exchange-router-service` to any of the comma
 <br>
 <br>
 
+## Why the suite runs locally, not in CI
+
+The auditor hits live exchange APIs, so it only works from a host those exchanges will answer, and a GitHub Actions runner is not such a host. Hosted runners issue requests from cloud datacenter IP ranges, and exchanges routinely block those: some ban server-provider and datacenter IPs outright, and several geo-block the US regions GitHub's runners run in. A run from there surfaces as connection failures and 403s that look like adapter regressions but are really the venue refusing the runner's IP. Run the suite from an environment with unblocked exchange access (a local machine, or a box in a region the venues serve), not from CI.
+
+<br>
+<br>
+
 ## How to add a new probe
 
 1. Pick the closest existing probe and copy its file. Most new probes look like `InfoProbe` (single REST call) or `SnapshotProbe` (REST call + per-route check function).
