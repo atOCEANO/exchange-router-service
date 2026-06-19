@@ -8,6 +8,7 @@ import pandas as pd
 from ._core import AsyncCore
 from .batch import BatchResult
 from .handle import SyncMarket
+from .rows import Row
 
 
 class _LoopThread:
@@ -119,23 +120,23 @@ class ExchangeRouterClient:
         return self._loop.run(self._core.get_markets(exchange, market_type))
 
 
-    def get_symbol_info(self, exchange: str, market_type: str, symbol: str) -> Dict:
+    def get_symbol_info(self, exchange: str, market_type: str, symbol: str) -> Row:
         return self._loop.run(self._core.get_symbol_info(exchange, market_type, symbol))
 
 
-    def get_ticker(self, exchange: str, market_type: str, symbol: str, verbose: Optional[bool] = None) -> Dict:
+    def get_ticker(self, exchange: str, market_type: str, symbol: str, verbose: Optional[bool] = None) -> Row:
         return self._loop.run(self._core.get_ticker(exchange, market_type, symbol, verbose))
 
 
-    def get_book_ticker(self, exchange: str, market_type: str, symbol: str, verbose: Optional[bool] = None) -> Dict:
+    def get_book_ticker(self, exchange: str, market_type: str, symbol: str, verbose: Optional[bool] = None) -> Row:
         return self._loop.run(self._core.get_book_ticker(exchange, market_type, symbol, verbose))
 
 
-    def get_mark_price(self, exchange: str, market_type: str, symbol: str, verbose: Optional[bool] = None) -> Dict:
+    def get_mark_price(self, exchange: str, market_type: str, symbol: str, verbose: Optional[bool] = None) -> Row:
         return self._loop.run(self._core.get_mark_price(exchange, market_type, symbol, verbose))
 
 
-    def get_orderbook(self, exchange: str, market_type: str, symbol: str, depth: int = 20, verbose: Optional[bool] = None):
+    def get_orderbook(self, exchange: str, market_type: str, symbol: str, depth: int = 20, verbose: Optional[bool] = None) -> pd.DataFrame:
         return self._loop.run(self._core.get_orderbook(exchange, market_type, symbol, depth, verbose))
 
 
