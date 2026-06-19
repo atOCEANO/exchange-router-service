@@ -23,15 +23,13 @@ def _rate_fields(row: Any) -> Tuple[str, float, float]:
 
 
 def _clean_frame_rows(df: pd.DataFrame) -> List[Tuple[int, str, float, float]]:
-    kind       = df.attrs.get("funding_kind", "discrete")
-    attr_cycle = df.attrs.get("cycle_ms")
-    has_column = "cycle_ms" in df.columns
+    kind = df.attrs.get("funding_kind", "discrete")
 
     out = []
     for idx, row in df.iterrows():
         ts        = int(pd.Timestamp(idx).value // 1_000_000)
         per_cycle = float(row["rate"])
-        cycle_ms  = float(row["cycle_ms"]) if has_column and pd.notna(row["cycle_ms"]) else float(attr_cycle)
+        cycle_ms  = float(row["cycle_ms"])
         out.append((ts, kind, per_cycle, cycle_ms))
 
     return out

@@ -1,7 +1,5 @@
 from typing import Any, Dict, Optional
 
-import pandas as pd
-
 
 class Row(dict):
 
@@ -15,15 +13,6 @@ class Row(dict):
     @property
     def raw(self) -> Optional[dict]:
         return getattr(self, "_raw", None)
-
-
-def _ts(ms: Any) -> Optional[pd.Timestamp]:
-    if ms is None:
-        return None
-    try:
-        return pd.Timestamp(int(ms), unit="ms")
-    except (TypeError, ValueError):
-        return None
 
 
 def _qty(obj: Any):
@@ -53,7 +42,7 @@ def ticker_row(raw: Dict[str, Any]) -> Row:
         "volume_24h_usd":       usd,
         "volume_24h_unit":      unit,
         "price_change_percent": raw.get("price_change_percent"),
-        "timestamp":            _ts(raw.get("timestamp")),
+        "timestamp":            raw.get("timestamp"),
     }
 
     return _wrap(flat, raw)
@@ -74,7 +63,7 @@ def book_ticker_row(raw: Dict[str, Any]) -> Row:
         "ask_qty":     ask_native,
         "ask_qty_usd": ask_usd,
         "qty_unit":    unit,
-        "timestamp":   _ts(raw.get("timestamp")),
+        "timestamp":   raw.get("timestamp"),
     }
 
     return _wrap(flat, raw)
@@ -100,8 +89,8 @@ def mark_price_row(raw: Dict[str, Any]) -> Row:
         "funding_per_cycle":      per_cycle,
         "funding_cycle_ms":       cycle_ms,
         "funding_per_hour":       per_hour,
-        "funding_valid_until_ts": _ts(funding.get("valid_until_ts")) if funding else None,
-        "timestamp":              _ts(raw.get("timestamp")),
+        "funding_valid_until_ts": funding.get("valid_until_ts") if funding else None,
+        "timestamp":              raw.get("timestamp"),
     }
 
     return _wrap(flat, raw)
