@@ -246,7 +246,7 @@ The same applies to Google Colab and other hosted notebooks: they run on cloud I
    - Capture `started = time.time()` before the network call.
    - On non-200, return `[self.http_failure(ctx, self.name, started, status, data, err)]`.
    - On 200, validate shape with `validate_one` or `validate_list`, then route-specific invariants.
-   - When inspecting nested value objects (`qty`, `volume`, `open_interest`, `funding`, `rate`), read the typed fields (`row["qty"]["native"]`, `row["funding"]["kind"]`); the v3 wire format never exposes them flat.
+   - When inspecting nested value objects (`qty`, `volume`, `open_interest`, `funding`, `rate`), read the typed fields (`row["qty"]["native"]`, `row["funding"]["kind"]`); the schema-3 wire format never exposes them flat.
    - Build the success result with `self.result(ctx, self.name, started, status="pass", error_type=ErrorType.OK, message=..., evidence=...)`.
 5. Register it in `probes/__init__.py`: append to `market_probes()` for per-market probes, or to `exchange_probes()` for top-of-exchange ones (rare, currently `ErrorPathProbe`).
 6. If you added a new route the adapters expose, also update `CapabilitiesConsistencyProbe`'s route list so drift is caught for it.

@@ -171,7 +171,7 @@ t.volume_24h        # 12345.67        (native)
 t.volume_24h_usd    # 890123456.78
 t.volume_24h_unit   # "base"
 t["price"]          # key access works too; it is a dict
-t.timestamp         # Timestamp('2024-04-11 15:00:00')   (UTC, tz-naive)
+t.timestamp         # 1781823215000   (unix milliseconds)
 t.raw               # the original nested wire dict, untouched
 
 rows = [client.get_ticker("binance", "linear", s) for s in symbols]
@@ -289,7 +289,7 @@ print(result.report())
     FOOUSDT   BadRequest: ...
 ```
 
-A symbol is `degraded` when its response raised a `RouterDataWarning`, `failed` when the request raised, `ok` otherwise. There is a `*_many` for every series route (`candles_many`, `trades_many`, `agg_trades_many`, `funding_rate_many`, `open_interest_many`, `liquidations_many`, `long_short_ratio_many`). `fetch_multi_candles` remains as a deprecated alias for `candles_many` that returns the plain `{symbol: DataFrame}` dict.
+A symbol is `degraded` when the result carries warnings (in `df.attrs["warnings"]`), `failed` when the request raised, `ok` otherwise. There is a `*_many` for every series route (`candles_many`, `trades_many`, `agg_trades_many`, `funding_rate_many`, `open_interest_many`, `liquidations_many`, `long_short_ratio_many`). `fetch_multi_candles` remains as a deprecated alias for `candles_many` that returns the plain `{symbol: DataFrame}` dict.
 
 <br>
 <br>
@@ -383,7 +383,7 @@ for msg in client.stream("binance", "spot", "ticker", "BTCUSDT"):
     print(msg["symbol"], msg["price"])
 ```
 
-Stream messages are the raw wire dicts (the same shapes as the REST response bodies), not `Row` objects. Pass `reconnect=False` to have the iterator raise `websockets.ConnectionClosed` on a drop instead. `subscribe` is the same without reconnect. One subscription per connection: to change channel or symbol, leave the loop and start a new one. On the async client these are `async for`.
+Stream messages are the raw wire dicts (the same shapes as the REST response bodies), not `Row` objects; to get the flat Row shape on a ticker, book_ticker, or mark_price message, pass it through the matching builder, for example `from exchange_router_client.rows import ticker_row; ticker_row(msg)`. Pass `reconnect=False` to have the iterator raise `websockets.ConnectionClosed` on a drop instead. `subscribe` is the same without reconnect. One subscription per connection: to change channel or symbol, leave the loop and start a new one. On the async client these are `async for`.
 
 <br>
 <br>
@@ -399,7 +399,7 @@ The router exposes routing-facing symbols: the exchange-native symbol with any c
 
 Signatures are for the sync client. The async client is identical with `await`, and `markets()`, `stream()`, and `subscribe()` become `async`.
 
-**Discovery.** `get_status()`, `get_version()`, `get_exchanges()`, `get_market_types(exchange)`, `get_capabilities(exchange)`, `get_markets(exchange, market_type)`.
+**Discovery.** `get_status()`, `get_version()`, `get_exchanges()`, `get_market_types(exchange)`, `get_capabilities(exchange)`, `get_markets(exchange, market_type)`. `get_version()` returns a version string; the others return `dict` or `list`.
 
 **Snapshots (return `Row`).** `get_ticker(exchange, market_type, symbol)`, `get_book_ticker(...)`, `get_mark_price(...)`, `get_symbol_info(exchange, market_type, symbol)`.
 
