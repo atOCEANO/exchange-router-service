@@ -117,7 +117,7 @@ Every endpoint that accepts a `start` query parameter (candles, agg_trades, fund
 The natural pagination loop for "load older" is therefore: pass the oldest timestamp you already have as the new `start`, request the next page, prepend to your view.
 
 <div align="center">
-  <img src="imgs/204650.png" alt="Backward-walking pagination" width="30%" />
+  <img src="imgs/204650.png" alt="Backward-walking pagination" width="80%" />
   <p style="margin: 0;"><i>Each call's start anchor is the prior call's oldest record minus one; the response is always sorted oldest-first regardless of which call</i></p>
 </div>
 

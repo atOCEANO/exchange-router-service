@@ -94,17 +94,25 @@ The base class gives every probe two helpers so probes don't repeat their identi
 
 Probes run against every advertised route. Each probe carries the capability fields that gate it.
 
+<br>
+
 ### Snapshot routes
 
 `ticker`, `book_ticker`, `mark_price`. Pydantic shape, freshness (`now - timestamp < SNAPSHOT_FRESHNESS_MS`), and route-specific invariants: ticker `low_24h <= price <= high_24h`, book `bid <= ask` with positive sizes, mark price positive. The per-route check helpers read the **nested value objects** (`volume_24h.native`, `bid_qty.native`, `ask_qty.native`) and dereference `funding.per_cycle` when checking mark price.
+
+<br>
 
 ### Orderbook
 
 Probed at every depth in `caps.depths`, or `[1, 20, max_depth]` when no discrete list is declared. Each level: bids strictly descending, asks strictly ascending, top-of-book not crossed, no zero or negative price or qty, `len <= depth`. Failure evidence carries the offending pair (`{"side": "bids", "idx": 5, "prev": 30001.5, "this": 30001.7}`).
 
+<br>
+
 ### Trades
 
 Probed at `[1, min(100, max_limit), max_limit]`. Asserts ascending timestamps (router contract), unique `id` values, every `side in {"buy","sell"}`, `len <= limit`.
+
+<br>
 
 ### Paginated routes
 
@@ -116,6 +124,8 @@ Probed at `[1, min(100, max_limit), max_limit]`. Asserts ascending timestamps (r
 - `before=1h_ago`: last record at or before the anchor. Skipped if `paginated: False`.
 - `before=24h_ago`: same check at a deeper anchor. Skipped if `paginated: False`, and additionally skipped when `period_ms > 12h` (24h does not give enough room to cover one period).
 - `start=future`: `start = now + 1h`, expected empty (returning records is a WARN).
+
+<br>
 
 ### WebSocket
 
@@ -130,21 +140,31 @@ Holds the connection for `WS_TEST_DURATION` (default 180s) and validates **every
 
 Below threshold: WARN. Zero frames with threshold > 0: FAIL with error type `EMPTY`. Zero frames with threshold = 0: PASS with the message noting the window was idle but the connection succeeded. Any malformed frame: FAIL with the offending payload preserved in evidence.
 
+<br>
+
 ### Capabilities drift
 
 For every route advertised as `rest: False`, calls the route and asserts the service returns non-200 (501 preferred). For `orderbook`, requests `depth = max_depth + 1` and asserts the response either errors or clamps. Drift findings appear under their own report section and are hard FAILs.
+
+<br>
 
 ### Cross-route consistency
 
 WARN-only. Asserts `|ticker.price - (book.bid + book.ask)/2| / ticker.price < 0.75%`, and on linear `|mark_price - ticker.price| < 1%`. Live-market jitter never produces FAILs here.
 
+<br>
+
 ### Symbol resolution
 
 SPOT-only. Hits a known canonical symbol per exchange (a `BTC`-quoted pair where the venue uses modern base codes, an `XBT`-quoted pair where the venue keeps legacy codes) and asserts the response symbol matches. Implicitly validates each adapter's spot-symbol resolution path.
 
+<br>
+
 ### Negative paths
 
 Runs first. Unknown exchange (expects 404), bad market type (expects 400/422), bad symbol (expects 400/404).
+
+<br>
 
 ### /markets and /markets/{symbol}
 
@@ -165,6 +185,8 @@ MIN_REST_INTERVAL_MS                default 250   minimum spacing between REST c
 ```
 
 REST and WS probes for the same exchange run in parallel against a shared service (WS holds 180s windows; serializing them after REST roughly doubles wall time). Use `--parallel 1` (or set `MAX_CONCURRENT_EXCHANGES=1`) for serial debugging.
+
+<br>
 
 ### Why the auditor throttles itself (`MIN_REST_INTERVAL_MS`)
 

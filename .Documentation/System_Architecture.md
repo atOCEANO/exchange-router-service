@@ -49,7 +49,7 @@ The FastAPI `lifespan` handler in `src/main.py` runs in three phases when the se
 3. **Yield.** The service is now serving. Shutdown reverses this: stream-manager teardown first, then `adapter.shutdown()` per adapter to close HTTP clients and WS connections.
 
 <div align="center">
-  <img src="imgs/204648.png" alt="Startup lifecycle with background warm" width="80%" />
+  <img src="imgs/204648.png" alt="Startup lifecycle with background warm" width="40%" />
   <p style="margin: 0;"><i>Each adapter declares its warm steps in `_warm()`; the base class spawns the chain in a background task and returns immediately, so the router accepts traffic without waiting</i></p>
 </div>
 
@@ -61,7 +61,7 @@ The FastAPI `lifespan` handler in `src/main.py` runs in three phases when the se
 Every REST request follows the same path:
 
 <div align="center">
-  <img src="imgs/204646.png" alt="REST request lifecycle" width="80%" />
+  <img src="imgs/204646.png" alt="REST request lifecycle" width="40%" />
   <p style="margin: 0;"><i>REST lifecycle: route validation, adapter dispatch, retry-aware upstream call, Pydantic normalization, JSON response</i></p>
 </div>
 
@@ -79,7 +79,7 @@ WebSocket streams do not follow the same path as REST. The `StreamManager` in `s
 When a client subscribes to a `(channel, symbol)` tuple on an exchange, the manager builds a key of the form `{exchange}:{market_type}:{channel}:{symbol}` and checks whether an upstream task already exists for it.
 
 <div align="center">
-  <img src="imgs/204647.png" alt="WebSocket fan-out lifecycle" width="80%" />
+  <img src="imgs/204647.png" alt="WebSocket fan-out lifecycle" width="85%" />
   <p style="margin: 0;"><i>One upstream WebSocket per (channel, symbol) tuple, fanned out to every attached client; cancelled when the last subscriber leaves</i></p>
 </div>
 
@@ -97,13 +97,13 @@ This is also why re-subscribing on the same connection is not supported. Each co
 
 ## Rate Limiting
 
-State machine lives here; user-facing behaviour and per-exchange specifics live in [Exchange Notes](Exchange_Notes.md#rate-limit-and-ban-protection); implementation patterns and header names live in [Contributor Guide](Contributor_Guide.md#rate-limit-headers-and-proactive-backoff).
+The backoff and fail-fast flow lives here; user-facing behaviour and per-exchange specifics live in [Exchange Notes](Exchange_Notes.md#rate-limit-and-ban-protection); implementation patterns and header names live in [Contributor Guide](Contributor_Guide.md#rate-limit-headers-and-proactive-backoff).
 
 Each adapter holds a shared `_backoff_until` timestamp guarded by an `asyncio.Lock` (Binance keys it per upstream host, since api, fapi, and dapi carry independent weight buckets). Requests run in parallel by default, but every request consults the timestamp before issuing and sleeps until it clears if a backoff window is active. The lock only protects writes to the timestamp; reads are racy but harmless because the worst case is one extra request slipping through the boundary of a window. When the remaining backoff is large, some adapters fail fast with an `UpstreamUnavailableError` rather than blocking the caller: Bybit and KuCoin fail at 30s, OKX at 60s. Binance sleeps through the backoff and retries, using the upstream's `Retry-After` header (or 5s default) for rate-limit waits with up to 3 retries; Kraken uses exponential backoff with full jitter capped at 60s per attempt, up to 8 retries on Spot REST and 5 on Futures, then fails with `UpstreamUnavailableError`. Per-adapter specifics live in [Exchange Notes](Exchange_Notes.md#rate-limit-and-ban-protection).
 
 <div align="center">
-  <img src="imgs/204651.png" alt="Rate-limit state machine" width="80%" />
-  <p style="margin: 0;"><i>HEALTHY → BACKOFF (transient wait under the fail-fast threshold) → FAIL_FAST (over the threshold, request rejected with UpstreamUnavailableError → HTTP 503 + Retry-After)</i></p>
+  <img src="imgs/204651.png" alt="Rate-limit and ban avoidance" width="40%" />
+  <p style="margin: 0;"><i>The per-request path: wait out any active host backoff, throttle proactively when the used-weight header nears the budget, honor Retry-After on 429 or 418, and fail fast with 503 plus Retry-After once retries are spent</i></p>
 </div>
 
 <br>

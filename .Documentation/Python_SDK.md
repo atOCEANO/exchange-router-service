@@ -24,7 +24,7 @@
 
 ## Python SDK
 
-The SDK (`exchange-router-client` 4.0) is a translation layer over the router's REST and WebSocket interfaces. It is synchronous by default: methods return their data directly, with no `await`. The sync client runs the async machinery on a private background event loop, so the same code works in a plain script and in a Jupyter cell without `asyncio.run` or top-level `await`. An `AsyncExchangeRouterClient` with the same surface is available when you want concurrency.
+The SDK (`exchange-router-client`) is a translation layer over the router's REST and WebSocket interfaces. It is synchronous by default: methods return their data directly, with no `await`. The sync client runs the async machinery on a private background event loop, so the same code works in a plain script and in a Jupyter cell without `asyncio.run` or top-level `await`. An `AsyncExchangeRouterClient` with the same surface is available when you want concurrency.
 
 The return surface follows one rule, so you never have to remember what a call hands back:
 
