@@ -376,7 +376,9 @@ class KucoinAdapter(BaseExchange):
             "1d":  "1day",
             "1w":  "1week",
         }
-        return mapping.get(interval, interval)
+        if interval not in mapping:
+            raise ValueError(f"KuCoin does not support interval {interval}")
+        return mapping[interval]
 
 
     def _map_futures_granularity(self, interval: str) -> int:
@@ -393,7 +395,9 @@ class KucoinAdapter(BaseExchange):
             "1d":  1440,
             "1w":  10080,
         }
-        return mapping.get(interval, 60)
+        if interval not in mapping:
+            raise ValueError(f"KuCoin does not support interval {interval}")
+        return mapping[interval]
 
 
     def _map_oi_interval(self, period: str) -> str:
@@ -405,7 +409,9 @@ class KucoinAdapter(BaseExchange):
             "4h":  "4hour",
             "1d":  "1day",
         }
-        return mapping.get(period, period)
+        if period not in mapping:
+            raise ValueError(f"KuCoin does not support interval {period}")
+        return mapping[period]
 
 
     def _interval_to_ms(self, interval: str) -> int:

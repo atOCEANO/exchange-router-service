@@ -399,7 +399,9 @@ class KrakenAdapter(BaseExchange):
             "1d": 1440,
             "1w": 10080,
         }
-        return mapping.get(interval, 60)
+        if interval not in mapping:
+            raise ValueError(f"Kraken does not support interval {interval}")
+        return mapping[interval]
 
 
     def _map_analytics_interval(self, interval: str) -> int:
@@ -413,7 +415,9 @@ class KrakenAdapter(BaseExchange):
             "12h": 43200,
             "1d": 86400,
         }
-        return mapping.get(interval, 3600)
+        if interval not in mapping:
+            raise ValueError(f"Kraken does not support interval {interval}")
+        return mapping[interval]
 
 
     def _interval_to_ms(self, interval: str) -> int:
@@ -1055,7 +1059,9 @@ class KrakenAdapter(BaseExchange):
                 "1d": 86400,
                 "1w": 604800,
             }
-            interval_secs = interval_secs_map.get(interval, 3600)
+            if interval not in interval_secs_map:
+                raise ValueError(f"Kraken does not support interval {interval}")
+            interval_secs = interval_secs_map[interval]
             now_secs = int(time.time())
             anchor_secs = int(start_time / 1000) if start_time else now_secs
             from_ts = anchor_secs - limit * interval_secs
