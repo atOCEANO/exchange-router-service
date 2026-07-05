@@ -1400,6 +1400,7 @@ class OkxAdapter(BaseExchange):
 
         bids: Dict[float, float] = {}
         asks: Dict[float, float] = {}
+        last_seq: Optional[int] = None
 
         async for msg in self._ws_connect([{"channel": channel, "instId": api_symbol}]):
             action = msg.get("action")
@@ -1407,6 +1408,12 @@ class OkxAdapter(BaseExchange):
                 if channel != "books" or action != "update":
                     bids.clear()
                     asks.clear()
+                    last_seq = b.get("seqId")
+                else:
+                    prev = b.get("prevSeqId")
+                    if last_seq is not None and prev is not None and prev != last_seq:
+                        logger.warning(f"OKX orderbook {api_symbol} sequence gap: prevSeqId={prev} != last seqId={last_seq}")
+                    last_seq = b.get("seqId")
                 for entry in b.get("bids", []):
                     p, q = float(entry[0]), float(entry[1])
                     if q == 0:
