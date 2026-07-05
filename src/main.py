@@ -284,11 +284,15 @@ async def get_open_interest(exchange: str, market_type: MarketType, symbol: str,
         logging.exception(f"OI candle-join: candle fetch failed for {exchange}/{market_type.value}/{symbol}")
         return oi_rows
 
-    close_by_ts = {c.timestamp: c.close for c in candles}
+    if len(candles) < 2:
+        return oi_rows
+
+    period_ms         = candles[1].timestamp - candles[0].timestamp
+    close_by_close_ts = {c.timestamp + period_ms: c.close for c in candles[:-1]}
 
     joined = []
     for oi_row in oi_rows:
-        matching_close = close_by_ts.get(oi_row.timestamp)
+        matching_close = close_by_close_ts.get(oi_row.timestamp)
         if matching_close is None:
             joined.append(oi_row)
             continue
