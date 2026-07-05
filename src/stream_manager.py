@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import uuid
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 from fastapi import WebSocket
 
 
@@ -10,6 +10,7 @@ class StreamManager:
     def __init__(self):
         self.active_streams: Dict[str, Dict[uuid.UUID, WebSocket]] = {}
         self.upstream_tasks: Dict[str, asyncio.Task] = {}
+        self._closing: Set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
 
 
@@ -49,6 +50,21 @@ class StreamManager:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        if self._closing:
+            await asyncio.gather(*list(self._closing), return_exceptions=True)
+
+
+    async def _close_client(self, client: WebSocket, reason: str) -> None:
+        try:
+            await asyncio.wait_for(client.close(code=1011, reason=reason), timeout=5.0)
+        except Exception:
+            pass
+
+
+    def _spawn_close(self, client: WebSocket, reason: str) -> None:
+        task = asyncio.create_task(self._close_client(client, reason))
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
 
 
     async def _upstream_handler(self, key, adapter, market_type, channel, symbol):
@@ -73,17 +89,22 @@ class StreamManager:
                     *[asyncio.wait_for(client.send_text(data), timeout=5.0) for _, client in client_items],
                     return_exceptions=True,
                 )
-                dead = [cid for (cid, _), res in zip(client_items, results) if isinstance(res, BaseException)]
-                if dead:
+                dead_items = [(cid, client) for (cid, client), res in zip(client_items, results) if isinstance(res, BaseException)]
+                if dead_items:
+                    emptied = False
+                    for _, client in dead_items:
+                        self._spawn_close(client, "Send timeout")
                     async with self._lock:
                         current = self.active_streams.get(key)
                         if current is not None:
-                            for cid in dead:
+                            for cid, _ in dead_items:
                                 current.pop(cid, None)
                             if not current:
                                 self.active_streams.pop(key, None)
                                 self.upstream_tasks.pop(key, None)
-                                break
+                                emptied = True
+                    if emptied:
+                        break
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -96,7 +117,7 @@ class StreamManager:
                     bucket = self.active_streams.pop(key, None)
                     if bucket:
                         for client in bucket.values():
-                            close_tasks.append(asyncio.create_task(client.close(code=1011, reason="Upstream disconnected")))
+                            close_tasks.append(asyncio.create_task(self._close_client(client, "Upstream disconnected")))
             for t in close_tasks:
                 try:
                     await t
