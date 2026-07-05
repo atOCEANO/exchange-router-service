@@ -12,6 +12,7 @@ from . import rows
 from ._warnings import emit
 from .batch import BatchResult
 from .errors import BadRequest, NotSupported, RouterError, RouterUnreachable, error_for_status
+from ._version import __version__
 
 
 MAX_SLEEP_S = 60.0
@@ -61,7 +62,7 @@ class AsyncCore:
         if self._http is None:
             self._http = httpx.AsyncClient(
                 timeout = self.timeout,
-                headers = {"User-Agent": "exchange-router-client/4.0.1"},
+                headers = {"User-Agent": f"exchange-router-client/{__version__}"},
             )
 
         return self._http

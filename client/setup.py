@@ -1,8 +1,16 @@
+import re
+from pathlib import Path
+
 from setuptools import setup, find_packages
+
+version = re.search(
+    r'__version__\s*=\s*"([^"]+)"',
+    (Path(__file__).parent / "exchange_router_client" / "_version.py").read_text(),
+).group(1)
 
 setup(
     name="exchange-router-client",
-    version="4.0.1",
+    version=version,
     description="Client SDK for the Exchange Router Service",
     author="OCEANO",
     url="https://github.com/atOCEANO/exchange-router-service",

@@ -1,3 +1,4 @@
+from ._version import __version__
 from .client import ExchangeRouterClient
 from .async_client import AsyncExchangeRouterClient
 from .batch import BatchResult
@@ -16,6 +17,7 @@ from .errors import (
 )
 
 __all__ = [
+    "__version__",
     "ExchangeRouterClient",
     "AsyncExchangeRouterClient",
     "BatchResult",
