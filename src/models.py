@@ -321,9 +321,9 @@ class MarkPrice(BaseModel):
     @model_validator(mode="after")
     def _funding_valid_until_after_timestamp(self) -> "MarkPrice":
         if self.funding is not None and self.funding.kind == "discrete":
-            if self.funding.valid_until_ts <= self.timestamp:
+            if self.funding.valid_until_ts < self.timestamp:
                 raise ValueError(
-                    f"discrete funding.valid_until_ts ({self.funding.valid_until_ts}) must be > timestamp ({self.timestamp})"
+                    f"discrete funding.valid_until_ts ({self.funding.valid_until_ts}) must be >= timestamp ({self.timestamp})"
                 )
         return self
 
