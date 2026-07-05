@@ -11,4 +11,3 @@ Thumbs.db
 *.log
 tools/auditor/runs/*
 !tools/auditor/runs/.gitkeep
-nul
