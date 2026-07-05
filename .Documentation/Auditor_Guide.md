@@ -123,7 +123,7 @@ Probed at `[1, min(100, max_limit), max_limit]`. Asserts ascending timestamps (r
 - `limit=5`: must return at most 5; > 5 is a hard FAIL.
 - `before=1h_ago`: last record at or before the anchor. Skipped if `paginated: False`.
 - `before=24h_ago`: same check at a deeper anchor. Skipped if `paginated: False`, and additionally skipped when `period_ms > 12h` (24h does not give enough room to cover one period).
-- `start=future`: `start = now + 1h`, expected empty (returning records is a WARN).
+- `start=future`: `start = now + 1h`, must return the newest available records (empty is a FAIL); a record dated more than one period into the future is a LOGIC FAIL.
 
 <br>
 

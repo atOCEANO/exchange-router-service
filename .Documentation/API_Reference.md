@@ -58,7 +58,7 @@ Every quantitative record (Trade, Candle, OpenInterest, etc.) carries nested val
 | :--- | :--- | :--- | :--- |
 | `GET` | `/` | Service introspection: version, schema_version, and every registered exchange with its supported market types. | None |
 | `GET` | `/status` | Service health check (thin slice of `/`). | None |
-| `GET` | `/version` | Service version. | None |
+| `GET` | `/version` | Service version and schema_version. | None |
 | `GET` | `/exchanges` | Lists all active adapters. | None |
 | `GET` | `/{exchange}` | Exchange overview: connectivity, supported market types, per-market capabilities, and `symbol_count`. | None |
 | `GET` | `/{exchange}/status` | Adapter health string. Returns `{"status": "online", "exchange": name}`; does not poll the upstream exchange. | None |

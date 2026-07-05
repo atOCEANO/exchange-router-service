@@ -301,7 +301,7 @@ KuCoin's open-interest history endpoint accepts `5min`, `15min`, `30min`, `1hour
 
 ### Mark price funding fields
 
-The `/api/v1/mark-price/{symbol}/current` endpoint only returns mark and index. The router fetches `/api/v1/contracts/{symbol}` as a side request to populate the nested `MarkPrice.funding` block (with `kind: "discrete"`, `per_cycle`, `cycle_ms` from `fundingRateGranularity`, and `valid_until_ts` derived from `nextFundingRateTime`). If that side request fails, `MarkPrice.funding` is `null` rather than carrying a partial or zero-defaulted block.
+The `/api/v1/mark-price/{symbol}/current` endpoint only returns mark and index. The router fetches `/api/v1/contracts/{symbol}` as a side request to populate the nested `MarkPrice.funding` block (with `kind: "discrete"`, `per_cycle`, `cycle_ms` from `fundingRateGranularity`, and `valid_until_ts` derived from `nextFundingRateTime`). If that side request fails, the whole `mark_price` request fails rather than returning a row with a partial or null-defaulted funding block; a contract that genuinely reports no funding still yields `null`.
 
 <br>
 
