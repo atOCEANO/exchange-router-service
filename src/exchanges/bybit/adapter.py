@@ -6,7 +6,7 @@ import websockets
 import logging
 from typing import List, AsyncGenerator, Dict, Any, Optional, Callable
 from src.exchanges.base import (
-    BaseExchange, StreamHub, UpstreamUnavailableError,
+    BaseExchange, StreamHub, UpstreamUnavailableError, BadSymbol,
     build_qty_value, build_volume_value, build_oi_value,
     build_funding_current, build_funding_historical, build_funding_convention,
 )
@@ -518,7 +518,7 @@ class BybitAdapter(BaseExchange):
 
         data = await self._make_request("GET", "/v5/market/tickers", {"category": cat, "symbol": api_symbol})
         if not data["list"]:
-            raise ValueError(f"Symbol {api_symbol} not found")
+            raise BadSymbol(f"Symbol {api_symbol} not found")
         t = data["list"][0]
 
         model_sym  = self.get_model_symbol(t["symbol"], market_type)
@@ -551,6 +551,8 @@ class BybitAdapter(BaseExchange):
         api_symbol = self.get_api_symbol(symbol, market_type)
 
         data = await self._make_request("GET", "/v5/market/tickers", {"category": cat, "symbol": api_symbol})
+        if not data["list"]:
+            raise BadSymbol(f"Symbol {api_symbol} not found")
         t = data["list"][0]
 
         model_sym     = self.get_model_symbol(t["symbol"], market_type)
@@ -710,6 +712,8 @@ class BybitAdapter(BaseExchange):
         api_symbol = self.get_api_symbol(symbol, market_type)
 
         data = await self._make_request("GET", "/v5/market/tickers", {"category": cat, "symbol": api_symbol})
+        if not data["list"]:
+            raise BadSymbol(f"Symbol {api_symbol} not found")
         t = data["list"][0]
 
         model_sym = self.get_model_symbol(t["symbol"], market_type)
@@ -857,6 +861,13 @@ class BybitAdapter(BaseExchange):
         return await self._paginate_backwards(fetch_batch_backward, limit, per_req)
 
 
+    @staticmethod
+    def _precision(value: str) -> int:
+        if not value or "." not in value:
+            return 0
+        return len(value.split(".")[1].rstrip("0"))
+
+
     async def _fetch_exchange_info(self, market_type: MarketType) -> List[SymbolInfo]:
         cat = self._get_category(market_type)
         params: dict = {"category": cat, "limit": 1000}
@@ -865,10 +876,19 @@ class BybitAdapter(BaseExchange):
         elif market_type == MarketType.INVERSE:
             params["contractType"] = "InversePerpetual"
 
-        data = await self._make_request("GET", "/v5/market/instruments-info", params)
+        instruments = []
+        cursor      = None
+        while True:
+            if cursor:
+                params["cursor"] = cursor
+            data = await self._make_request("GET", "/v5/market/instruments-info", params)
+            instruments.extend(data["list"])
+            cursor = data.get("nextPageCursor")
+            if not cursor:
+                break
 
         results = []
-        for s in data["list"]:
+        for s in instruments:
             if s["status"] != "Trading":
                 continue
             if market_type == MarketType.LINEAR and s.get("contractType") != "LinearPerpetual":
@@ -915,8 +935,8 @@ class BybitAdapter(BaseExchange):
                 native_symbol      = s["symbol"],
                 base_asset         = s["baseCoin"],
                 quote_asset        = s["quoteCoin"],
-                price_precision    = int(len(s.get("priceFilter", {}).get("tickSize", "0.01").split(".")[-1])),
-                quantity_precision = int(len(s.get("lotSizeFilter", {}).get("qtyStep", "0.001").split(".")[-1])),
+                price_precision    = self._precision(s.get("priceFilter", {}).get("tickSize", "0.01")),
+                quantity_precision = self._precision(s.get("lotSizeFilter", {}).get("qtyStep", "0.001")),
                 min_qty            = min_qty,
                 max_qty            = max_qty,
                 min_notional       = min_notional,
