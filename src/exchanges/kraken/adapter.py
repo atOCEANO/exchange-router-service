@@ -1341,7 +1341,16 @@ class KrakenAdapter(BaseExchange):
                             break
 
                 qty_unit = "contract" if market_type == MarketType.INVERSE else "base"
-                contract_size: Optional[float] = 1.0 if market_type == MarketType.INVERSE else None
+                contract_size: Optional[float] = None
+                if market_type == MarketType.INVERSE:
+                    cs_raw = v.get("contractSize")
+                    if cs_raw is not None:
+                        try:
+                            contract_size = abs(float(cs_raw))
+                        except (TypeError, ValueError):
+                            contract_size = None
+                    if contract_size is None:
+                        contract_size = 1.0
 
                 results.append(SymbolInfo(
                     symbol             = self.get_model_symbol(v["symbol"], market_type),
