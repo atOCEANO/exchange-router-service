@@ -59,7 +59,10 @@ class AsyncCore:
 
     def _ensure_http(self) -> httpx.AsyncClient:
         if self._http is None:
-            self._http = httpx.AsyncClient(timeout=self.timeout)
+            self._http = httpx.AsyncClient(
+                timeout = self.timeout,
+                headers = {"User-Agent": "exchange-router-client/4.0.1"},
+            )
 
         return self._http
 
@@ -88,14 +91,14 @@ class AsyncCore:
                     raise error_for_status(status, detail, retry_after)
 
                 attempt += 1
-                if attempt >= self.max_retries:
+                if attempt > self.max_retries:
                     raise error_for_status(status, detail, retry_after)
 
                 await asyncio.sleep(_sleep_for(attempt, retry_after))
 
             except httpx.TransportError as e:
                 attempt += 1
-                if attempt >= self.max_retries:
+                if attempt > self.max_retries:
                     raise RouterUnreachable(f"{type(e).__name__}: {e}")
 
                 await asyncio.sleep(_sleep_for(attempt, None))
@@ -340,7 +343,7 @@ class AsyncCore:
                 async for message in self.subscribe(exchange, market_type, channel, symbol):
                     yield message
 
-            except websockets.ConnectionClosed:
+            except (websockets.ConnectionClosed, websockets.WebSocketException, OSError):
                 if not reconnect:
                     raise
 

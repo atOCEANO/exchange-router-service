@@ -32,7 +32,7 @@ def _base_attrs(ctx: Dict[str, Any]) -> Dict[str, Any]:
 
 def _indexed(rows: List[Dict]) -> pd.DataFrame:
     df = pd.json_normalize(rows, sep="_")
-    df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
+    df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     df = df.set_index("datetime").sort_index()
 
     return df

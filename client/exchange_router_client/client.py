@@ -205,11 +205,6 @@ class ExchangeRouterClient:
         return self._loop.run(self._core.fetch_many("long_short_ratio", exchange, market_type, symbols, verbose=verbose, max_concurrent=max_concurrent, period=period, limit=limit, start=start))
 
 
-    def fetch_multi_candles(self, exchange: str, market_type: str, symbols: List[str], interval: str = "1h", limit: int = 1000, start: Optional[int] = None, max_concurrent: int = 4) -> Dict[str, pd.DataFrame]:
-        result = self.candles_many(exchange, market_type, symbols, interval=interval, limit=limit, start=start, max_concurrent=max_concurrent)
-        return result.data()
-
-
     def stream(self, exchange: str, market_type: str, channel: str, symbol: str, reconnect: bool = True):
         return self._loop.iterate(self._core.stream(exchange, market_type, channel, symbol, reconnect))
 
