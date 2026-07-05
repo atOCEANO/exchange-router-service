@@ -1410,7 +1410,7 @@ class KrakenAdapter(BaseExchange):
                             market_type          = market_type,
                             quote                = quote,
                             price                = last,
-                            open_24h             = 0.0,
+                            open_24h             = last - float(item.get("change", 0)),
                             high_24h             = float(item.get("high", 0)),
                             low_24h              = float(item.get("low", 0)),
                             volume_24h           = build_volume_value(
