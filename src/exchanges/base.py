@@ -16,7 +16,19 @@ from src.models import (
 logger = logging.getLogger(__name__)
 
 
-class UpstreamUnavailableError(ValueError):
+class AdapterError(Exception):
+    pass
+
+
+class BadRequest(AdapterError):
+    pass
+
+
+class BadSymbol(BadRequest):
+    pass
+
+
+class UpstreamUnavailableError(AdapterError):
     def __init__(self, message: str, retry_after: Optional[float] = None):
         super().__init__(message)
         self.retry_after = retry_after

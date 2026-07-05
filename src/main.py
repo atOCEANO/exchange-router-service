@@ -4,10 +4,11 @@ import uuid
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import ValidationError
 from contextlib import asynccontextmanager
 from typing import Optional
 from src.exchanges import EXCHANGE_REGISTRY, get_adapter, shutdown_exchanges, startup_exchanges
-from src.exchanges.base import UpstreamUnavailableError, build_oi_value
+from src.exchanges.base import UpstreamUnavailableError, BadRequest, build_oi_value
 from src.models import MarketType
 from src.stream_manager import StreamManager
 from src.version import SCHEMA_VERSION, SERVICE_VERSION
@@ -61,11 +62,28 @@ async def value_error_exception_handler(_request: Request, exc: ValueError):
     )
 
 
+@app.exception_handler(BadRequest)
+async def bad_request_exception_handler(_request: Request, exc: BadRequest):
+    return JSONResponse(
+        status_code=400,
+        content={"error": "Invalid Request", "detail": str(exc)},
+    )
+
+
 @app.exception_handler(NotImplementedError)
 async def not_implemented_exception_handler(_request: Request, exc: NotImplementedError):
     return JSONResponse(
         status_code=501,
         content={"error": "Not Implemented", "detail": str(exc)},
+    )
+
+
+@app.exception_handler(ValidationError)
+async def validation_error_exception_handler(_request: Request, exc: ValidationError):
+    logging.exception("Upstream response failed validation")
+    return JSONResponse(
+        status_code=502,
+        content={"error": "Bad Upstream Response", "detail": str(exc)},
     )
 
 
