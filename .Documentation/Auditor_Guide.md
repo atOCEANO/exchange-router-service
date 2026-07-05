@@ -211,7 +211,7 @@ Every run writes a fresh folder under `tools/auditor/runs/<YYYY-MM-DD_HH-MM-SS>_
   - `ws_by_channel`: per-channel WS metrics (count, frames received p50/p95/max, time-to-first-frame p50/p95). Surfaces the meaningful WS measurements (throughput and warm-up time) instead of forcing them into a latency bucket.
 - `report.html`: human-friendly rendering. Each probe panel shows analytics by default; a `[analytics] [sample]` pill toggle reveals the raw sample on demand. Capability matrices and per-route URLs are clickable.
 
-The dated subdirs under `tools/auditor/runs/` are local-only; the directory itself is tracked via a `.gitkeep` so the auditor always has a stable target. The Docker compose mount `volumes: - .:/app` means runs from inside the container land on the host filesystem. The console renders a live progress bar during the run and a failure table at the end.
+The dated subdirs under `tools/auditor/runs/` are local-only; the directory itself is tracked via a `.gitkeep` so the auditor always has a stable target. The Docker compose mount `volumes: - ./tools/auditor/runs:/app/tools/auditor/runs` means runs from inside the container land on the host filesystem. The console renders a live progress bar during the run and a failure table at the end.
 
 <br>
 <br>

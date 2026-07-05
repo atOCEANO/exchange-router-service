@@ -483,9 +483,10 @@ No `quote` field; this metric is dimensionless. `account_scope` carries the upst
 | **400** | Bad Request | Invalid parameter, unsupported market type, or upstream rejection. |
 | **404** | Not Found | Exchange not registered. |
 | **422** | Unprocessable Entity | Path or query parameter failed validation (e.g. an unrecognised `market_type` value). |
-| **500** | Internal Error | Upstream connection failure after retries, or unhandled error. |
+| **500** | Internal Error | Unhandled server-side error. |
 | **501** | Not Implemented | Route not supported by the target adapter on this market type. |
-| **503** | Service Unavailable | Upstream rate-limit or ban window active. Carries a `Retry-After` header (seconds) when the adapter knows the wait. Retry later; the request itself was valid. |
+| **502** | Bad Upstream Response | Upstream answered but the body could not be normalized into the schema. |
+| **503** | Service Unavailable | Upstream rate-limit or ban window active, or the retry budget was exhausted. Carries a `Retry-After` header (seconds) when the adapter knows the wait. Retry later; the request itself was valid. |
 
 <br>
 
@@ -507,9 +508,10 @@ The router never masks upstream error detail. If the underlying exchange returns
 
 * **400** reached an adapter and was rejected. Usually an unknown symbol for this exchange or market type (Kraken spot uses legacy codes like `XBTUSDT`, not `BTCUSDT`; check `GET /{exchange}/{market_type}/markets` for the canonical list), or a parameter out of range (`limit` or `depth` below 1, or an `interval` / `period` the venue does not declare; check `GET /{exchange}/capabilities`).
 * **404** means the exchange name in the path is not registered: a typo, or an adapter that failed to load at startup (check the router's stdout for `Failed to load adapter`).
-* **500** usually means upstream HTTP retries were exhausted (5xx, connection error, timeout), or an adapter bug that escaped the request loop. A reproducible 500 is a bug report.
+* **500** means an adapter bug or an unexpected error escaped the request loop. A reproducible 500 is a bug report.
 * **501** means the route is not supported on this exchange and market, per the capability map: for example `funding_rate` or `mark_price` on spot, `liquidations` on KuCoin or Kraken, `long_short_ratio` on Bybit spot or any spot market.
-* **503** means the upstream is throttling or has banned the IP and the wait exceeds the adapter's fail-fast threshold (30s on Bybit and KuCoin, 60s on OKX, retry-budget exhaustion on Kraken). The request was valid; retry after the `Retry-After` window. Binance does not fail fast, so on Binance a long cooldown surfaces as a slow response instead.
+* **502** means the upstream answered but the body could not be normalized into the schema, usually a shape drift on the venue side. The `detail` carries the validation error.
+* **503** means the upstream is throttling or has banned the IP and the wait exceeds the adapter's fail-fast threshold (30s on Bybit and KuCoin, 60s on OKX), or the retry budget was exhausted on any adapter. The request was valid; retry after the `Retry-After` window. Binance and Kraken do not fail fast on an active cooldown; they sleep and retry, and surface `503` only once the retry budget is exhausted.
 
 <br>
 <br>

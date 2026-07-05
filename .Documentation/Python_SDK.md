@@ -2,7 +2,7 @@
 
 
 <div style="padding-top: 0px;">
-  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.9+-blue.svg" alt="Python 3.9+" /></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+" /></a>
   <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/FastAPI-0.123.0-05998b.svg?logo=fastapi&logoColor=white" alt="FastAPI" /></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
 </div>
@@ -56,7 +56,7 @@ cd client
 pip install -e .
 ```
 
-Requires Python 3.9+.
+Requires Python 3.10+.
 
 <br>
 <br>
@@ -114,7 +114,7 @@ The handle forwards to the flat `client.get_*` methods, which remain available f
 
 Series methods return a plain `pandas.DataFrame`. Nothing is wrapped, so `concat`, `merge`, `resample`, `to_parquet`, and pickling all work normally. The frame has:
 
-* a `DatetimeIndex` built from `timestamp` (Unix milliseconds, UTC, timezone-naive), sorted oldest-first, so `df.iloc[-1]` is the newest row,
+* a `DatetimeIndex` built from `timestamp` (Unix milliseconds, UTC, timezone-aware), sorted oldest-first, so `df.iloc[-1]` is the newest row,
 * short, lowercased, **flat** columns,
 * a **stable** column set: a route always returns the same columns, NaN where a value is absent (no column that appears or disappears with the data),
 * per-query constants in `df.attrs`, read right after the call,
@@ -289,7 +289,7 @@ print(result.report())
     FOOUSDT   BadRequest: ...
 ```
 
-A symbol is `degraded` when the result carries warnings (in `df.attrs["warnings"]`), `failed` when the request raised, `ok` otherwise. There is a `*_many` for every series route (`candles_many`, `trades_many`, `agg_trades_many`, `funding_rate_many`, `open_interest_many`, `liquidations_many`, `long_short_ratio_many`). `fetch_multi_candles` remains as a deprecated alias for `candles_many` that returns the plain `{symbol: DataFrame}` dict.
+A symbol is `degraded` when the result carries warnings (in `df.attrs["warnings"]`), `failed` when the request raised, `ok` otherwise. There is a `*_many` for every series route (`candles_many`, `trades_many`, `agg_trades_many`, `funding_rate_many`, `open_interest_many`, `liquidations_many`, `long_short_ratio_many`).
 
 <br>
 <br>
@@ -330,6 +330,7 @@ The client raises a small typed tree, so failures are programmable without parsi
 | `UpstreamUnavailable` | `503`, carries `.retry_after` |
 | `NotSupported` | the route is not exposed on this exchange and market, caught before the request, or a server `501` |
 | `RouterUnreachable` | transport failure, or retries exhausted |
+| `RouterError` | any other status the server returns (for example `500` or a `502` upstream-shape failure), carrying `.status` |
 
 ```python
 from exchange_router_client import NotSupported, UpstreamUnavailable

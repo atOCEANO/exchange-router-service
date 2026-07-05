@@ -2,7 +2,7 @@
 
 
 <div style="padding-top: 0px;">
-  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.9+-blue.svg" alt="Python 3.9+" /></a>
+  <a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+" /></a>
   <a href="https://fastapi.tiangolo.com/"><img src="https://img.shields.io/badge/FastAPI-0.123.0-05998b.svg?logo=fastapi&logoColor=white" alt="FastAPI" /></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
 </div>
@@ -294,7 +294,7 @@ The only knob exposed at deploy time is the host port:
 
 <br>
 
-This variable lives in `.env` and is consumed by `docker-compose.yml` in the `ports` mapping. There is no configuration file for adapters, upstream URLs, timeouts, or rate-limit thresholds. Those are defined in code, per adapter, and changing them means editing the adapter and rebuilding the container. This is intentional: the router ships as a single immutable image and behaves identically across deployments.
+This variable lives in `.env` and is consumed by `docker-compose.yml` in the `ports` mapping, which publishes the port on host loopback (`127.0.0.1`) only, so the router is reachable from the same machine but not from the LAN; front it with a reverse proxy for external access. There is no configuration file for adapters, upstream URLs, timeouts, or rate-limit thresholds. Those are defined in code, per adapter, and changing them means editing the adapter and rebuilding the container. This is intentional: the router ships as a single immutable image and behaves identically across deployments.
 
 <br>
 <br>

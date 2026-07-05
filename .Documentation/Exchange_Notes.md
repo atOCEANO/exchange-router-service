@@ -166,7 +166,7 @@ The router faithfully exposes whatever the upstream names the symbol. A consumer
 
 ### Long/short ratio account breakdown
 
-Kraken's upstream exposes only the `ratio` scalar; `long_account` and `short_account` come back `null`. Every other adapter populates both account fields (decimals summing to roughly 1.0) alongside `ratio`. Consumers needing the breakdown across all venues should branch on the presence of `long_account`, not on exchange name.
+Kraken and OKX expose only the `ratio` scalar; on both, `long_account` and `short_account` come back `null` and `account_scope` is `"opaque"`. The adapters that expose the account split populate both fields (decimals summing to roughly 1.0) alongside `ratio`. Consumers needing the breakdown across all venues should branch on the presence of `long_account`, not on exchange name.
 
 <br>
 <br>
@@ -249,7 +249,7 @@ The Kraken Futures `/instruments` endpoint returns `baseCurrency`/`quoteCurrency
 
 ### Spot `price_change_percent` is "since UTC midnight", not rolling 24h
 
-Kraken's spot ticker exposes `o` = "today's opening price" (UTC midnight) but no rolling 24h-ago open. The router fills `Ticker.open_24h` with that field and computes `price_change_percent` as `(price - o) / o * 100`. So during the early hours of the UTC day the change reads as a much smaller window than rolling-24h venues. Cross-exchange diffs around 00:00-04:00 UTC will show Kraken with a noticeably smaller `|price_change_percent|` than venues that use a true rolling-24h window. Fetching a 24h-ago candle to derive a true rolling change is one extra request per ticker call; the router does not pay that cost on every snapshot.
+Kraken's spot ticker exposes `o` = "today's opening price" (UTC midnight) but no rolling 24h-ago open. The router fills `Ticker.open_24h` with that field and computes `price_change_percent` as `(price - o) / o * 100`. So during the early hours of the UTC day the change reads as a much smaller window than rolling-24h venues. Cross-exchange diffs around 00:00-04:00 UTC will show Kraken with a noticeably smaller `|price_change_percent|` than venues that use a true rolling-24h window. Fetching a 24h-ago candle to derive a true rolling change is one extra request per ticker call; the router does not pay that cost on every snapshot. This applies to the REST snapshot only. The spot WebSocket ticker carries Kraken's rolling-24h `change`, so its `open_24h` and `price_change_percent` use the true 24h window; the two transports can therefore report a different `open_24h` for the same symbol during the early UTC hours.
 
 <br>
 
@@ -357,7 +357,7 @@ Retention is finite even within supported periods: roughly ~8 hours of 5m data, 
 
 OKX's long/short ratio endpoint accepts a currency (`ccy`) parameter, not an instrument id. The router extracts the base currency from the requested symbol (`BTCUSDT` becomes `BTC`). The returned ratio aggregates across all OKX contracts denominated in that currency, so `BTCUSDT` and `BTCUSD` queries return the same numbers.
 
-Supported periods are `5m, 1h, 1d` only. 5m data retains roughly the most recent two days; querying further back returns an empty list. The `ratio` field is the authoritative upstream value. `long_account = ratio / (ratio + 1)` and `short_account = 1 / (ratio + 1)` are derived under the assumption that the two halves sum to 1; treat them as convenience fields, not as separate upstream measurements.
+Supported periods are `5m, 1h, 1d` only. 5m data retains roughly the most recent two days; querying further back returns an empty list. The `ratio` field is the authoritative and only upstream value. `long_account` and `short_account` come back `null` with `account_scope="opaque"`, since OKX does not publish the account split; the router does not synthesize one from `ratio`.
 
 <br>
 

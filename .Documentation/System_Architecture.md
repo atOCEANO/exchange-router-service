@@ -116,9 +116,9 @@ The router normalizes failures into a small set of HTTP responses. It helps to s
 Adapters raise four exception types:
 
 * **`ValueError`** for bad input or upstream validation failures (unknown symbol, out-of-range limit, an interval or period not declared in the capability map, adapter-side parameter rejections). A global exception handler in `main.py` converts these into `400 Bad Request`, preserving the message in `detail`. The route layer itself raises `ValueError` for undeclared `interval` / `period` values before the adapter is called, validated against the capability map.
-* **`UpstreamUnavailableError`** (defined in `src/exchanges/base.py`, a `ValueError` subclass) when the upstream is throttling or has banned the IP: active backoff windows past the adapter's fail-fast threshold (30s on Bybit and KuCoin, 60s on OKX), Bybit 403 bans, and Kraken's exhausted retry budget. The handler in `main.py` converts these into `503 Service Unavailable` with a `Retry-After` header when the adapter knows the wait.
+* **`UpstreamUnavailableError`** (defined in `src/exchanges/base.py`, a subclass of `AdapterError`, not `ValueError`) when the upstream is throttling or has banned the IP: active backoff windows past the adapter's fail-fast threshold (30s on Bybit and KuCoin, 60s on OKX), Bybit 403 bans, an upstream 5xx that survives the retry budget, and any adapter's exhausted retry budget (message `"Max retries exceeded for {url}"`). The handler in `main.py` converts these into `503 Service Unavailable` with a `Retry-After` header when the adapter knows the wait.
 * **`NotImplementedError`** when the adapter does not implement a method for a given market type. The base class raises this by default, and the route layer catches it and returns `501 Not Implemented`.
-* **plain `Exception`** when retries on upstream HTTP failures (5xx, connection errors, timeouts) are exhausted in adapters that surface this as a bare exception. The message is `"Max retries exceeded for {url}"`. Not caught explicitly, so FastAPI's default handler returns `500 Internal Server Error`.
+* **`pydantic.ValidationError`** when an upstream response cannot be normalized into the schema. A `ValidationError` is not a `ValueError` in pydantic v2, and its own handler in `main.py` returns `502 Bad Upstream Response`. Any other uncaught exception falls through to a generic handler that returns `500 Internal Server Error`.
 
 The route layer adds three more responses that adapters never raise themselves:
 
@@ -128,7 +128,7 @@ The route layer adds three more responses that adapters never raise themselves:
 
 One more condition does not correspond to an exception type at all:
 
-* **Upstream rate limiting** (429 or 418, or proactive detection via response headers) causes the adapter to wait for the declared backoff window before retrying. The client request is delayed, not rejected. When the wait exceeds the adapter's fail-fast threshold (30s on Bybit and KuCoin, 60s on OKX), the adapter raises `UpstreamUnavailableError` instead, which falls under the second bullet above. Binance and Kraken do not implement a single fail-fast cutoff; they sleep and retry until the upstream clears or the retry budget exhausts (Kraken bounds total backoff at ~4 minutes, then raises `UpstreamUnavailableError`).
+* **Upstream rate limiting** (429 or 418, or proactive detection via response headers) causes the adapter to wait for the declared backoff window before retrying. The client request is delayed, not rejected. When the wait exceeds the adapter's fail-fast threshold (30s on Bybit and KuCoin, 60s on OKX), the adapter raises `UpstreamUnavailableError` instead, which falls under the second bullet above. Binance and Kraken do not implement a single fail-fast cutoff; they sleep and retry until the upstream clears or the retry budget exhausts, then raise `UpstreamUnavailableError` (Kraken bounds total backoff at ~4 minutes).
 
 The `detail` field in error responses always carries the underlying exception message, whether it came from the adapter or the upstream exchange. Nothing is rewritten or swallowed.
 
