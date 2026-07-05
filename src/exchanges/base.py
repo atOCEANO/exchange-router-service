@@ -209,6 +209,14 @@ class StreamHub:
             except (asyncio.CancelledError, Exception):
                 pass
 
+        ws       = self._ws
+        self._ws = None
+        if ws is not None:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
 
     async def _send_payloads(self, payloads: Iterable[Any]) -> None:
         ws = self._ws
@@ -260,6 +268,7 @@ class StreamHub:
 
         while not self._closed:
             ka_task: Optional[asyncio.Task] = None
+            ws = None
 
             try:
                 self._log.info("connecting upstream WS")
@@ -290,7 +299,14 @@ class StreamHub:
                         try:
                             q.put_nowait(msg)
                         except asyncio.QueueFull:
-                            pass
+                            try:
+                                q.get_nowait()
+                            except asyncio.QueueEmpty:
+                                pass
+                            try:
+                                q.put_nowait(msg)
+                            except asyncio.QueueFull:
+                                pass
 
             except asyncio.CancelledError:
                 break
@@ -301,6 +317,11 @@ class StreamHub:
                 self._ws = None
                 if ka_task is not None:
                     ka_task.cancel()
+                if ws is not None:
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
 
             if not self._closed:
                 await asyncio.sleep(reconnect_delay)
