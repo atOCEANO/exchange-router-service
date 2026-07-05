@@ -274,6 +274,27 @@ async def get_candles(exchange: str, market_type: MarketType, symbol: str, inter
     return await adapter.get_candles(market_type, symbol, interval, start, limit)
 
 
+_PERIOD_MS = {
+    "m": 60_000,
+    "h": 3_600_000,
+    "d": 86_400_000,
+    "w": 604_800_000,
+}
+
+
+def _period_to_ms(period: str) -> Optional[int]:
+    if not period or len(period) < 2:
+        return None
+    scale = _PERIOD_MS.get(period[-1])
+    if scale is None:
+        return None
+    try:
+        count = int(period[:-1])
+    except ValueError:
+        return None
+    return count * scale
+
+
 @app.get("/{exchange}/{market_type}/open_interest/{symbol}")
 async def get_open_interest(exchange: str, market_type: MarketType, symbol: str, period: str = Query("1h"), start: Optional[int] = None, limit: int = Query(30, ge=1)):
     adapter  = validate_request(exchange, market_type)
@@ -284,7 +305,7 @@ async def get_open_interest(exchange: str, market_type: MarketType, symbol: str,
         return oi_rows
 
     try:
-        candles = await adapter.get_candles(market_type, symbol, period, start, limit)
+        candles = await adapter.get_candles(market_type, symbol, period, start, limit + 1)
     except Exception:
         logging.exception(f"OI candle-join: candle fetch failed for {exchange}/{market_type.value}/{symbol}")
         return oi_rows
@@ -292,7 +313,9 @@ async def get_open_interest(exchange: str, market_type: MarketType, symbol: str,
     if len(candles) < 2:
         return oi_rows
 
-    period_ms         = candles[1].timestamp - candles[0].timestamp
+    period_ms = _period_to_ms(period)
+    if period_ms is None:
+        period_ms = candles[1].timestamp - candles[0].timestamp
     close_by_close_ts = {c.timestamp + period_ms: c.close for c in candles[:-1]}
 
     joined = []
