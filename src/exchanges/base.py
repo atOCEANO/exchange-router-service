@@ -209,14 +209,6 @@ class StreamHub:
             except (asyncio.CancelledError, Exception):
                 pass
 
-        ws       = self._ws
-        self._ws = None
-        if ws is not None:
-            try:
-                await ws.close()
-            except Exception:
-                pass
-
 
     async def _send_payloads(self, payloads: Iterable[Any]) -> None:
         ws = self._ws
