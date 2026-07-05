@@ -431,6 +431,17 @@ Every series and snapshot method also takes `verbose` to override the client def
 <br>
 <br>
 
+## Migrating from 4.x
+
+The wire schema is unchanged. Three client-side changes can break 4.x code:
+
+* **The DataFrame index is timezone-aware UTC now.** Comparing it against a naive `Timestamp` raises; localize your bound with `tz="UTC"`, or call `.tz_localize(None)` on the index.
+* **`fetch_multi_candles` was removed.** Use `candles_many`, which returns a `BatchResult`.
+* **Python 3.10 or newer is required.**
+
+<br>
+<br>
+
 ## Migrating from 3.x
 
 The wire schema is unchanged, so any code reading the raw response bodies (or stream messages) is unaffected. The client return shapes changed:
