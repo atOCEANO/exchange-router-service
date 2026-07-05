@@ -1020,28 +1020,45 @@ class BybitAdapter(BaseExchange):
         quote                = info.quote_asset if info else ""
         contract_size        = info.contract_size if info else None
 
+        bids: Dict[float, float] = {}
+        asks: Dict[float, float] = {}
+
         async for msg in self._ws_connect(market_type, [topic]):
-            d = msg["data"]
-            bids = d.get("b", [])
-            asks = d.get("a", [])
+            d = msg.get("data") or {}
+            if msg.get("type") == "snapshot":
+                bids.clear()
+                asks.clear()
+            for p_str, q_str in d.get("b", []):
+                p, q = float(p_str), float(q_str)
+                if q == 0:
+                    bids.pop(p, None)
+                else:
+                    bids[p] = q
+            for p_str, q_str in d.get("a", []):
+                p, q = float(p_str), float(q_str)
+                if q == 0:
+                    asks.pop(p, None)
+                else:
+                    asks[p] = q
+
             if not bids or not asks:
                 continue
-            bid_price = float(bids[0][0])
-            ask_price = float(asks[0][0])
+            bid_price = max(bids)
+            ask_price = min(asks)
             yield BookTicker(
                 symbol      = self.get_model_symbol(d.get("s", api_symbol), market_type),
                 market_type = market_type,
                 quote       = quote,
                 bid_price   = bid_price,
                 bid_qty     = build_qty_value(
-                    native        = float(bids[0][1]),
+                    native        = bids[bid_price],
                     qty_unit      = unit,
                     contract_size = contract_size,
                     price         = bid_price,
                 ),
                 ask_price   = ask_price,
                 ask_qty     = build_qty_value(
-                    native        = float(asks[0][1]),
+                    native        = asks[ask_price],
                     qty_unit      = unit,
                     contract_size = contract_size,
                     price         = ask_price,
@@ -1068,12 +1085,17 @@ class BybitAdapter(BaseExchange):
 
         bids: Dict[float, float] = {}
         asks: Dict[float, float] = {}
+        last_u: Optional[int] = None
 
         async for msg in self._ws_connect(market_type, [topic]):
             d = msg.get("data") or {}
+            u = d.get("u")
             if msg.get("type") == "snapshot":
                 bids.clear()
                 asks.clear()
+            elif last_u is not None and u is not None and u != last_u + 1:
+                logger.warning(f"Bybit orderbook {api_symbol} sequence gap: expected u={last_u + 1}, got u={u}")
+            last_u = u
             for p_str, q_str in d.get("b", []):
                 p, q = float(p_str), float(q_str)
                 if q == 0:
