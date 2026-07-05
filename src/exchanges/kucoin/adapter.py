@@ -1021,17 +1021,14 @@ class KucoinAdapter(BaseExchange):
 
         funding_rate: Optional[float] = None
         next_funding: Optional[int] = None
-        try:
-            contract = await self._make_request("GET", self.fut_rest_url, f"/api/v1/contracts/{api_symbol}")
-            if contract:
-                rate_raw = contract.get("fundingFeeRate")
-                if rate_raw is not None:
-                    funding_rate = float(rate_raw)
-                ms_until = int(contract.get("nextFundingRateTime") or 0)
-                if ms_until > 0:
-                    next_funding = int(time.time() * 1000) + ms_until
-        except (httpx.HTTPStatusError, ValueError):
-            pass
+        contract = await self._make_request("GET", self.fut_rest_url, f"/api/v1/contracts/{api_symbol}")
+        if contract:
+            rate_raw = contract.get("fundingFeeRate")
+            if rate_raw is not None:
+                funding_rate = float(rate_raw)
+            ms_until = int(contract.get("nextFundingRateTime") or 0)
+            if ms_until > 0:
+                next_funding = int(time.time() * 1000) + ms_until
 
         idx_raw = m.get("indexPrice")
         idx_price: Optional[float] = float(idx_raw) if idx_raw is not None else None

@@ -933,20 +933,17 @@ class OkxAdapter(BaseExchange):
 
         funding_rate: Optional[float] = None
         next_funding: Optional[int] = None
-        try:
-            f_data = await self._make_request("GET", "/api/v5/public/funding-rate", {"instId": api_symbol})
-            if f_data:
-                f = f_data[0]
-                rate_raw = f.get("fundingRate")
-                if rate_raw is not None:
-                    funding_rate = float(rate_raw)
-                nft_raw = f.get("nextFundingTime") or 0
-                if nft_raw:
-                    nft_norm = self.normalize_timestamp(nft_raw)
-                    if nft_norm > 0:
-                        next_funding = nft_norm
-        except (httpx.HTTPStatusError, ValueError):
-            pass
+        f_data = await self._make_request("GET", "/api/v5/public/funding-rate", {"instId": api_symbol})
+        if f_data:
+            f = f_data[0]
+            rate_raw = f.get("fundingRate")
+            if rate_raw is not None:
+                funding_rate = float(rate_raw)
+            nft_raw = f.get("nextFundingTime") or 0
+            if nft_raw:
+                nft_norm = self.normalize_timestamp(nft_raw)
+                if nft_norm > 0:
+                    next_funding = nft_norm
 
         index_price: Optional[float] = None
         try:
