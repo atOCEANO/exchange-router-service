@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from contextlib import asynccontextmanager
 from typing import Optional
 from src.exchanges import EXCHANGE_REGISTRY, get_adapter, shutdown_exchanges, startup_exchanges
-from src.exchanges.base import UpstreamUnavailableError, BadRequest, build_oi_value
+from src.exchanges.base import UpstreamUnavailableError, build_oi_value
 from src.models import MarketType
 from src.stream_manager import StreamManager
 from src.version import SCHEMA_VERSION, SERVICE_VERSION
@@ -56,14 +56,6 @@ async def upstream_unavailable_exception_handler(_request: Request, exc: Upstrea
 
 @app.exception_handler(ValueError)
 async def value_error_exception_handler(_request: Request, exc: ValueError):
-    return JSONResponse(
-        status_code=400,
-        content={"error": "Invalid Request", "detail": str(exc)},
-    )
-
-
-@app.exception_handler(BadRequest)
-async def bad_request_exception_handler(_request: Request, exc: BadRequest):
     return JSONResponse(
         status_code=400,
         content={"error": "Invalid Request", "detail": str(exc)},

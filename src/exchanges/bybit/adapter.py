@@ -6,7 +6,7 @@ import websockets
 import logging
 from typing import List, AsyncGenerator, Dict, Any, Optional, Callable
 from src.exchanges.base import (
-    BaseExchange, StreamHub, UpstreamUnavailableError, BadSymbol,
+    BaseExchange, StreamHub, UpstreamUnavailableError,
     build_qty_value, build_volume_value, build_oi_value,
     build_funding_current, build_funding_historical, build_funding_convention,
 )
@@ -519,7 +519,7 @@ class BybitAdapter(BaseExchange):
 
         data = await self._make_request("GET", "/v5/market/tickers", {"category": cat, "symbol": api_symbol})
         if not data["list"]:
-            raise BadSymbol(f"Symbol {api_symbol} not found")
+            raise ValueError(f"Symbol {api_symbol} not found")
         t = data["list"][0]
 
         model_sym  = self.get_model_symbol(t["symbol"], market_type)
@@ -553,7 +553,7 @@ class BybitAdapter(BaseExchange):
 
         data = await self._make_request("GET", "/v5/market/tickers", {"category": cat, "symbol": api_symbol})
         if not data["list"]:
-            raise BadSymbol(f"Symbol {api_symbol} not found")
+            raise ValueError(f"Symbol {api_symbol} not found")
         t = data["list"][0]
 
         model_sym     = self.get_model_symbol(t["symbol"], market_type)
@@ -714,7 +714,7 @@ class BybitAdapter(BaseExchange):
 
         data = await self._make_request("GET", "/v5/market/tickers", {"category": cat, "symbol": api_symbol})
         if not data["list"]:
-            raise BadSymbol(f"Symbol {api_symbol} not found")
+            raise ValueError(f"Symbol {api_symbol} not found")
         t = data["list"][0]
 
         model_sym = self.get_model_symbol(t["symbol"], market_type)
