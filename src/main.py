@@ -140,7 +140,7 @@ def service_status():
 
 @app.get("/version")
 def service_version():
-    return {"version": SERVICE_VERSION}
+    return {"version": SERVICE_VERSION, "schema_version": SCHEMA_VERSION}
 
 
 @app.get("/exchanges")
@@ -154,20 +154,25 @@ async def exchange_overview(exchange: str):
     capabilities = adapter.get_capabilities() or {}
     caps_markets = capabilities.get("markets", {}) or {}
 
-    market_types_payload = []
-    for mt in adapter.supported_market_types:
+    async def _symbol_count(mt):
         try:
-            info_list    = await adapter.get_exchange_info(mt)
-            symbol_count = len(info_list)
+            info_list = await adapter.get_exchange_info(mt)
+            return len(info_list)
         except Exception:
             logging.exception(f"symbol_count fetch failed for {exchange}/{mt.value}")
-            symbol_count = 0
+            return 0
 
-        market_types_payload.append({
+    market_types = adapter.supported_market_types
+    counts       = await asyncio.gather(*[_symbol_count(mt) for mt in market_types])
+
+    market_types_payload = [
+        {
             "name":         mt.value,
-            "symbol_count": symbol_count,
+            "symbol_count": count,
             "capabilities": caps_markets.get(mt, caps_markets.get(mt.value, {})),
-        })
+        }
+        for mt, count in zip(market_types, counts)
+    ]
 
     return {
         "exchange":     exchange,
