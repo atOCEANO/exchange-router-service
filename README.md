@@ -277,12 +277,12 @@ The service runs as a stateless Docker container. Clone the repo, configure the 
 git clone https://github.com/atOCEANO/exchange-router-service.git
 cd exchange-router-service
 cp .env.example .env
-docker-compose up -d --build
+docker compose up -d --build
 curl http://localhost:8040/status
 curl http://localhost:8040/binance/spot/ticker/BTCUSDT
 ```
 
-If the status check fails, inspect logs with `docker-compose logs -f`.
+If the status check fails, inspect logs with `docker compose logs -f`.
 
 <br>
 

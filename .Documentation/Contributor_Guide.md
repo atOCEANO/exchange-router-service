@@ -102,7 +102,7 @@ Do not override `preload()` directly. The base class seals it; the override poin
 
 ## Local Development
 
-The service ships as a Docker container, but iterating on an adapter through `docker-compose up --build` on every change is slow. For day-to-day work, run the service directly. Create the venv once, then activate it, install dependencies, and launch with autoreload:
+The service ships as a Docker container, but iterating on an adapter through `docker compose up --build` on every change is slow. For day-to-day work, run the service directly. Create the venv once, then activate it, install dependencies, and launch with autoreload:
 
 ```bash
 python -m venv .venv
@@ -136,7 +136,7 @@ All adapters must inherit from `BaseExchange` in `src/exchanges/base.py`. The fo
 - [ ] **`_fetch_exchange_info`:** Implement `async def _fetch_exchange_info(market_type) -> List[SymbolInfo]`. The base class owns the cache around it (`_ensure_info_cache`, `_info_for`, the 24h refresh); the adapter only supplies the fetch. Do not declare your own `_info_cache` fields.
 - [ ] **Data Normalization:** Map all raw upstream JSON payloads to the Pydantic models in `src/models.py`.
 - [ ] **Market Routing:** Handle `spot`, `linear`, and `inverse` market types, including any subdomain or parameter differences between them.
-- [ ] **Symbol Normalization:** Implement `get_model_symbol(api_symbol, market_type)` to translate raw exchange symbols to normalized form (e.g. `BTCUSD_PERP` → `BTCUSDT`), and `get_api_symbol(symbol, market_type)` to reverse the translation when constructing upstream requests. Normalized symbols must be bare pairs with no suffixes.
+- [ ] **Symbol Normalization:** Implement `get_model_symbol(api_symbol, market_type)` to translate raw exchange symbols to normalized form (e.g. `BTCUSD_PERP` → `BTCUSD`), and `get_api_symbol(symbol, market_type)` to reverse the translation when constructing upstream requests. Normalized symbols must be bare pairs with no suffixes.
 - [ ] **Perpetuals Filter:** For `linear` and `inverse` markets, `_fetch_exchange_info` must exclude dated and quarterly contracts. Only perpetual instruments should appear in `/markets` and `/markets/{symbol}`.
 - [ ] **`native_symbol` Field:** Populate `native_symbol` on every `SymbolInfo` object with the raw exchange symbol before normalization.
 - [ ] **`funding` Field:** Set `SymbolInfo.funding = None` on spot, `build_funding_convention("discrete")` on discrete-funding perps, and `build_funding_convention("continuous")` on continuous-funding perps.

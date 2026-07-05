@@ -89,7 +89,7 @@ The same rule applies to derived values such as `usd` on `open_interest`: on lin
 | OKX LINEAR      | `base`     | base coin (adapter reads upstream's `oiCcy` column directly)               | `34,223.4` BTC |
 | OKX INVERSE     | `contract` | contracts (`contract_size` = `ctVal`, $100 for BTC-USD-SWAP)               | `5,847,300` contracts = $584.7M nominal |
 
-To compute a USD-nominal across exchanges yourself, look up the per-instrument multiplier from `/markets/{symbol}` (for contract-quoted rows) or use `mark_price` (for base-coin rows). The router does not invent a USD column.
+Each open-interest row carries a `usd` nominal in its `open_interest` value object: inverse (contract-unit) rows multiply contracts by `contract_size`, and linear (base-unit) rows join to a same-period candle close, recorded in `usd_basis`. When no matching candle is found the router leaves `usd` null rather than guessing it.
 
 <br>
 
@@ -324,7 +324,7 @@ OKX uses dash-separated symbols upstream: `BTC-USDT` for spot, `BTC-USDT-SWAP` f
 
 ### Funding-interval preload (per-symbol; no bulk endpoint)
 
-OKX exposes funding interval per symbol via `/api/v5/public/funding-rate` and does not provide a bulk equivalent. The adapter declares two warm steps in `_warm()` (`linear_funding`, `inverse_funding`), each calling `_warm_funding_intervals(market_type)` which iterates the info cache and fetches per-symbol via `_funding_interval_ms_for(inst_id)` with bounded concurrency (`asyncio.Semaphore(10)`). The base class spawns the warm chain as a background task so the router accepts traffic immediately. `MarkPrice.funding` and `FundingRate.rate` use the cached cycle_ms once warmed; until the warm catches up, those routes fall back to a per-symbol on-demand lookup so no route returns wrong cycle data, only a few extra upstream calls.
+OKX exposes funding interval per symbol via `/api/v5/public/funding-rate` and does not provide a bulk equivalent. The adapter declares two warm steps in `_warm()` (`linear_funding`, `inverse_funding`), each calling `_warm_funding_intervals(market_type)` which iterates the info cache and fetches per-symbol via `_funding_interval_ms_for(inst_id)` with bounded concurrency (`asyncio.Semaphore(2)`). The base class spawns the warm chain as a background task so the router accepts traffic immediately. `MarkPrice.funding` and `FundingRate.rate` use the cached cycle_ms once warmed; until the warm catches up, those routes fall back to a per-symbol on-demand lookup so no route returns wrong cycle data, only a few extra upstream calls.
 
 <br>
 
