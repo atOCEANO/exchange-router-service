@@ -1312,26 +1312,28 @@ class KucoinAdapter(BaseExchange):
             raise ValueError(f"Contract size unavailable for {model_sym} on KuCoin linear")
 
         if market_type == MarketType.SPOT:
-            topic = f"/market/ticker:{api_symbol}"
+            topic = f"/market/snapshot:{api_symbol}"
             async for msg in self._ws_connect(market_type, topic):
-                d = msg.get("data") or {}
-                last = float(d.get("price") or 0)
+                d = (msg.get("data") or {}).get("data") or {}
+                if not d:
+                    continue
+                last = float(d.get("lastTradedPrice") or d.get("close") or 0)
                 yield Ticker(
                     symbol               = model_sym,
                     market_type          = market_type,
                     quote                = quote,
                     price                = last,
-                    open_24h             = 0.0,
-                    high_24h             = 0.0,
-                    low_24h              = 0.0,
+                    open_24h             = float(d.get("open") or 0),
+                    high_24h             = float(d.get("high") or 0),
+                    low_24h              = float(d.get("low") or 0),
                     volume_24h           = build_volume_value(
-                        native        = float(d.get("size") or 0),
+                        native        = float(d.get("vol") or 0),
                         volume_unit   = "base",
                         contract_size = None,
                         close         = last,
                     ),
-                    price_change_percent = 0.0,
-                    timestamp            = int(d.get("time") or int(time.time() * 1000)),
+                    price_change_percent = float(d.get("changeRate") or 0) * 100,
+                    timestamp            = int(d.get("datetime") or int(time.time() * 1000)),
                 )
             return
 
@@ -1346,7 +1348,7 @@ class KucoinAdapter(BaseExchange):
                 vol_unit   = "contract"
                 vol_cs     = contract_size
             else:
-                vol_native = vol_raw * contract_size
+                vol_native = vol_raw
                 vol_unit   = "base"
                 vol_cs     = None
             yield Ticker(
