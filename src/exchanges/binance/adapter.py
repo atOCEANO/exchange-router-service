@@ -6,7 +6,7 @@ import websockets
 import logging
 from typing import List, AsyncGenerator, Dict, Any, Optional, Callable
 from src.exchanges.base import (
-    BaseExchange, StreamHub,
+    BaseExchange, StreamHub, UpstreamUnavailableError,
     build_qty_value, build_volume_value, build_oi_value,
     build_funding_current, build_funding_historical, build_funding_convention,
 )
@@ -395,8 +395,12 @@ class BinanceAdapter(BaseExchange):
                     except Exception:
                         err_msg = e.response.text
                     raise ValueError(f"Binance API Error ({e.response.status_code}): {err_msg}")
-                else:
-                    raise e
+                if e.response.status_code in [502, 503, 504, 520]:
+                    logger.warning(f"HTTP {e.response.status_code} on {host}. Retrying...")
+                    retries -= 1
+                    await asyncio.sleep(1)
+                    continue
+                raise e
 
             except Exception as e:
                 if isinstance(e, ValueError):
@@ -405,7 +409,7 @@ class BinanceAdapter(BaseExchange):
                 retries -= 1
                 await asyncio.sleep(1)
 
-        raise Exception(f"Max retries exceeded for {url}")
+        raise UpstreamUnavailableError(f"Max retries exceeded for {url}")
 
 
     async def _paginate_backwards(self, fetch_func_by_end: Callable, total_limit: int, limit_per_req: int) -> List[Any]:

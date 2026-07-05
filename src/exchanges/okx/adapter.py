@@ -549,6 +549,11 @@ class OkxAdapter(BaseExchange):
                 resp.raise_for_status()
 
             except httpx.HTTPStatusError as e:
+                if e.response.status_code in (502, 503, 504, 520):
+                    logger.warning(f"OKX HTTP {e.response.status_code} on {endpoint}. Retrying...")
+                    retries -= 1
+                    await asyncio.sleep(1)
+                    continue
                 logger.error(f"HTTP Error: {e}")
                 raise e
             except Exception as e:
@@ -558,7 +563,7 @@ class OkxAdapter(BaseExchange):
                 retries -= 1
                 await asyncio.sleep(1)
 
-        raise Exception(f"Max retries exceeded for {url}")
+        raise UpstreamUnavailableError(f"Max retries exceeded for {url}")
 
 
     async def _paginate_backwards(self, fetch_func_by_end: Callable, total_limit: int, limit_per_req: int) -> List[Any]:
