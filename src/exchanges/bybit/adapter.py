@@ -966,11 +966,6 @@ class BybitAdapter(BaseExchange):
         return info
 
 
-    async def get_markets(self, market_type: MarketType) -> List[str]:
-        info = await self.get_exchange_info(market_type)
-        return [s.symbol for s in info]
-
-
     async def stream_ticker(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Ticker, None]:
         api_symbol = self.get_api_symbol(symbol, market_type)
         topic      = f"tickers.{api_symbol}"

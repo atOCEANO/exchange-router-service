@@ -1273,11 +1273,6 @@ class OkxAdapter(BaseExchange):
         return info
 
 
-    async def get_markets(self, market_type: MarketType) -> List[str]:
-        info = await self.get_exchange_info(market_type)
-        return [s.symbol for s in info]
-
-
     async def stream_ticker(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Ticker, None]:
         api_symbol    = await self._resolve_symbol(symbol, market_type)
         model_sym     = self.get_model_symbol(api_symbol, market_type)

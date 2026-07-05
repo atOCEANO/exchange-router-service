@@ -1096,11 +1096,6 @@ class BinanceAdapter(BaseExchange):
         return info
 
 
-    async def get_markets(self, market_type: MarketType) -> List[str]:
-        info = await self.get_exchange_info(market_type)
-        return [s.symbol for s in info]
-
-
     async def stream_ticker(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Ticker, None]:
         s_norm     = self.get_stream_symbol(symbol, market_type)
         is_inverse = market_type == MarketType.INVERSE

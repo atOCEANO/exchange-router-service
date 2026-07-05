@@ -345,10 +345,6 @@ class BaseExchange(ABC):
         raise ValueError(f"Unsupported timestamp format: {type(ts)}")
 
 
-    def normalize_interval(self, interval: str) -> str:
-        return interval
-
-
     @property
     @abstractmethod
     def name(self) -> str:
@@ -445,11 +441,6 @@ class BaseExchange(ABC):
 
     @abstractmethod
     async def get_exchange_info(self, market_type: MarketType) -> List[SymbolInfo]:
-        pass
-
-
-    @abstractmethod
-    async def get_markets(self, market_type: MarketType) -> List[str]:
         pass
 
 
