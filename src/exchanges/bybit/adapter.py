@@ -420,6 +420,8 @@ class BybitAdapter(BaseExchange):
                     retries -= 1
                     await asyncio.sleep(1)
                     continue
+                if e.response.status_code >= 500:
+                    raise UpstreamUnavailableError(f"Bybit upstream error {e.response.status_code} on {endpoint}")
                 logger.error(f"HTTP Error: {e}")
                 raise e
             except Exception as e:

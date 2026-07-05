@@ -31,6 +31,12 @@ class BinanceAdapter(BaseExchange):
         "depth":       "public",
     }
 
+    _WEIGHT_LIMITS: Dict[str, int] = {
+        "api.binance.com":  6000,
+        "fapi.binance.com": 2400,
+        "dapi.binance.com": 2400,
+    }
+
 
     def __init__(self):
         super().__init__()
@@ -311,10 +317,6 @@ class BinanceAdapter(BaseExchange):
         return self.rest_urls[market_type]
 
 
-    def normalize_symbol(self, symbol: str) -> str:
-        return symbol.replace("/", "").replace("-", "").upper()
-
-
     def get_api_symbol(self, symbol: str, market_type: MarketType) -> str:
         s = self.normalize_symbol(symbol)
         if market_type == MarketType.INVERSE and not s.endswith("_PERP"):
@@ -365,13 +367,14 @@ class BinanceAdapter(BaseExchange):
             try:
                 resp = await self.http_client.request(method, url, params=params)
 
-                used_weight = int(resp.headers.get("x-mbx-used-weight-1m", 0))
+                used_weight  = int(resp.headers.get("x-mbx-used-weight-1m", 0))
+                weight_limit = self._WEIGHT_LIMITS.get(host, 1200)
 
-                if used_weight > 1150:
+                if used_weight > weight_limit * 0.95:
                     async with self._backoff_lock:
                         if time.time() > self._backoff_until.get(host, 0.0):
                             self._backoff_until[host] = time.time() + 2
-                    logger.warning(f"High API Weight on {host}: {used_weight}/1200. Pausing its requests for 2s...")
+                    logger.warning(f"High API Weight on {host}: {used_weight}/{weight_limit}. Pausing its requests for 2s...")
 
                 if resp.status_code == 200:
                     return resp.json()
@@ -400,6 +403,8 @@ class BinanceAdapter(BaseExchange):
                     retries -= 1
                     await asyncio.sleep(1)
                     continue
+                if e.response.status_code >= 500:
+                    raise UpstreamUnavailableError(f"Binance upstream error {e.response.status_code} on {url}")
                 raise e
 
             except Exception as e:
