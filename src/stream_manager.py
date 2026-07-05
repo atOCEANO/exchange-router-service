@@ -70,7 +70,7 @@ class StreamManager:
 
                 client_items = list(bucket.items())
                 results      = await asyncio.gather(
-                    *[client.send_text(data) for _, client in client_items],
+                    *[asyncio.wait_for(client.send_text(data), timeout=5.0) for _, client in client_items],
                     return_exceptions=True,
                 )
                 dead = [cid for (cid, _), res in zip(client_items, results) if isinstance(res, BaseException)]
@@ -89,7 +89,16 @@ class StreamManager:
         except Exception as e:
             logging.error(f"Upstream stream error for {key}: {e}")
         finally:
-            if key in self.active_streams:
-                clients = list(self.active_streams[key].values())
-                for client in clients:
-                    asyncio.create_task(client.close(code=1011, reason="Upstream disconnected"))
+            close_tasks = []
+            async with self._lock:
+                if self.upstream_tasks.get(key) is asyncio.current_task():
+                    self.upstream_tasks.pop(key, None)
+                    bucket = self.active_streams.pop(key, None)
+                    if bucket:
+                        for client in bucket.values():
+                            close_tasks.append(asyncio.create_task(client.close(code=1011, reason="Upstream disconnected")))
+            for t in close_tasks:
+                try:
+                    await t
+                except Exception:
+                    pass
