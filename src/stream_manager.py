@@ -26,7 +26,7 @@ class StreamManager:
         return client_id
 
 
-    async def unsubscribe(self, key: str, client_id: uuid.UUID):
+    async def unsubscribe(self, key: str, client_id: uuid.UUID) -> None:
         task: Optional[asyncio.Task] = None
         async with self._lock:
             if key in self.active_streams:
@@ -42,7 +42,7 @@ class StreamManager:
                 pass
 
 
-    async def shutdown(self):
+    async def shutdown(self) -> None:
         tasks = list(self.upstream_tasks.values())
         self.upstream_tasks.clear()
         self.active_streams.clear()
@@ -67,7 +67,7 @@ class StreamManager:
         task.add_done_callback(self._closing.discard)
 
 
-    async def _upstream_handler(self, key, adapter, market_type, channel, symbol):
+    async def _upstream_handler(self, key, adapter, market_type, channel, symbol) -> None:
         try:
             if   channel == "ticker":       stream = adapter.stream_ticker(market_type, symbol)
             elif channel == "book_ticker":  stream = adapter.stream_book_ticker(market_type, symbol)
