@@ -395,7 +395,7 @@ class BinanceAdapter(BaseExchange):
                     except Exception:
                         err_msg = e.response.text
                     raise ValueError(f"Binance API Error ({e.response.status_code}): {err_msg}")
-                if e.response.status_code in [502, 503, 504, 520]:
+                if e.response.status_code in (502, 503, 504, 520):
                     logger.warning(f"HTTP {e.response.status_code} on {host}. Retrying...")
                     retries -= 1
                     await asyncio.sleep(1)
@@ -409,7 +409,8 @@ class BinanceAdapter(BaseExchange):
                 retries -= 1
                 await asyncio.sleep(1)
 
-        raise UpstreamUnavailableError(f"Max retries exceeded for {url}")
+        remaining = self._backoff_until.get(host, 0.0) - time.time()
+        raise UpstreamUnavailableError(f"Max retries exceeded for {url}", retry_after=remaining if remaining > 0 else None)
 
 
     async def _paginate_backwards(self, fetch_func_by_end: Callable, total_limit: int, limit_per_req: int) -> List[Any]:

@@ -429,7 +429,8 @@ class BybitAdapter(BaseExchange):
                 retries -= 1
                 await asyncio.sleep(1)
 
-        raise UpstreamUnavailableError(f"Max retries exceeded for {url}")
+        remaining = self._backoff_until - time.time()
+        raise UpstreamUnavailableError(f"Max retries exceeded for {url}", retry_after=remaining if remaining > 0 else None)
 
 
     async def _paginate_backwards(self, fetch_func_by_end: Callable, total_limit: int, limit_per_req: int) -> List[Any]:
@@ -878,14 +879,19 @@ class BybitAdapter(BaseExchange):
 
         instruments = []
         cursor      = None
-        while True:
+        pages       = 0
+        while pages < 50:
             if cursor:
                 params["cursor"] = cursor
             data = await self._make_request("GET", "/v5/market/instruments-info", params)
             instruments.extend(data["list"])
+            pages += 1
             cursor = data.get("nextPageCursor")
             if not cursor:
                 break
+
+        if cursor:
+            logger.warning(f"Bybit instruments-info stopped at the {pages}-page cap with a cursor still set")
 
         results = []
         for s in instruments:

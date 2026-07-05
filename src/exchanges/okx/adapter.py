@@ -563,7 +563,8 @@ class OkxAdapter(BaseExchange):
                 retries -= 1
                 await asyncio.sleep(1)
 
-        raise UpstreamUnavailableError(f"Max retries exceeded for {url}")
+        remaining = self._backoff_until - time.time()
+        raise UpstreamUnavailableError(f"Max retries exceeded for {url}", retry_after=remaining if remaining > 0 else None)
 
 
     async def _paginate_backwards(self, fetch_func_by_end: Callable, total_limit: int, limit_per_req: int) -> List[Any]:

@@ -608,6 +608,8 @@ class KrakenAdapter(BaseExchange):
                 resp.raise_for_status()
 
             except httpx.HTTPStatusError as e:
+                if e.response.status_code >= 500:
+                    raise UpstreamUnavailableError(f"Kraken API Error ({e.response.status_code}) on {url}: {e.response.text}")
                 raise ValueError(f"Kraken API Error ({e.response.status_code}) on {url}: {e.response.text}")
             except ValueError:
                 raise
