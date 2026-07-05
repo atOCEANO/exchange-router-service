@@ -1164,16 +1164,14 @@ class OkxAdapter(BaseExchange):
                     if ts <= 0:
                         continue
                     ratio = float(r[1])
-                    long_acct = ratio / (ratio + 1) if ratio > 0 else 0.0
-                    short_acct = 1 / (ratio + 1) if ratio > 0 else 0.0
                     out.append(LongShortRatio(
                         symbol        = model_sym,
                         market_type   = market_type,
                         interval      = period,
                         ratio         = ratio,
-                        long_account  = long_acct,
-                        short_account = short_acct,
-                        account_scope = "all_accounts",
+                        long_account  = None,
+                        short_account = None,
+                        account_scope = "opaque",
                         timestamp     = ts,
                     ))
                 except (ValueError, TypeError):
