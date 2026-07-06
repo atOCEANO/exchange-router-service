@@ -438,18 +438,16 @@ class BybitAdapter(BaseExchange):
     async def _paginate_backwards(self, fetch_func_by_end: Callable, total_limit: int, limit_per_req: int) -> List[Any]:
         chunks = []
         seen = set()
-        collected_count = 0
+        collected = 0
         current_end = None
         max_requests = 100
-        request_count = 0
+        req_count = 0
 
-        while collected_count < total_limit and request_count < max_requests:
-            req_size = limit_per_req
+        while collected < total_limit and req_count < max_requests:
             try:
-                batch = await fetch_func_by_end(current_end, req_size)
+                batch = await fetch_func_by_end(current_end, limit_per_req)
             except (httpx.HTTPStatusError, ValueError):
                 break
-
             if not batch:
                 break
 
@@ -464,23 +462,20 @@ class BybitAdapter(BaseExchange):
                 break
 
             chunks.append(new_items)
-            collected_count += len(new_items)
-            request_count += 1
-
-            if not hasattr(batch[0], "timestamp"):
-                break
+            collected += len(new_items)
+            req_count += 1
             next_end = batch[0].timestamp
             if next_end <= 0 or (current_end is not None and next_end >= current_end):
                 break
             current_end = next_end
 
-        if request_count >= max_requests and collected_count < total_limit:
-            logger.warning(f"Bybit pagination hit {max_requests}-page safety cap with {collected_count}/{total_limit} records; result truncated")
+        if req_count >= max_requests and collected < total_limit:
+            logger.warning(f"Bybit pagination hit {max_requests}-page safety cap with {collected}/{total_limit} records; result truncated")
 
         chunks.reverse()
-        final_results = [item for chunk in chunks for item in chunk]
-        final_results.sort(key=lambda x: x.timestamp)
-        return final_results[-total_limit:]
+        out = [item for chunk in chunks for item in chunk]
+        out.sort(key=lambda x: x.timestamp)
+        return out[-total_limit:]
 
 
     async def _get_hub(self, market_type: MarketType) -> StreamHub:
