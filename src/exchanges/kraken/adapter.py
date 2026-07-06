@@ -1404,52 +1404,58 @@ class KrakenAdapter(BaseExchange):
             ws_sym  = await self._spot_ws_symbol(api_symbol)
             payload = {"method": "subscribe", "params": {"channel": "ticker", "symbol": [ws_sym]}}
             async for data in self._ws_connect(self.spot_ws_url, payload):
-                if data.get("type") in ["snapshot", "update"] and data.get("channel") == "ticker":
-                    for item in data.get("data", []):
-                        last = float(item.get("last", 0))
+                try:
+                    if data.get("type") in ["snapshot", "update"] and data.get("channel") == "ticker":
+                        for item in data.get("data", []):
+                            last = float(item.get("last", 0))
+                            yield Ticker(
+                                symbol               = model_sym,
+                                market_type          = market_type,
+                                quote                = quote,
+                                price                = last,
+                                open_24h             = last - float(item.get("change", 0)),
+                                high_24h             = float(item.get("high", 0)),
+                                low_24h              = float(item.get("low", 0)),
+                                volume_24h           = build_volume_value(
+                                    native        = float(item.get("volume", 0)),
+                                    volume_unit   = "base",
+                                    contract_size = None,
+                                    close         = last,
+                                ),
+                                price_change_percent = float(item.get("change_pct", 0)),
+                                timestamp            = self.normalize_timestamp(item.get("timestamp", time.time())),
+                            )
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                    logger.warning(f"Kraken ticker {api_symbol} malformed frame skipped: {e!r}")
+        else:
+            payload = {"event": "subscribe", "feed": "ticker", "product_ids": [api_symbol]}
+            async for data in self._ws_connect(self.futures_ws_url, payload):
+                try:
+                    if data.get("feed") == "ticker" and "last" in data:
+                        last     = float(data["last"])
+                        open_24h = float(data.get("open", 0))
+                        pc       = 0.0
+                        if open_24h > 0:
+                            pc = (float(data.get("change", 0)) / open_24h) * 100
                         yield Ticker(
                             symbol               = model_sym,
                             market_type          = market_type,
                             quote                = quote,
                             price                = last,
-                            open_24h             = last - float(item.get("change", 0)),
-                            high_24h             = float(item.get("high", 0)),
-                            low_24h              = float(item.get("low", 0)),
+                            open_24h             = open_24h,
+                            high_24h             = float(data.get("high", 0)),
+                            low_24h              = float(data.get("low", 0)),
                             volume_24h           = build_volume_value(
-                                native        = float(item.get("volume", 0)),
-                                volume_unit   = "base",
-                                contract_size = None,
+                                native        = float(data.get("volume", 0)),
+                                volume_unit   = unit,
+                                contract_size = contract_size,
                                 close         = last,
                             ),
-                            price_change_percent = float(item.get("change_pct", 0)),
-                            timestamp            = self.normalize_timestamp(item.get("timestamp", time.time())),
+                            price_change_percent = pc,
+                            timestamp            = self.normalize_timestamp(data.get("time", time.time())),
                         )
-        else:
-            payload = {"event": "subscribe", "feed": "ticker", "product_ids": [api_symbol]}
-            async for data in self._ws_connect(self.futures_ws_url, payload):
-                if data.get("feed") == "ticker" and "last" in data:
-                    last     = float(data["last"])
-                    open_24h = float(data.get("open", 0))
-                    pc       = 0.0
-                    if open_24h > 0:
-                        pc = (float(data.get("change", 0)) / open_24h) * 100
-                    yield Ticker(
-                        symbol               = model_sym,
-                        market_type          = market_type,
-                        quote                = quote,
-                        price                = last,
-                        open_24h             = open_24h,
-                        high_24h             = float(data.get("high", 0)),
-                        low_24h              = float(data.get("low", 0)),
-                        volume_24h           = build_volume_value(
-                            native        = float(data.get("volume", 0)),
-                            volume_unit   = unit,
-                            contract_size = contract_size,
-                            close         = last,
-                        ),
-                        price_change_percent = pc,
-                        timestamp            = self.normalize_timestamp(data.get("time", time.time())),
-                    )
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                    logger.warning(f"Kraken ticker {api_symbol} malformed frame skipped: {e!r}")
 
 
     async def stream_book_ticker(self, market_type: MarketType, symbol: str) -> AsyncGenerator[BookTicker, None]:
@@ -1465,56 +1471,62 @@ class KrakenAdapter(BaseExchange):
             ws_sym  = await self._spot_ws_symbol(api_symbol)
             payload = {"method": "subscribe", "params": {"channel": "ticker", "symbol": [ws_sym], "event_trigger": "bbo"}}
             async for data in self._ws_connect(self.spot_ws_url, payload):
-                if data.get("type") in ["snapshot", "update"] and data.get("channel") == "ticker":
-                    for item in data.get("data", []):
-                        bid_price = float(item.get("bid", 0))
-                        ask_price = float(item.get("ask", 0))
+                try:
+                    if data.get("type") in ["snapshot", "update"] and data.get("channel") == "ticker":
+                        for item in data.get("data", []):
+                            bid_price = float(item.get("bid", 0))
+                            ask_price = float(item.get("ask", 0))
+                            yield BookTicker(
+                                symbol      = model_sym,
+                                market_type = market_type,
+                                quote       = quote,
+                                bid_price   = bid_price,
+                                bid_qty     = build_qty_value(
+                                    native        = float(item.get("bid_qty", 0)),
+                                    qty_unit      = "base",
+                                    contract_size = None,
+                                    price         = bid_price,
+                                ),
+                                ask_price   = ask_price,
+                                ask_qty     = build_qty_value(
+                                    native        = float(item.get("ask_qty", 0)),
+                                    qty_unit      = "base",
+                                    contract_size = None,
+                                    price         = ask_price,
+                                ),
+                                timestamp   = self.normalize_timestamp(item.get("timestamp", time.time())),
+                            )
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                    logger.warning(f"Kraken book_ticker {api_symbol} malformed frame skipped: {e!r}")
+        else:
+            payload = {"event": "subscribe", "feed": "ticker", "product_ids": [api_symbol]}
+            async for data in self._ws_connect(self.futures_ws_url, payload):
+                try:
+                    if data.get("feed") == "ticker" and "bid" in data:
+                        bid_price = float(data.get("bid", 0))
+                        ask_price = float(data.get("ask", 0))
                         yield BookTicker(
                             symbol      = model_sym,
                             market_type = market_type,
                             quote       = quote,
                             bid_price   = bid_price,
                             bid_qty     = build_qty_value(
-                                native        = float(item.get("bid_qty", 0)),
-                                qty_unit      = "base",
-                                contract_size = None,
+                                native        = float(data.get("bid_size", 0)),
+                                qty_unit      = unit,
+                                contract_size = contract_size,
                                 price         = bid_price,
                             ),
                             ask_price   = ask_price,
                             ask_qty     = build_qty_value(
-                                native        = float(item.get("ask_qty", 0)),
-                                qty_unit      = "base",
-                                contract_size = None,
+                                native        = float(data.get("ask_size", 0)),
+                                qty_unit      = unit,
+                                contract_size = contract_size,
                                 price         = ask_price,
                             ),
-                            timestamp   = self.normalize_timestamp(item.get("timestamp", time.time())),
+                            timestamp   = self.normalize_timestamp(data.get("time", time.time())),
                         )
-        else:
-            payload = {"event": "subscribe", "feed": "ticker", "product_ids": [api_symbol]}
-            async for data in self._ws_connect(self.futures_ws_url, payload):
-                if data.get("feed") == "ticker" and "bid" in data:
-                    bid_price = float(data.get("bid", 0))
-                    ask_price = float(data.get("ask", 0))
-                    yield BookTicker(
-                        symbol      = model_sym,
-                        market_type = market_type,
-                        quote       = quote,
-                        bid_price   = bid_price,
-                        bid_qty     = build_qty_value(
-                            native        = float(data.get("bid_size", 0)),
-                            qty_unit      = unit,
-                            contract_size = contract_size,
-                            price         = bid_price,
-                        ),
-                        ask_price   = ask_price,
-                        ask_qty     = build_qty_value(
-                            native        = float(data.get("ask_size", 0)),
-                            qty_unit      = unit,
-                            contract_size = contract_size,
-                            price         = ask_price,
-                        ),
-                        timestamp   = self.normalize_timestamp(data.get("time", time.time())),
-                    )
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                    logger.warning(f"Kraken book_ticker {api_symbol} malformed frame skipped: {e!r}")
 
 
     async def stream_orderbook(self, market_type: MarketType, symbol: str, depth: int = 20, update_speed: str = "100ms") -> AsyncGenerator[OrderBook, None]:
@@ -1530,22 +1542,77 @@ class KrakenAdapter(BaseExchange):
 
             bids: Dict[float, float] = {}
             asks: Dict[float, float] = {}
+            bootstrapped             = False
 
             async for data in self._ws_connect(self.spot_ws_url, payload):
-                if data.get("channel") != "book" or data.get("type") not in ("snapshot", "update"):
-                    continue
-                if data.get("type") == "snapshot":
-                    bids.clear()
-                    asks.clear()
-                for item in data.get("data", []):
-                    for b in item.get("bids", []):
-                        p, q = float(b["price"]), float(b["qty"])
-                        if q == 0: bids.pop(p, None)
-                        else:      bids[p] = q
-                    for a in item.get("asks", []):
-                        p, q = float(a["price"]), float(a["qty"])
-                        if q == 0: asks.pop(p, None)
-                        else:      asks[p] = q
+                try:
+                    if data.get("channel") != "book" or data.get("type") not in ("snapshot", "update"):
+                        continue
+                    if data.get("type") == "snapshot":
+                        bids.clear()
+                        asks.clear()
+                        bootstrapped = True
+                    if not bootstrapped:
+                        continue
+                    for item in data.get("data", []):
+                        for b in item.get("bids", []):
+                            p, q = float(b["price"]), float(b["qty"])
+                            if q == 0: bids.pop(p, None)
+                            else:      bids[p] = q
+                        for a in item.get("asks", []):
+                            p, q = float(a["price"]), float(a["qty"])
+                            if q == 0: asks.pop(p, None)
+                            else:      asks[p] = q
+
+                        sorted_bids = sorted(bids.items(), key=lambda kv: -kv[0])[:depth]
+                        sorted_asks = sorted(asks.items(), key=lambda kv: kv[0])[:depth]
+
+                        yield OrderBook(
+                            symbol      = model_sym,
+                            market_type = market_type,
+                            quote       = quote,
+                            bids        = [[p, q] for p, q in sorted_bids],
+                            asks        = [[p, q] for p, q in sorted_asks],
+                            qty_unit    = "base",
+                            timestamp   = self.normalize_timestamp(item.get("timestamp", time.time())),
+                        )
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                    logger.warning(f"Kraken orderbook {api_symbol} parse error mid-delta: {e!r}; ending stream so clients resync")
+                    return
+        else:
+            payload = {"event": "subscribe", "feed": "book", "product_ids": [api_symbol]}
+
+            bids: Dict[float, float] = {}
+            asks: Dict[float, float] = {}
+            bootstrapped             = False
+
+            async for data in self._ws_connect(self.futures_ws_url, payload):
+                try:
+                    feed = data.get("feed")
+                    if feed == "book_snapshot":
+                        bids.clear()
+                        asks.clear()
+                        for b in data.get("bids", []):
+                            p, q = float(b["price"]), float(b["qty"])
+                            if q > 0: bids[p] = q
+                        for a in data.get("asks", []):
+                            p, q = float(a["price"]), float(a["qty"])
+                            if q > 0: asks[p] = q
+                        bootstrapped = True
+                    elif feed == "book" and "side" in data and "price" in data:
+                        if not bootstrapped:
+                            continue
+                        p, q = float(data["price"]), float(data.get("qty", 0))
+                        side = data.get("side", "").lower()
+                        book = bids if side == "buy" else asks if side == "sell" else None
+                        if book is None:
+                            continue
+                        if q == 0: book.pop(p, None)
+                        else:      book[p] = q
+                    else:
+                        continue
+                    if not bids or not asks:
+                        continue
 
                     sorted_bids = sorted(bids.items(), key=lambda kv: -kv[0])[:depth]
                     sorted_asks = sorted(asks.items(), key=lambda kv: kv[0])[:depth]
@@ -1556,51 +1623,12 @@ class KrakenAdapter(BaseExchange):
                         quote       = quote,
                         bids        = [[p, q] for p, q in sorted_bids],
                         asks        = [[p, q] for p, q in sorted_asks],
-                        qty_unit    = "base",
-                        timestamp   = self.normalize_timestamp(item.get("timestamp", time.time())),
+                        qty_unit    = "contract" if market_type == MarketType.INVERSE else "base",
+                        timestamp   = self.normalize_timestamp(data.get("timestamp", time.time())),
                     )
-        else:
-            payload = {"event": "subscribe", "feed": "book", "product_ids": [api_symbol]}
-
-            bids: Dict[float, float] = {}
-            asks: Dict[float, float] = {}
-
-            async for data in self._ws_connect(self.futures_ws_url, payload):
-                feed = data.get("feed")
-                if feed == "book_snapshot":
-                    bids.clear()
-                    asks.clear()
-                    for b in data.get("bids", []):
-                        p, q = float(b["price"]), float(b["qty"])
-                        if q > 0: bids[p] = q
-                    for a in data.get("asks", []):
-                        p, q = float(a["price"]), float(a["qty"])
-                        if q > 0: asks[p] = q
-                elif feed == "book" and "side" in data and "price" in data:
-                    p, q = float(data["price"]), float(data.get("qty", 0))
-                    side = data.get("side", "").lower()
-                    book = bids if side == "buy" else asks if side == "sell" else None
-                    if book is None:
-                        continue
-                    if q == 0: book.pop(p, None)
-                    else:      book[p] = q
-                else:
-                    continue
-                if not bids or not asks:
-                    continue
-
-                sorted_bids = sorted(bids.items(), key=lambda kv: -kv[0])[:depth]
-                sorted_asks = sorted(asks.items(), key=lambda kv: kv[0])[:depth]
-
-                yield OrderBook(
-                    symbol      = model_sym,
-                    market_type = market_type,
-                    quote       = quote,
-                    bids        = [[p, q] for p, q in sorted_bids],
-                    asks        = [[p, q] for p, q in sorted_asks],
-                    qty_unit    = "contract" if market_type == MarketType.INVERSE else "base",
-                    timestamp   = self.normalize_timestamp(data.get("timestamp", time.time())),
-                )
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                    logger.warning(f"Kraken orderbook {api_symbol} parse error mid-delta: {e!r}; ending stream so clients resync")
+                    return
 
 
     async def stream_trades(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Trade, None]:
@@ -1633,55 +1661,61 @@ class KrakenAdapter(BaseExchange):
             ws_sym  = await self._spot_ws_symbol(api_symbol)
             payload = {"method": "subscribe", "params": {"channel": "trade", "symbol": [ws_sym], "snapshot": True}}
             async for data in self._ws_connect(self.spot_ws_url, payload):
-                if data.get("type") in ["snapshot", "update"] and data.get("channel") == "trade":
-                    for t in data.get("data", []):
-                        side_raw = t.get("side")
-                        if side_raw is None:
-                            continue
-                        side_norm = side_raw.lower()
-                        if side_norm not in ("buy", "sell"):
-                            continue
-                        yield _mk_trade(
-                            trade_id   = str(t.get("trade_id", t.get("timestamp", time.time()))),
-                            price      = float(t.get("price", 0)),
-                            qty_native = float(t.get("qty", 0)),
-                            side_norm  = side_norm,
-                            ts         = t.get("timestamp", time.time()),
-                        )
+                try:
+                    if data.get("type") in ["snapshot", "update"] and data.get("channel") == "trade":
+                        for t in data.get("data", []):
+                            side_raw = t.get("side")
+                            if side_raw is None:
+                                continue
+                            side_norm = side_raw.lower()
+                            if side_norm not in ("buy", "sell"):
+                                continue
+                            yield _mk_trade(
+                                trade_id   = str(t.get("trade_id", t.get("timestamp", time.time()))),
+                                price      = float(t.get("price", 0)),
+                                qty_native = float(t.get("qty", 0)),
+                                side_norm  = side_norm,
+                                ts         = t.get("timestamp", time.time()),
+                            )
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                    logger.warning(f"Kraken trades {api_symbol} malformed frame skipped: {e!r}")
         else:
             payload = {"event": "subscribe", "feed": "trade", "product_ids": [api_symbol]}
             async for data in self._ws_connect(self.futures_ws_url, payload):
-                feed = data.get("feed")
-                if feed == "trade" and "price" in data:
-                    side_raw = data.get("side")
-                    if side_raw is None:
-                        continue
-                    side_norm = side_raw.lower()
-                    if side_norm not in ("buy", "sell"):
-                        continue
-                    yield _mk_trade(
-                        trade_id   = str(data.get("uid", data.get("time"))),
-                        price      = float(data["price"]),
-                        qty_native = float(data.get("qty", 0)),
-                        side_norm  = side_norm,
-                        ts         = data.get("time", time.time()),
-                    )
-                elif feed == "trade_snapshot" and "trades" in data:
-                    snapshot_trades = sorted(data["trades"], key=lambda t: t.get("time", 0))
-                    for t in snapshot_trades:
-                        side_raw = t.get("side")
+                try:
+                    feed = data.get("feed")
+                    if feed == "trade" and "price" in data:
+                        side_raw = data.get("side")
                         if side_raw is None:
                             continue
                         side_norm = side_raw.lower()
                         if side_norm not in ("buy", "sell"):
                             continue
                         yield _mk_trade(
-                            trade_id   = str(t.get("uid", t.get("time"))),
-                            price      = float(t["price"]),
-                            qty_native = float(t.get("qty", 0)),
+                            trade_id   = str(data.get("uid", data.get("time"))),
+                            price      = float(data["price"]),
+                            qty_native = float(data.get("qty", 0)),
                             side_norm  = side_norm,
-                            ts         = t.get("time", time.time()),
+                            ts         = data.get("time", time.time()),
                         )
+                    elif feed == "trade_snapshot" and "trades" in data:
+                        snapshot_trades = sorted(data["trades"], key=lambda t: t.get("time", 0))
+                        for t in snapshot_trades:
+                            side_raw = t.get("side")
+                            if side_raw is None:
+                                continue
+                            side_norm = side_raw.lower()
+                            if side_norm not in ("buy", "sell"):
+                                continue
+                            yield _mk_trade(
+                                trade_id   = str(t.get("uid", t.get("time"))),
+                                price      = float(t["price"]),
+                                qty_native = float(t.get("qty", 0)),
+                                side_norm  = side_norm,
+                                ts         = t.get("time", time.time()),
+                            )
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                    logger.warning(f"Kraken trades {api_symbol} malformed frame skipped: {e!r}")
 
 
     async def stream_mark_price(self, market_type: MarketType, symbol: str) -> AsyncGenerator[MarkPrice, None]:
@@ -1694,34 +1728,37 @@ class KrakenAdapter(BaseExchange):
         payload    = {"event": "subscribe", "feed": "ticker", "product_ids": [api_symbol]}
 
         async for data in self._ws_connect(self.futures_ws_url, payload):
-            if data.get("feed") == "ticker" and "markPrice" in data:
-                mark = float(data["markPrice"])
-                idx_raw = data.get("indexPrice")
-                idx_price: Optional[float] = float(idx_raw) if idx_raw is not None else None
-                rel_raw = data.get("relative_funding_rate")
-                rel_rate: Optional[float] = float(rel_raw) if rel_raw is not None else None
-                if rel_rate is None:
-                    abs_raw = data.get("funding_rate")
-                    if abs_raw is not None and mark > 0:
-                        abs_rate = float(abs_raw)
-                        rel_rate = abs_rate / mark if market_type == MarketType.LINEAR else abs_rate * mark
-                ts = self.normalize_timestamp(data.get("time", time.time()))
+            try:
+                if data.get("feed") == "ticker" and "markPrice" in data:
+                    mark = float(data["markPrice"])
+                    idx_raw = data.get("indexPrice")
+                    idx_price: Optional[float] = float(idx_raw) if idx_raw is not None else None
+                    rel_raw = data.get("relative_funding_rate")
+                    rel_rate: Optional[float] = float(rel_raw) if rel_raw is not None else None
+                    if rel_rate is None:
+                        abs_raw = data.get("funding_rate")
+                        if abs_raw is not None and mark > 0:
+                            abs_rate = float(abs_raw)
+                            rel_rate = abs_rate / mark if market_type == MarketType.LINEAR else abs_rate * mark
+                    ts = self.normalize_timestamp(data.get("time", time.time()))
 
-                funding_block = None
-                if rel_rate is not None:
-                    funding_block = build_funding_current(
-                        kind           = "continuous",
-                        per_cycle      = rel_rate,
-                        cycle_ms       = 3_600_000,
-                        valid_until_ts = ts + 3_600_000,
+                    funding_block = None
+                    if rel_rate is not None:
+                        funding_block = build_funding_current(
+                            kind           = "continuous",
+                            per_cycle      = rel_rate,
+                            cycle_ms       = 3_600_000,
+                            valid_until_ts = ts + 3_600_000,
+                        )
+
+                    yield MarkPrice(
+                        symbol      = model_sym,
+                        market_type = market_type,
+                        quote       = quote,
+                        mark_price  = mark,
+                        index_price = idx_price,
+                        funding     = funding_block,
+                        timestamp   = ts,
                     )
-
-                yield MarkPrice(
-                    symbol      = model_sym,
-                    market_type = market_type,
-                    quote       = quote,
-                    mark_price  = mark,
-                    index_price = idx_price,
-                    funding     = funding_block,
-                    timestamp   = ts,
-                )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"Kraken mark_price {api_symbol} malformed frame skipped: {e!r}")

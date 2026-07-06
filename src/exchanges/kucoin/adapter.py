@@ -1314,60 +1314,66 @@ class KucoinAdapter(BaseExchange):
         if market_type == MarketType.SPOT:
             topic = f"/market/snapshot:{api_symbol}"
             async for msg in self._ws_connect(market_type, topic):
-                d = (msg.get("data") or {}).get("data") or {}
-                if not d:
-                    continue
-                last = float(d.get("lastTradedPrice") or d.get("close") or 0)
+                try:
+                    d = (msg.get("data") or {}).get("data") or {}
+                    if not d:
+                        continue
+                    last = float(d.get("lastTradedPrice") or d.get("close") or 0)
+                    yield Ticker(
+                        symbol               = model_sym,
+                        market_type          = market_type,
+                        quote                = quote,
+                        price                = last,
+                        open_24h             = float(d.get("open") or 0),
+                        high_24h             = float(d.get("high") or 0),
+                        low_24h              = float(d.get("low") or 0),
+                        volume_24h           = build_volume_value(
+                            native        = float(d.get("vol") or 0),
+                            volume_unit   = "base",
+                            contract_size = None,
+                            close         = last,
+                        ),
+                        price_change_percent = float(d.get("changeRate") or 0) * 100,
+                        timestamp            = int(d.get("datetime") or int(time.time() * 1000)),
+                    )
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                    logger.warning(f"KuCoin ticker {api_symbol} malformed frame skipped: {e!r}")
+            return
+
+        topic = f"/contractMarket/snapshot:{api_symbol}"
+        async for msg in self._ws_connect(market_type, topic):
+            try:
+                d = msg.get("data") or {}
+                last      = float(d.get("lastPrice") or 0)
+                price_chg = float(d.get("priceChg") or 0)
+                vol_raw   = float(d.get("volume") or 0)
+                if is_inverse:
+                    vol_native = vol_raw
+                    vol_unit   = "contract"
+                    vol_cs     = contract_size
+                else:
+                    vol_native = vol_raw
+                    vol_unit   = "base"
+                    vol_cs     = None
                 yield Ticker(
                     symbol               = model_sym,
                     market_type          = market_type,
                     quote                = quote,
                     price                = last,
-                    open_24h             = float(d.get("open") or 0),
-                    high_24h             = float(d.get("high") or 0),
-                    low_24h              = float(d.get("low") or 0),
+                    open_24h             = last - price_chg,
+                    high_24h             = float(d.get("highPrice") or 0),
+                    low_24h              = float(d.get("lowPrice") or 0),
                     volume_24h           = build_volume_value(
-                        native        = float(d.get("vol") or 0),
-                        volume_unit   = "base",
-                        contract_size = None,
+                        native        = vol_native,
+                        volume_unit   = vol_unit,
+                        contract_size = vol_cs,
                         close         = last,
                     ),
-                    price_change_percent = float(d.get("changeRate") or 0) * 100,
-                    timestamp            = int(d.get("datetime") or int(time.time() * 1000)),
+                    price_change_percent = float(d.get("priceChgPct") or 0) * 100,
+                    timestamp            = self._ns_to_ms(d.get("ts") or d.get("datetime") or int(time.time() * 1000)),
                 )
-            return
-
-        topic = f"/contractMarket/snapshot:{api_symbol}"
-        async for msg in self._ws_connect(market_type, topic):
-            d = msg.get("data") or {}
-            last      = float(d.get("lastPrice") or 0)
-            price_chg = float(d.get("priceChg") or 0)
-            vol_raw   = float(d.get("volume") or 0)
-            if is_inverse:
-                vol_native = vol_raw
-                vol_unit   = "contract"
-                vol_cs     = contract_size
-            else:
-                vol_native = vol_raw
-                vol_unit   = "base"
-                vol_cs     = None
-            yield Ticker(
-                symbol               = model_sym,
-                market_type          = market_type,
-                quote                = quote,
-                price                = last,
-                open_24h             = last - price_chg,
-                high_24h             = float(d.get("highPrice") or 0),
-                low_24h              = float(d.get("lowPrice") or 0),
-                volume_24h           = build_volume_value(
-                    native        = vol_native,
-                    volume_unit   = vol_unit,
-                    contract_size = vol_cs,
-                    close         = last,
-                ),
-                price_change_percent = float(d.get("priceChgPct") or 0) * 100,
-                timestamp            = self._ns_to_ms(d.get("ts") or d.get("datetime") or int(time.time() * 1000)),
-            )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"KuCoin ticker {api_symbol} malformed frame skipped: {e!r}")
 
 
     async def stream_book_ticker(self, market_type: MarketType, symbol: str) -> AsyncGenerator[BookTicker, None]:
@@ -1385,72 +1391,78 @@ class KucoinAdapter(BaseExchange):
         if market_type == MarketType.SPOT:
             topic = f"/spotMarket/level1:{api_symbol}"
             async for msg in self._ws_connect(market_type, topic):
+                try:
+                    d = msg.get("data") or {}
+                    bids = d.get("bids") or []
+                    asks = d.get("asks") or []
+                    if not bids or not asks:
+                        continue
+                    bid_price = float(bids[0])
+                    ask_price = float(asks[0])
+                    yield BookTicker(
+                        symbol      = model_sym,
+                        market_type = market_type,
+                        quote       = quote,
+                        bid_price   = bid_price,
+                        bid_qty     = build_qty_value(
+                            native        = float(bids[1]) if len(bids) > 1 else 0.0,
+                            qty_unit      = "base",
+                            contract_size = None,
+                            price         = bid_price,
+                        ),
+                        ask_price   = ask_price,
+                        ask_qty     = build_qty_value(
+                            native        = float(asks[1]) if len(asks) > 1 else 0.0,
+                            qty_unit      = "base",
+                            contract_size = None,
+                            price         = ask_price,
+                        ),
+                        timestamp   = self._ns_to_ms(d.get("timestamp") or d.get("time") or int(time.time() * 1000)),
+                    )
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                    logger.warning(f"KuCoin book_ticker {api_symbol} malformed frame skipped: {e!r}")
+            return
+
+        topic = f"/contractMarket/tickerV2:{api_symbol}"
+        async for msg in self._ws_connect(market_type, topic):
+            try:
                 d = msg.get("data") or {}
-                bids = d.get("bids") or []
-                asks = d.get("asks") or []
-                if not bids or not asks:
-                    continue
-                bid_price = float(bids[0])
-                ask_price = float(asks[0])
+                bid_price = float(d.get("bestBidPrice") or 0)
+                ask_price = float(d.get("bestAskPrice") or 0)
+                bid_sz    = float(d.get("bestBidSize") or 0)
+                ask_sz    = float(d.get("bestAskSize") or 0)
+                if is_inverse:
+                    bid_native = bid_sz
+                    ask_native = ask_sz
+                    qty_unit_local = "contract"
+                    qty_cs = contract_size
+                else:
+                    bid_native = bid_sz * contract_size
+                    ask_native = ask_sz * contract_size
+                    qty_unit_local = "base"
+                    qty_cs = None
                 yield BookTicker(
                     symbol      = model_sym,
                     market_type = market_type,
                     quote       = quote,
                     bid_price   = bid_price,
                     bid_qty     = build_qty_value(
-                        native        = float(bids[1]) if len(bids) > 1 else 0.0,
-                        qty_unit      = "base",
-                        contract_size = None,
+                        native        = bid_native,
+                        qty_unit      = qty_unit_local,
+                        contract_size = qty_cs,
                         price         = bid_price,
                     ),
                     ask_price   = ask_price,
                     ask_qty     = build_qty_value(
-                        native        = float(asks[1]) if len(asks) > 1 else 0.0,
-                        qty_unit      = "base",
-                        contract_size = None,
+                        native        = ask_native,
+                        qty_unit      = qty_unit_local,
+                        contract_size = qty_cs,
                         price         = ask_price,
                     ),
-                    timestamp   = self._ns_to_ms(d.get("timestamp") or d.get("time") or int(time.time() * 1000)),
+                    timestamp   = self._ns_to_ms(d.get("ts") or int(time.time() * 1000)),
                 )
-            return
-
-        topic = f"/contractMarket/tickerV2:{api_symbol}"
-        async for msg in self._ws_connect(market_type, topic):
-            d = msg.get("data") or {}
-            bid_price = float(d.get("bestBidPrice") or 0)
-            ask_price = float(d.get("bestAskPrice") or 0)
-            bid_sz    = float(d.get("bestBidSize") or 0)
-            ask_sz    = float(d.get("bestAskSize") or 0)
-            if is_inverse:
-                bid_native = bid_sz
-                ask_native = ask_sz
-                qty_unit_local = "contract"
-                qty_cs = contract_size
-            else:
-                bid_native = bid_sz * contract_size
-                ask_native = ask_sz * contract_size
-                qty_unit_local = "base"
-                qty_cs = None
-            yield BookTicker(
-                symbol      = model_sym,
-                market_type = market_type,
-                quote       = quote,
-                bid_price   = bid_price,
-                bid_qty     = build_qty_value(
-                    native        = bid_native,
-                    qty_unit      = qty_unit_local,
-                    contract_size = qty_cs,
-                    price         = bid_price,
-                ),
-                ask_price   = ask_price,
-                ask_qty     = build_qty_value(
-                    native        = ask_native,
-                    qty_unit      = qty_unit_local,
-                    contract_size = qty_cs,
-                    price         = ask_price,
-                ),
-                timestamp   = self._ns_to_ms(d.get("ts") or int(time.time() * 1000)),
-            )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"KuCoin book_ticker {api_symbol} malformed frame skipped: {e!r}")
 
 
     async def stream_orderbook(self, market_type: MarketType, symbol: str, depth: int = 20, update_speed: str = "100ms") -> AsyncGenerator[OrderBook, None]:
@@ -1477,17 +1489,20 @@ class KucoinAdapter(BaseExchange):
             qty_unit = "base"
 
         async for msg in self._ws_connect(market_type, topic):
-            d  = msg.get("data") or {}
-            ts = d.get("timestamp") or d.get("ts") or d.get("time") or 0
-            yield OrderBook(
-                symbol      = model_sym,
-                market_type = market_type,
-                quote       = quote,
-                bids        = [[float(p), float(q) * qty_mult] for p, q, *_ in d.get("bids", [])][:depth],
-                asks        = [[float(p), float(q) * qty_mult] for p, q, *_ in d.get("asks", [])][:depth],
-                qty_unit    = qty_unit,
-                timestamp   = self._ns_to_ms(ts),
-            )
+            try:
+                d  = msg.get("data") or {}
+                ts = d.get("timestamp") or d.get("ts") or d.get("time") or 0
+                yield OrderBook(
+                    symbol      = model_sym,
+                    market_type = market_type,
+                    quote       = quote,
+                    bids        = [[float(p), float(q) * qty_mult] for p, q, *_ in d.get("bids", [])][:depth],
+                    asks        = [[float(p), float(q) * qty_mult] for p, q, *_ in d.get("asks", [])][:depth],
+                    qty_unit    = qty_unit,
+                    timestamp   = self._ns_to_ms(ts),
+                )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"KuCoin orderbook {api_symbol} malformed frame skipped: {e!r}")
 
 
     async def stream_trades(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Trade, None]:
@@ -1505,6 +1520,38 @@ class KucoinAdapter(BaseExchange):
         if market_type == MarketType.SPOT:
             topic = f"/market/match:{api_symbol}"
             async for msg in self._ws_connect(market_type, topic):
+                try:
+                    d = msg.get("data") or {}
+                    side_raw = d.get("side")
+                    if side_raw is None:
+                        continue
+                    side_norm = side_raw.lower()
+                    if side_norm not in ("buy", "sell"):
+                        continue
+                    raw_id = d.get("tradeId") or d.get("sequence")
+                    price  = float(d.get("price") or 0)
+                    yield Trade(
+                        id          = str(raw_id) if raw_id else None,
+                        symbol      = model_sym,
+                        market_type = market_type,
+                        quote       = quote,
+                        price       = price,
+                        qty         = build_qty_value(
+                            native        = float(d.get("size") or 0),
+                            qty_unit      = unit,
+                            contract_size = contract_size,
+                            price         = price,
+                        ),
+                        side        = side_norm,
+                        timestamp   = self._ns_to_ms(d.get("time") or int(time.time() * 1000)),
+                    )
+                except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                    logger.warning(f"KuCoin trades {api_symbol} malformed frame skipped: {e!r}")
+            return
+
+        topic = f"/contractMarket/execution:{api_symbol}"
+        async for msg in self._ws_connect(market_type, topic):
+            try:
                 d = msg.get("data") or {}
                 side_raw = d.get("side")
                 if side_raw is None:
@@ -1512,8 +1559,17 @@ class KucoinAdapter(BaseExchange):
                 side_norm = side_raw.lower()
                 if side_norm not in ("buy", "sell"):
                     continue
-                raw_id = d.get("tradeId") or d.get("sequence")
-                price  = float(d.get("price") or 0)
+                raw_id   = d.get("tradeId") or d.get("sequence")
+                price    = float(d.get("price") or 0)
+                size_raw = float(d.get("size") or 0)
+                if is_inverse:
+                    native = size_raw
+                    qty_unit_local = "contract"
+                    qty_cs = contract_size
+                else:
+                    native = size_raw * contract_size
+                    qty_unit_local = "base"
+                    qty_cs = None
                 yield Trade(
                     id          = str(raw_id) if raw_id else None,
                     symbol      = model_sym,
@@ -1521,51 +1577,16 @@ class KucoinAdapter(BaseExchange):
                     quote       = quote,
                     price       = price,
                     qty         = build_qty_value(
-                        native        = float(d.get("size") or 0),
-                        qty_unit      = unit,
-                        contract_size = contract_size,
+                        native        = native,
+                        qty_unit      = qty_unit_local,
+                        contract_size = qty_cs,
                         price         = price,
                     ),
                     side        = side_norm,
-                    timestamp   = self._ns_to_ms(d.get("time") or int(time.time() * 1000)),
+                    timestamp   = self._ns_to_ms(d.get("ts") or int(time.time() * 1000)),
                 )
-            return
-
-        topic = f"/contractMarket/execution:{api_symbol}"
-        async for msg in self._ws_connect(market_type, topic):
-            d = msg.get("data") or {}
-            side_raw = d.get("side")
-            if side_raw is None:
-                continue
-            side_norm = side_raw.lower()
-            if side_norm not in ("buy", "sell"):
-                continue
-            raw_id   = d.get("tradeId") or d.get("sequence")
-            price    = float(d.get("price") or 0)
-            size_raw = float(d.get("size") or 0)
-            if is_inverse:
-                native = size_raw
-                qty_unit_local = "contract"
-                qty_cs = contract_size
-            else:
-                native = size_raw * contract_size
-                qty_unit_local = "base"
-                qty_cs = None
-            yield Trade(
-                id          = str(raw_id) if raw_id else None,
-                symbol      = model_sym,
-                market_type = market_type,
-                quote       = quote,
-                price       = price,
-                qty         = build_qty_value(
-                    native        = native,
-                    qty_unit      = qty_unit_local,
-                    contract_size = qty_cs,
-                    price         = price,
-                ),
-                side        = side_norm,
-                timestamp   = self._ns_to_ms(d.get("ts") or int(time.time() * 1000)),
-            )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"KuCoin trades {api_symbol} malformed frame skipped: {e!r}")
 
 
     async def stream_mark_price(self, market_type: MarketType, symbol: str) -> AsyncGenerator[MarkPrice, None]:
@@ -1579,39 +1600,42 @@ class KucoinAdapter(BaseExchange):
         topic      = f"/contract/instrument:{api_symbol}"
 
         async for msg in self._ws_connect(market_type, topic):
-            d = msg.get("data") or {}
-            subject = msg.get("subject", "")
-            mark = float(d.get("markPrice") or 0)
-            if not mark and subject != "mark.index.price":
-                continue
-            next_ft_raw = d.get("nextFundingTime")
-            next_ft: Optional[int] = None
-            if next_ft_raw:
-                try:
-                    v = int(next_ft_raw)
-                    if v > 0:
-                        next_ft = v
-                except (TypeError, ValueError):
-                    pass
-            idx_raw  = d.get("indexPrice")
-            rate_raw = d.get("fundingRate")
-            ts       = self._ns_to_ms(d.get("timestamp") or d.get("ts") or int(time.time() * 1000))
+            try:
+                d = msg.get("data") or {}
+                subject = msg.get("subject", "")
+                mark = float(d.get("markPrice") or 0)
+                if not mark and subject != "mark.index.price":
+                    continue
+                next_ft_raw = d.get("nextFundingTime")
+                next_ft: Optional[int] = None
+                if next_ft_raw:
+                    try:
+                        v = int(next_ft_raw)
+                        if v > 0:
+                            next_ft = v
+                    except (TypeError, ValueError):
+                        pass
+                idx_raw  = d.get("indexPrice")
+                rate_raw = d.get("fundingRate")
+                ts       = self._ns_to_ms(d.get("timestamp") or d.get("ts") or int(time.time() * 1000))
 
-            funding_block = None
-            if rate_raw is not None and cycle_ms is not None and next_ft is not None:
-                funding_block = build_funding_current(
-                    kind           = "discrete",
-                    per_cycle      = float(rate_raw),
-                    cycle_ms       = cycle_ms,
-                    valid_until_ts = max(next_ft, ts + 1),
+                funding_block = None
+                if rate_raw is not None and cycle_ms is not None and next_ft is not None:
+                    funding_block = build_funding_current(
+                        kind           = "discrete",
+                        per_cycle      = float(rate_raw),
+                        cycle_ms       = cycle_ms,
+                        valid_until_ts = max(next_ft, ts + 1),
+                    )
+
+                yield MarkPrice(
+                    symbol      = model_sym,
+                    market_type = market_type,
+                    quote       = quote,
+                    mark_price  = mark,
+                    index_price = float(idx_raw) if idx_raw is not None else None,
+                    funding     = funding_block,
+                    timestamp   = ts,
                 )
-
-            yield MarkPrice(
-                symbol      = model_sym,
-                market_type = market_type,
-                quote       = quote,
-                mark_price  = mark,
-                index_price = float(idx_raw) if idx_raw is not None else None,
-                funding     = funding_block,
-                timestamp   = ts,
-            )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"KuCoin mark_price {api_symbol} malformed frame skipped: {e!r}")

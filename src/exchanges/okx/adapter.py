@@ -1281,41 +1281,44 @@ class OkxAdapter(BaseExchange):
         contract_size = info.contract_size if info else None
 
         async for msg in self._ws_connect([{"channel": "tickers", "instId": api_symbol}]):
-            for t in msg.get("data", []):
-                last     = float(t.get("last") or 0)
-                open_24h = float(t.get("open24h") or 0)
-                pct      = ((last - open_24h) / open_24h * 100) if open_24h else 0.0
+            try:
+                for t in msg.get("data", []):
+                    last     = float(t.get("last") or 0)
+                    open_24h = float(t.get("open24h") or 0)
+                    pct      = ((last - open_24h) / open_24h * 100) if open_24h else 0.0
 
-                if market_type == MarketType.LINEAR:
-                    vol_native = float(t.get("volCcy24h") or 0)
-                    vol_unit   = "base"
-                    vol_cs     = None
-                elif market_type == MarketType.INVERSE:
-                    vol_native = float(t.get("vol24h") or 0)
-                    vol_unit   = "contract"
-                    vol_cs     = contract_size
-                else:
-                    vol_native = float(t.get("vol24h") or 0)
-                    vol_unit   = "base"
-                    vol_cs     = None
+                    if market_type == MarketType.LINEAR:
+                        vol_native = float(t.get("volCcy24h") or 0)
+                        vol_unit   = "base"
+                        vol_cs     = None
+                    elif market_type == MarketType.INVERSE:
+                        vol_native = float(t.get("vol24h") or 0)
+                        vol_unit   = "contract"
+                        vol_cs     = contract_size
+                    else:
+                        vol_native = float(t.get("vol24h") or 0)
+                        vol_unit   = "base"
+                        vol_cs     = None
 
-                yield Ticker(
-                    symbol               = model_sym,
-                    market_type          = market_type,
-                    quote                = quote,
-                    price                = last,
-                    open_24h             = open_24h,
-                    high_24h             = float(t.get("high24h") or 0),
-                    low_24h              = float(t.get("low24h") or 0),
-                    volume_24h           = build_volume_value(
-                        native        = vol_native,
-                        volume_unit   = vol_unit,
-                        contract_size = vol_cs,
-                        close         = last,
-                    ),
-                    price_change_percent = pct,
-                    timestamp            = self.normalize_timestamp(t["ts"]),
-                )
+                    yield Ticker(
+                        symbol               = model_sym,
+                        market_type          = market_type,
+                        quote                = quote,
+                        price                = last,
+                        open_24h             = open_24h,
+                        high_24h             = float(t.get("high24h") or 0),
+                        low_24h              = float(t.get("low24h") or 0),
+                        volume_24h           = build_volume_value(
+                            native        = vol_native,
+                            volume_unit   = vol_unit,
+                            contract_size = vol_cs,
+                            close         = last,
+                        ),
+                        price_change_percent = pct,
+                        timestamp            = self.normalize_timestamp(t["ts"]),
+                    )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"OKX ticker {api_symbol} malformed frame skipped: {e!r}")
 
 
     async def stream_book_ticker(self, market_type: MarketType, symbol: str) -> AsyncGenerator[BookTicker, None]:
@@ -1329,52 +1332,55 @@ class OkxAdapter(BaseExchange):
             raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
 
         async for msg in self._ws_connect([{"channel": "bbo-tbt", "instId": api_symbol}]):
-            for b in msg.get("data", []):
-                bids = b.get("bids", [])
-                asks = b.get("asks", [])
-                if not bids or not asks:
-                    continue
-                bid_price = float(bids[0][0])
-                ask_price = float(asks[0][0])
-                bid_raw   = float(bids[0][1])
-                ask_raw   = float(asks[0][1])
+            try:
+                for b in msg.get("data", []):
+                    bids = b.get("bids", [])
+                    asks = b.get("asks", [])
+                    if not bids or not asks:
+                        continue
+                    bid_price = float(bids[0][0])
+                    ask_price = float(asks[0][0])
+                    bid_raw   = float(bids[0][1])
+                    ask_raw   = float(asks[0][1])
 
-                if market_type == MarketType.LINEAR:
-                    bid_native = bid_raw * contract_size
-                    ask_native = ask_raw * contract_size
-                    qty_unit   = "base"
-                    qty_cs     = None
-                elif market_type == MarketType.INVERSE:
-                    bid_native = bid_raw
-                    ask_native = ask_raw
-                    qty_unit   = "contract"
-                    qty_cs     = contract_size
-                else:
-                    bid_native = bid_raw
-                    ask_native = ask_raw
-                    qty_unit   = "base"
-                    qty_cs     = None
+                    if market_type == MarketType.LINEAR:
+                        bid_native = bid_raw * contract_size
+                        ask_native = ask_raw * contract_size
+                        qty_unit   = "base"
+                        qty_cs     = None
+                    elif market_type == MarketType.INVERSE:
+                        bid_native = bid_raw
+                        ask_native = ask_raw
+                        qty_unit   = "contract"
+                        qty_cs     = contract_size
+                    else:
+                        bid_native = bid_raw
+                        ask_native = ask_raw
+                        qty_unit   = "base"
+                        qty_cs     = None
 
-                yield BookTicker(
-                    symbol      = model_sym,
-                    market_type = market_type,
-                    quote       = quote,
-                    bid_price   = bid_price,
-                    bid_qty     = build_qty_value(
-                        native        = bid_native,
-                        qty_unit      = qty_unit,
-                        contract_size = qty_cs,
-                        price         = bid_price,
-                    ),
-                    ask_price   = ask_price,
-                    ask_qty     = build_qty_value(
-                        native        = ask_native,
-                        qty_unit      = qty_unit,
-                        contract_size = qty_cs,
-                        price         = ask_price,
-                    ),
-                    timestamp   = self.normalize_timestamp(b["ts"]),
-                )
+                    yield BookTicker(
+                        symbol      = model_sym,
+                        market_type = market_type,
+                        quote       = quote,
+                        bid_price   = bid_price,
+                        bid_qty     = build_qty_value(
+                            native        = bid_native,
+                            qty_unit      = qty_unit,
+                            contract_size = qty_cs,
+                            price         = bid_price,
+                        ),
+                        ask_price   = ask_price,
+                        ask_qty     = build_qty_value(
+                            native        = ask_native,
+                            qty_unit      = qty_unit,
+                            contract_size = qty_cs,
+                            price         = ask_price,
+                        ),
+                        timestamp   = self.normalize_timestamp(b["ts"]),
+                    )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"OKX book_ticker {api_symbol} malformed frame skipped: {e!r}")
 
 
     async def stream_orderbook(self, market_type: MarketType, symbol: str, depth: int = 20, update_speed: str = "100ms") -> AsyncGenerator[OrderBook, None]:
@@ -1401,44 +1407,53 @@ class OkxAdapter(BaseExchange):
         bids: Dict[float, float] = {}
         asks: Dict[float, float] = {}
         last_seq: Optional[int] = None
+        bootstrapped            = False
 
         async for msg in self._ws_connect([{"channel": channel, "instId": api_symbol}]):
-            action = msg.get("action")
-            for b in msg.get("data", []):
-                if channel != "books" or action != "update":
-                    bids.clear()
-                    asks.clear()
-                    last_seq = b.get("seqId")
-                else:
-                    prev = b.get("prevSeqId")
-                    if last_seq is not None and prev is not None and prev != last_seq:
-                        logger.warning(f"OKX orderbook {api_symbol} sequence gap: prevSeqId={prev} != last seqId={last_seq}")
-                    last_seq = b.get("seqId")
-                for entry in b.get("bids", []):
-                    p, q = float(entry[0]), float(entry[1])
-                    if q == 0:
-                        bids.pop(p, None)
+            try:
+                action = msg.get("action")
+                for b in msg.get("data", []):
+                    if channel != "books" or action != "update":
+                        bids.clear()
+                        asks.clear()
+                        last_seq     = b.get("seqId")
+                        bootstrapped = True
                     else:
-                        bids[p] = q * qty_mult
-                for entry in b.get("asks", []):
-                    p, q = float(entry[0]), float(entry[1])
-                    if q == 0:
-                        asks.pop(p, None)
-                    else:
-                        asks[p] = q * qty_mult
+                        prev = b.get("prevSeqId")
+                        if last_seq is not None and prev is not None and prev != last_seq:
+                            logger.warning(f"OKX orderbook {api_symbol} sequence gap: prevSeqId={prev} != last seqId={last_seq}; ending stream so clients resync")
+                            return
+                        last_seq = b.get("seqId")
+                    if not bootstrapped:
+                        continue
+                    for entry in b.get("bids", []):
+                        p, q = float(entry[0]), float(entry[1])
+                        if q == 0:
+                            bids.pop(p, None)
+                        else:
+                            bids[p] = q * qty_mult
+                    for entry in b.get("asks", []):
+                        p, q = float(entry[0]), float(entry[1])
+                        if q == 0:
+                            asks.pop(p, None)
+                        else:
+                            asks[p] = q * qty_mult
 
-                sorted_bids = sorted(bids.items(), key=lambda kv: -kv[0])[:depth]
-                sorted_asks = sorted(asks.items(), key=lambda kv: kv[0])[:depth]
+                    sorted_bids = sorted(bids.items(), key=lambda kv: -kv[0])[:depth]
+                    sorted_asks = sorted(asks.items(), key=lambda kv: kv[0])[:depth]
 
-                yield OrderBook(
-                    symbol      = model_sym,
-                    market_type = market_type,
-                    quote       = quote,
-                    bids        = [[p, q] for p, q in sorted_bids],
-                    asks        = [[p, q] for p, q in sorted_asks],
-                    qty_unit    = ob_qty_unit,
-                    timestamp   = self.normalize_timestamp(b["ts"]),
-                )
+                    yield OrderBook(
+                        symbol      = model_sym,
+                        market_type = market_type,
+                        quote       = quote,
+                        bids        = [[p, q] for p, q in sorted_bids],
+                        asks        = [[p, q] for p, q in sorted_asks],
+                        qty_unit    = ob_qty_unit,
+                        timestamp   = self.normalize_timestamp(b["ts"]),
+                    )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"OKX orderbook {api_symbol} parse error mid-delta: {e!r}; ending stream so clients resync")
+                return
 
 
     async def stream_trades(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Trade, None]:
@@ -1452,36 +1467,39 @@ class OkxAdapter(BaseExchange):
             raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
 
         async for msg in self._ws_connect([{"channel": "trades", "instId": api_symbol}]):
-            for t in msg.get("data", []):
-                price  = float(t["px"])
-                sz_raw = float(t["sz"])
-                if market_type == MarketType.LINEAR:
-                    native = sz_raw * contract_size
-                    qty_unit_local = "base"
-                    qty_cs = None
-                elif market_type == MarketType.INVERSE:
-                    native = sz_raw
-                    qty_unit_local = "contract"
-                    qty_cs = contract_size
-                else:
-                    native = sz_raw
-                    qty_unit_local = "base"
-                    qty_cs = None
-                yield Trade(
-                    id          = str(t["tradeId"]),
-                    symbol      = model_sym,
-                    market_type = market_type,
-                    quote       = quote,
-                    price       = price,
-                    qty         = build_qty_value(
-                        native        = native,
-                        qty_unit      = qty_unit_local,
-                        contract_size = qty_cs,
-                        price         = price,
-                    ),
-                    side        = t["side"],
-                    timestamp   = self.normalize_timestamp(t["ts"]),
-                )
+            try:
+                for t in msg.get("data", []):
+                    price  = float(t["px"])
+                    sz_raw = float(t["sz"])
+                    if market_type == MarketType.LINEAR:
+                        native = sz_raw * contract_size
+                        qty_unit_local = "base"
+                        qty_cs = None
+                    elif market_type == MarketType.INVERSE:
+                        native = sz_raw
+                        qty_unit_local = "contract"
+                        qty_cs = contract_size
+                    else:
+                        native = sz_raw
+                        qty_unit_local = "base"
+                        qty_cs = None
+                    yield Trade(
+                        id          = str(t["tradeId"]),
+                        symbol      = model_sym,
+                        market_type = market_type,
+                        quote       = quote,
+                        price       = price,
+                        qty         = build_qty_value(
+                            native        = native,
+                            qty_unit      = qty_unit_local,
+                            contract_size = qty_cs,
+                            price         = price,
+                        ),
+                        side        = t["side"],
+                        timestamp   = self.normalize_timestamp(t["ts"]),
+                    )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"OKX trades {api_symbol} malformed frame skipped: {e!r}")
 
 
     async def stream_mark_price(self, market_type: MarketType, symbol: str) -> AsyncGenerator[MarkPrice, None]:
@@ -1493,16 +1511,19 @@ class OkxAdapter(BaseExchange):
         quote      = info.quote_asset if info else ""
 
         async for msg in self._ws_connect([{"channel": "mark-price", "instId": api_symbol}]):
-            for m in msg.get("data", []):
-                yield MarkPrice(
-                    symbol      = model_sym,
-                    market_type = market_type,
-                    quote       = quote,
-                    mark_price  = float(m["markPx"]),
-                    index_price = None,
-                    funding     = None,
-                    timestamp   = self.normalize_timestamp(m["ts"]),
-                )
+            try:
+                for m in msg.get("data", []):
+                    yield MarkPrice(
+                        symbol      = model_sym,
+                        market_type = market_type,
+                        quote       = quote,
+                        mark_price  = float(m["markPx"]),
+                        index_price = None,
+                        funding     = None,
+                        timestamp   = self.normalize_timestamp(m["ts"]),
+                    )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"OKX mark_price {api_symbol} malformed frame skipped: {e!r}")
 
 
     async def stream_liquidations(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Liquidation, None]:
@@ -1518,38 +1539,41 @@ class OkxAdapter(BaseExchange):
             raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
 
         async for msg in self._ws_connect([{"channel": "liquidation-orders", "instType": "SWAP"}]):
-            for entry in msg.get("data", []):
-                if entry.get("instId") != api_symbol:
-                    continue
-                for d in entry.get("details", []):
-                    side = d.get("side", "").lower()
-                    if side not in ("buy", "sell"):
+            try:
+                for entry in msg.get("data", []):
+                    if entry.get("instId") != api_symbol:
                         continue
-                    price  = float(d["bkPx"])
-                    sz_raw = float(d["sz"])
-                    if market_type == MarketType.LINEAR:
-                        native = sz_raw * contract_size
-                        qty_unit_local = "base"
-                        qty_cs = None
-                    elif market_type == MarketType.INVERSE:
-                        native = sz_raw
-                        qty_unit_local = "contract"
-                        qty_cs = contract_size
-                    else:
-                        native = sz_raw
-                        qty_unit_local = "base"
-                        qty_cs = None
-                    yield Liquidation(
-                        symbol      = model_sym,
-                        market_type = market_type,
-                        quote       = quote,
-                        side        = side,
-                        price       = price,
-                        qty         = build_qty_value(
-                            native        = native,
-                            qty_unit      = qty_unit_local,
-                            contract_size = qty_cs,
-                            price         = price,
-                        ),
-                        timestamp   = self.normalize_timestamp(d["ts"]),
-                    )
+                    for d in entry.get("details", []):
+                        side = d.get("side", "").lower()
+                        if side not in ("buy", "sell"):
+                            continue
+                        price  = float(d["bkPx"])
+                        sz_raw = float(d["sz"])
+                        if market_type == MarketType.LINEAR:
+                            native = sz_raw * contract_size
+                            qty_unit_local = "base"
+                            qty_cs = None
+                        elif market_type == MarketType.INVERSE:
+                            native = sz_raw
+                            qty_unit_local = "contract"
+                            qty_cs = contract_size
+                        else:
+                            native = sz_raw
+                            qty_unit_local = "base"
+                            qty_cs = None
+                        yield Liquidation(
+                            symbol      = model_sym,
+                            market_type = market_type,
+                            quote       = quote,
+                            side        = side,
+                            price       = price,
+                            qty         = build_qty_value(
+                                native        = native,
+                                qty_unit      = qty_unit_local,
+                                contract_size = qty_cs,
+                                price         = price,
+                            ),
+                            timestamp   = self.normalize_timestamp(d["ts"]),
+                        )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"OKX liquidations {api_symbol} malformed frame skipped: {e!r}")

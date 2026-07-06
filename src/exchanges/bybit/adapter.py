@@ -990,32 +990,35 @@ class BybitAdapter(BaseExchange):
         bootstrapped          = False
 
         async for msg in self._ws_connect(market_type, [topic]):
-            d = msg.get("data") or {}
-            if msg.get("type") == "snapshot":
-                state        = dict(d)
-                bootstrapped = True
-            else:
-                state.update(d)
-            if not bootstrapped:
-                continue
-            close_price = float(state.get("lastPrice") or 0)
-            yield Ticker(
-                symbol               = self.get_model_symbol(state.get("symbol", api_symbol), market_type),
-                market_type          = market_type,
-                quote                = quote,
-                price                = close_price,
-                open_24h             = float(state.get("prevPrice24h") or 0),
-                high_24h             = float(state.get("highPrice24h") or 0),
-                low_24h              = float(state.get("lowPrice24h") or 0),
-                volume_24h           = build_volume_value(
-                    native        = float(state.get("volume24h") or 0),
-                    volume_unit   = unit,
-                    contract_size = contract_size,
-                    close         = close_price,
-                ),
-                price_change_percent = float(state.get("price24hPcnt") or 0) * 100,
-                timestamp            = self.normalize_timestamp(msg.get("ts", time.time())),
-            )
+            try:
+                d = msg.get("data") or {}
+                if msg.get("type") == "snapshot":
+                    state        = dict(d)
+                    bootstrapped = True
+                else:
+                    state.update(d)
+                if not bootstrapped:
+                    continue
+                close_price = float(state.get("lastPrice") or 0)
+                yield Ticker(
+                    symbol               = self.get_model_symbol(state.get("symbol", api_symbol), market_type),
+                    market_type          = market_type,
+                    quote                = quote,
+                    price                = close_price,
+                    open_24h             = float(state.get("prevPrice24h") or 0),
+                    high_24h             = float(state.get("highPrice24h") or 0),
+                    low_24h              = float(state.get("lowPrice24h") or 0),
+                    volume_24h           = build_volume_value(
+                        native        = float(state.get("volume24h") or 0),
+                        volume_unit   = unit,
+                        contract_size = contract_size,
+                        close         = close_price,
+                    ),
+                    price_change_percent = float(state.get("price24hPcnt") or 0) * 100,
+                    timestamp            = self.normalize_timestamp(msg.get("ts", time.time())),
+                )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"Bybit ticker {api_symbol} malformed frame skipped: {e!r}")
 
 
     async def stream_book_ticker(self, market_type: MarketType, symbol: str) -> AsyncGenerator[BookTicker, None]:
@@ -1031,49 +1034,63 @@ class BybitAdapter(BaseExchange):
 
         bids: Dict[float, float] = {}
         asks: Dict[float, float] = {}
+        last_u: Optional[int] = None
+        bootstrapped          = False
 
         async for msg in self._ws_connect(market_type, [topic]):
-            d = msg.get("data") or {}
-            if msg.get("type") == "snapshot":
-                bids.clear()
-                asks.clear()
-            for p_str, q_str in d.get("b", []):
-                p, q = float(p_str), float(q_str)
-                if q == 0:
-                    bids.pop(p, None)
-                else:
-                    bids[p] = q
-            for p_str, q_str in d.get("a", []):
-                p, q = float(p_str), float(q_str)
-                if q == 0:
-                    asks.pop(p, None)
-                else:
-                    asks[p] = q
+            try:
+                d = msg.get("data") or {}
+                u = d.get("u")
+                if msg.get("type") == "snapshot":
+                    bids.clear()
+                    asks.clear()
+                    bootstrapped = True
+                elif last_u is not None and u is not None and u != last_u + 1:
+                    logger.warning(f"Bybit book_ticker {api_symbol} sequence gap: expected u={last_u + 1}, got u={u}; ending stream so clients resync")
+                    return
+                last_u = u
+                if not bootstrapped:
+                    continue
+                for p_str, q_str in d.get("b", []):
+                    p, q = float(p_str), float(q_str)
+                    if q == 0:
+                        bids.pop(p, None)
+                    else:
+                        bids[p] = q
+                for p_str, q_str in d.get("a", []):
+                    p, q = float(p_str), float(q_str)
+                    if q == 0:
+                        asks.pop(p, None)
+                    else:
+                        asks[p] = q
 
-            if not bids or not asks:
-                continue
-            bid_price = max(bids)
-            ask_price = min(asks)
-            yield BookTicker(
-                symbol      = self.get_model_symbol(d.get("s", api_symbol), market_type),
-                market_type = market_type,
-                quote       = quote,
-                bid_price   = bid_price,
-                bid_qty     = build_qty_value(
-                    native        = bids[bid_price],
-                    qty_unit      = unit,
-                    contract_size = contract_size,
-                    price         = bid_price,
-                ),
-                ask_price   = ask_price,
-                ask_qty     = build_qty_value(
-                    native        = asks[ask_price],
-                    qty_unit      = unit,
-                    contract_size = contract_size,
-                    price         = ask_price,
-                ),
-                timestamp   = self.normalize_timestamp(msg.get("ts")),
-            )
+                if not bids or not asks:
+                    continue
+                bid_price = max(bids)
+                ask_price = min(asks)
+                yield BookTicker(
+                    symbol      = self.get_model_symbol(d.get("s", api_symbol), market_type),
+                    market_type = market_type,
+                    quote       = quote,
+                    bid_price   = bid_price,
+                    bid_qty     = build_qty_value(
+                        native        = bids[bid_price],
+                        qty_unit      = unit,
+                        contract_size = contract_size,
+                        price         = bid_price,
+                    ),
+                    ask_price   = ask_price,
+                    ask_qty     = build_qty_value(
+                        native        = asks[ask_price],
+                        qty_unit      = unit,
+                        contract_size = contract_size,
+                        price         = ask_price,
+                    ),
+                    timestamp   = self.normalize_timestamp(msg.get("ts")),
+                )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"Bybit book_ticker {api_symbol} parse error mid-delta: {e!r}; ending stream so clients resync")
+                return
 
 
     async def stream_orderbook(self, market_type: MarketType, symbol: str, depth: int = 20, update_speed: str = "100ms") -> AsyncGenerator[OrderBook, None]:
@@ -1095,41 +1112,50 @@ class BybitAdapter(BaseExchange):
         bids: Dict[float, float] = {}
         asks: Dict[float, float] = {}
         last_u: Optional[int] = None
+        bootstrapped          = False
 
         async for msg in self._ws_connect(market_type, [topic]):
-            d = msg.get("data") or {}
-            u = d.get("u")
-            if msg.get("type") == "snapshot":
-                bids.clear()
-                asks.clear()
-            elif last_u is not None and u is not None and u != last_u + 1:
-                logger.warning(f"Bybit orderbook {api_symbol} sequence gap: expected u={last_u + 1}, got u={u}")
-            last_u = u
-            for p_str, q_str in d.get("b", []):
-                p, q = float(p_str), float(q_str)
-                if q == 0:
-                    bids.pop(p, None)
-                else:
-                    bids[p] = q
-            for p_str, q_str in d.get("a", []):
-                p, q = float(p_str), float(q_str)
-                if q == 0:
-                    asks.pop(p, None)
-                else:
-                    asks[p] = q
+            try:
+                d = msg.get("data") or {}
+                u = d.get("u")
+                if msg.get("type") == "snapshot":
+                    bids.clear()
+                    asks.clear()
+                    bootstrapped = True
+                elif last_u is not None and u is not None and u != last_u + 1:
+                    logger.warning(f"Bybit orderbook {api_symbol} sequence gap: expected u={last_u + 1}, got u={u}; ending stream so clients resync")
+                    return
+                last_u = u
+                if not bootstrapped:
+                    continue
+                for p_str, q_str in d.get("b", []):
+                    p, q = float(p_str), float(q_str)
+                    if q == 0:
+                        bids.pop(p, None)
+                    else:
+                        bids[p] = q
+                for p_str, q_str in d.get("a", []):
+                    p, q = float(p_str), float(q_str)
+                    if q == 0:
+                        asks.pop(p, None)
+                    else:
+                        asks[p] = q
 
-            sorted_bids = sorted(bids.items(), key=lambda kv: -kv[0])[:depth]
-            sorted_asks = sorted(asks.items(), key=lambda kv: kv[0])[:depth]
+                sorted_bids = sorted(bids.items(), key=lambda kv: -kv[0])[:depth]
+                sorted_asks = sorted(asks.items(), key=lambda kv: kv[0])[:depth]
 
-            yield OrderBook(
-                symbol      = self.get_model_symbol(d.get("s", api_symbol), market_type),
-                market_type = market_type,
-                quote       = quote,
-                bids        = [[p, q] for p, q in sorted_bids],
-                asks        = [[p, q] for p, q in sorted_asks],
-                qty_unit    = "contract" if market_type == MarketType.INVERSE else "base",
-                timestamp   = self.normalize_timestamp(msg.get("ts")),
-            )
+                yield OrderBook(
+                    symbol      = self.get_model_symbol(d.get("s", api_symbol), market_type),
+                    market_type = market_type,
+                    quote       = quote,
+                    bids        = [[p, q] for p, q in sorted_bids],
+                    asks        = [[p, q] for p, q in sorted_asks],
+                    qty_unit    = "contract" if market_type == MarketType.INVERSE else "base",
+                    timestamp   = self.normalize_timestamp(msg.get("ts")),
+                )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"Bybit orderbook {api_symbol} parse error mid-delta: {e!r}; ending stream so clients resync")
+                return
 
 
     async def stream_trades(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Trade, None]:
@@ -1144,23 +1170,26 @@ class BybitAdapter(BaseExchange):
         contract_size = info.contract_size if info else None
 
         async for msg in self._ws_connect(market_type, [topic]):
-            for t in msg.get("data", []):
-                price = float(t["p"])
-                yield Trade(
-                    id          = t["i"],
-                    symbol      = model_sym,
-                    market_type = market_type,
-                    quote       = quote,
-                    price       = price,
-                    qty         = build_qty_value(
-                        native        = float(t["v"]),
-                        qty_unit      = unit,
-                        contract_size = contract_size,
-                        price         = price,
-                    ),
-                    side        = t["S"].lower(),
-                    timestamp   = self.normalize_timestamp(t["T"]),
-                )
+            try:
+                for t in msg.get("data", []):
+                    price = float(t["p"])
+                    yield Trade(
+                        id          = t["i"],
+                        symbol      = model_sym,
+                        market_type = market_type,
+                        quote       = quote,
+                        price       = price,
+                        qty         = build_qty_value(
+                            native        = float(t["v"]),
+                            qty_unit      = unit,
+                            contract_size = contract_size,
+                            price         = price,
+                        ),
+                        side        = t["S"].lower(),
+                        timestamp   = self.normalize_timestamp(t["T"]),
+                    )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"Bybit trades {api_symbol} malformed frame skipped: {e!r}")
 
 
     async def stream_liquidations(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Liquidation, None]:
@@ -1177,25 +1206,28 @@ class BybitAdapter(BaseExchange):
         contract_size = info.contract_size if info else None
 
         async for msg in self._ws_connect(market_type, [topic]):
-            for d in msg.get("data", []):
-                side_raw = d.get("S")
-                if side_raw is None:
-                    continue
-                side_norm = side_raw.lower()
-                if side_norm not in ("buy", "sell"):
-                    continue
-                price = float(d.get("p", 0))
-                yield Liquidation(
-                    symbol      = self.get_model_symbol(d.get("s", api_symbol), market_type),
-                    market_type = market_type,
-                    quote       = quote,
-                    side        = side_norm,
-                    price       = price,
-                    qty         = build_qty_value(
-                        native        = float(d.get("v", 0)),
-                        qty_unit      = unit,
-                        contract_size = contract_size,
-                        price         = price,
-                    ),
-                    timestamp   = self.normalize_timestamp(d.get("T", msg.get("ts"))),
-                )
+            try:
+                for d in msg.get("data", []):
+                    side_raw = d.get("S")
+                    if side_raw is None:
+                        continue
+                    side_norm = side_raw.lower()
+                    if side_norm not in ("buy", "sell"):
+                        continue
+                    price = float(d.get("p", 0))
+                    yield Liquidation(
+                        symbol      = self.get_model_symbol(d.get("s", api_symbol), market_type),
+                        market_type = market_type,
+                        quote       = quote,
+                        side        = side_norm,
+                        price       = price,
+                        qty         = build_qty_value(
+                            native        = float(d.get("v", 0)),
+                            qty_unit      = unit,
+                            contract_size = contract_size,
+                            price         = price,
+                        ),
+                        timestamp   = self.normalize_timestamp(d.get("T", msg.get("ts"))),
+                    )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"Bybit liquidations {api_symbol} malformed frame skipped: {e!r}")

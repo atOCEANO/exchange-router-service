@@ -1108,24 +1108,27 @@ class BinanceAdapter(BaseExchange):
         contract_size        = info.contract_size if info else None
 
         async for data in self._ws_connect(market_type, [f"{s_norm}@ticker"]):
-            close_price = float(data["c"])
-            yield Ticker(
-                symbol               = self.get_model_symbol(data["s"], market_type),
-                market_type          = market_type,
-                quote                = quote,
-                price                = close_price,
-                open_24h             = float(data["o"]),
-                high_24h             = float(data["h"]),
-                low_24h              = float(data["l"]),
-                volume_24h           = build_volume_value(
-                    native        = float(data["v"]),
-                    volume_unit   = unit,
-                    contract_size = contract_size,
-                    close         = close_price,
-                ),
-                price_change_percent = float(data["P"]),
-                timestamp            = self.normalize_timestamp(data["E"]),
-            )
+            try:
+                close_price = float(data["c"])
+                yield Ticker(
+                    symbol               = self.get_model_symbol(data["s"], market_type),
+                    market_type          = market_type,
+                    quote                = quote,
+                    price                = close_price,
+                    open_24h             = float(data["o"]),
+                    high_24h             = float(data["h"]),
+                    low_24h              = float(data["l"]),
+                    volume_24h           = build_volume_value(
+                        native        = float(data["v"]),
+                        volume_unit   = unit,
+                        contract_size = contract_size,
+                        close         = close_price,
+                    ),
+                    price_change_percent = float(data["P"]),
+                    timestamp            = self.normalize_timestamp(data["E"]),
+                )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"Binance ticker {s_norm} malformed frame skipped: {e!r}")
 
 
     async def stream_book_ticker(self, market_type: MarketType, symbol: str) -> AsyncGenerator[BookTicker, None]:
@@ -1139,28 +1142,31 @@ class BinanceAdapter(BaseExchange):
         contract_size        = info.contract_size if info else None
 
         async for data in self._ws_connect(market_type, [f"{s_norm}@bookTicker"]):
-            bid_price = float(data["b"])
-            ask_price = float(data["a"])
-            yield BookTicker(
-                symbol      = self.get_model_symbol(data["s"], market_type),
-                market_type = market_type,
-                quote       = quote,
-                bid_price   = bid_price,
-                bid_qty     = build_qty_value(
-                    native        = float(data["B"]),
-                    qty_unit      = unit,
-                    contract_size = contract_size,
-                    price         = bid_price,
-                ),
-                ask_price   = ask_price,
-                ask_qty     = build_qty_value(
-                    native        = float(data["A"]),
-                    qty_unit      = unit,
-                    contract_size = contract_size,
-                    price         = ask_price,
-                ),
-                timestamp   = self.normalize_timestamp(data.get("T") or data.get("E") or int(time.time() * 1000)),
-            )
+            try:
+                bid_price = float(data["b"])
+                ask_price = float(data["a"])
+                yield BookTicker(
+                    symbol      = self.get_model_symbol(data["s"], market_type),
+                    market_type = market_type,
+                    quote       = quote,
+                    bid_price   = bid_price,
+                    bid_qty     = build_qty_value(
+                        native        = float(data["B"]),
+                        qty_unit      = unit,
+                        contract_size = contract_size,
+                        price         = bid_price,
+                    ),
+                    ask_price   = ask_price,
+                    ask_qty     = build_qty_value(
+                        native        = float(data["A"]),
+                        qty_unit      = unit,
+                        contract_size = contract_size,
+                        price         = ask_price,
+                    ),
+                    timestamp   = self.normalize_timestamp(data.get("T") or data.get("E") or int(time.time() * 1000)),
+                )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"Binance book_ticker {s_norm} malformed frame skipped: {e!r}")
 
 
     async def stream_orderbook(self, market_type: MarketType, symbol: str, depth: int = 20, update_speed: str = "100ms") -> AsyncGenerator[OrderBook, None]:
@@ -1177,18 +1183,21 @@ class BinanceAdapter(BaseExchange):
 
         qty_unit = "contract" if market_type == MarketType.INVERSE else "base"
         async for data in self._ws_connect(market_type, [topic]):
-            bids = data.get("bids") or data.get("b") or []
-            asks = data.get("asks") or data.get("a") or []
-            ts   = data.get("E") or data.get("T") or int(time.time() * 1000)
-            yield OrderBook(
-                symbol      = model_sym,
-                market_type = market_type,
-                quote       = quote,
-                bids        = [[float(p), float(q)] for p, q in bids],
-                asks        = [[float(p), float(q)] for p, q in asks],
-                qty_unit    = qty_unit,
-                timestamp   = self.normalize_timestamp(ts),
-            )
+            try:
+                bids = data.get("bids") or data.get("b") or []
+                asks = data.get("asks") or data.get("a") or []
+                ts   = data.get("E") or data.get("T") or int(time.time() * 1000)
+                yield OrderBook(
+                    symbol      = model_sym,
+                    market_type = market_type,
+                    quote       = quote,
+                    bids        = [[float(p), float(q)] for p, q in bids],
+                    asks        = [[float(p), float(q)] for p, q in asks],
+                    qty_unit    = qty_unit,
+                    timestamp   = self.normalize_timestamp(ts),
+                )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"Binance orderbook {s_norm} malformed frame skipped: {e!r}")
 
 
     async def stream_trades(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Trade, None]:
@@ -1202,25 +1211,28 @@ class BinanceAdapter(BaseExchange):
         contract_size = info.contract_size if info else None
 
         async for data in self._ws_connect(market_type, [f"{s_norm}@trade"]):
-            price = float(data.get("p", 0) or 0)
-            qty   = float(data.get("q", 0) or 0)
-            if price <= 0 or qty <= 0:
-                continue
-            yield Trade(
-                id          = str(data["t"]),
-                symbol      = model_sym,
-                market_type = market_type,
-                quote       = quote,
-                price       = price,
-                qty         = build_qty_value(
-                    native        = qty,
-                    qty_unit      = unit,
-                    contract_size = contract_size,
-                    price         = price,
-                ),
-                side        = "sell" if data["m"] else "buy",
-                timestamp   = self.normalize_timestamp(data["T"]),
-            )
+            try:
+                price = float(data.get("p", 0) or 0)
+                qty   = float(data.get("q", 0) or 0)
+                if price <= 0 or qty <= 0:
+                    continue
+                yield Trade(
+                    id          = str(data["t"]),
+                    symbol      = model_sym,
+                    market_type = market_type,
+                    quote       = quote,
+                    price       = price,
+                    qty         = build_qty_value(
+                        native        = qty,
+                        qty_unit      = unit,
+                        contract_size = contract_size,
+                        price         = price,
+                    ),
+                    side        = "sell" if data["m"] else "buy",
+                    timestamp   = self.normalize_timestamp(data["T"]),
+                )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"Binance trades {s_norm} malformed frame skipped: {e!r}")
 
 
     async def stream_agg_trades(self, market_type: MarketType, symbol: str) -> AsyncGenerator[AggTrade, None]:
@@ -1234,24 +1246,27 @@ class BinanceAdapter(BaseExchange):
         contract_size = info.contract_size if info else None
 
         async for data in self._ws_connect(market_type, [f"{s_norm}@aggTrade"]):
-            price = float(data["p"])
-            yield AggTrade(
-                agg_id         = str(data["a"]),
-                symbol         = model_sym,
-                market_type    = market_type,
-                quote          = quote,
-                price          = price,
-                qty            = build_qty_value(
-                    native        = float(data["q"]),
-                    qty_unit      = unit,
-                    contract_size = contract_size,
-                    price         = price,
-                ),
-                first_trade_id = str(data["f"]),
-                last_trade_id  = str(data["l"]),
-                side           = "sell" if data["m"] else "buy",
-                timestamp      = self.normalize_timestamp(data["T"]),
-            )
+            try:
+                price = float(data["p"])
+                yield AggTrade(
+                    agg_id         = str(data["a"]),
+                    symbol         = model_sym,
+                    market_type    = market_type,
+                    quote          = quote,
+                    price          = price,
+                    qty            = build_qty_value(
+                        native        = float(data["q"]),
+                        qty_unit      = unit,
+                        contract_size = contract_size,
+                        price         = price,
+                    ),
+                    first_trade_id = str(data["f"]),
+                    last_trade_id  = str(data["l"]),
+                    side           = "sell" if data["m"] else "buy",
+                    timestamp      = self.normalize_timestamp(data["T"]),
+                )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"Binance agg_trades {s_norm} malformed frame skipped: {e!r}")
 
 
     async def stream_mark_price(self, market_type: MarketType, symbol: str) -> AsyncGenerator[MarkPrice, None]:
@@ -1265,29 +1280,32 @@ class BinanceAdapter(BaseExchange):
         cycle_ms = await self._funding_interval_ms_for(market_type, model_sym)
 
         async for data in self._ws_connect(market_type, [f"{s_norm}@markPrice"]):
-            ts          = self.normalize_timestamp(data["E"])
-            next_ft_raw = data.get("T")
-            next_ft     = self.normalize_timestamp(next_ft_raw) if next_ft_raw else None
+            try:
+                ts          = self.normalize_timestamp(data["E"])
+                next_ft_raw = data.get("T")
+                next_ft     = self.normalize_timestamp(next_ft_raw) if next_ft_raw else None
 
-            funding_block = None
-            rate_raw      = data.get("r")
-            if rate_raw is not None and cycle_ms is not None and next_ft is not None:
-                funding_block = build_funding_current(
-                    kind           = "discrete",
-                    per_cycle      = float(rate_raw),
-                    cycle_ms       = cycle_ms,
-                    valid_until_ts = max(next_ft, ts + 1),
+                funding_block = None
+                rate_raw      = data.get("r")
+                if rate_raw is not None and cycle_ms is not None and next_ft is not None:
+                    funding_block = build_funding_current(
+                        kind           = "discrete",
+                        per_cycle      = float(rate_raw),
+                        cycle_ms       = cycle_ms,
+                        valid_until_ts = max(next_ft, ts + 1),
+                    )
+
+                yield MarkPrice(
+                    symbol      = self.get_model_symbol(data["s"], market_type),
+                    market_type = market_type,
+                    quote       = quote,
+                    mark_price  = float(data["p"]),
+                    index_price = float(data["i"]),
+                    funding     = funding_block,
+                    timestamp   = ts,
                 )
-
-            yield MarkPrice(
-                symbol      = self.get_model_symbol(data["s"], market_type),
-                market_type = market_type,
-                quote       = quote,
-                mark_price  = float(data["p"]),
-                index_price = float(data["i"]),
-                funding     = funding_block,
-                timestamp   = ts,
-            )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"Binance mark_price {s_norm} malformed frame skipped: {e!r}")
 
 
     async def stream_liquidations(self, market_type: MarketType, symbol: str) -> AsyncGenerator[Liquidation, None]:
@@ -1303,21 +1321,24 @@ class BinanceAdapter(BaseExchange):
         contract_size = info.contract_size if info else None
 
         async for data in self._ws_connect(market_type, [f"{s_norm}@forceOrder"]):
-            o = data.get("o", {})
-            if not o:
-                continue
-            price = float(o["p"])
-            yield Liquidation(
-                symbol      = self.get_model_symbol(o["s"], market_type),
-                market_type = market_type,
-                quote       = quote,
-                side        = o["S"].lower(),
-                price       = price,
-                qty         = build_qty_value(
-                    native        = float(o["q"]),
-                    qty_unit      = unit,
-                    contract_size = contract_size,
-                    price         = price,
-                ),
-                timestamp   = self.normalize_timestamp(data["E"]),
-            )
+            try:
+                o = data.get("o", {})
+                if not o:
+                    continue
+                price = float(o["p"])
+                yield Liquidation(
+                    symbol      = self.get_model_symbol(o["s"], market_type),
+                    market_type = market_type,
+                    quote       = quote,
+                    side        = o["S"].lower(),
+                    price       = price,
+                    qty         = build_qty_value(
+                        native        = float(o["q"]),
+                        qty_unit      = unit,
+                        contract_size = contract_size,
+                        price         = price,
+                    ),
+                    timestamp   = self.normalize_timestamp(data["E"]),
+                )
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as e:
+                logger.warning(f"Binance liquidations {s_norm} malformed frame skipped: {e!r}")
