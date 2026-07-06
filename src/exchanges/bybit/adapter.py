@@ -850,16 +850,22 @@ class BybitAdapter(BaseExchange):
             if anchor:
                 p["endTime"] = anchor
             data = await self._make_request("GET", "/v5/market/account-ratio", p)
-            return [LongShortRatio(
-                symbol        = model_sym,
-                market_type   = market_type,
-                interval      = period,
-                ratio         = float(i["buyRatio"]) / float(i["sellRatio"]) if float(i["sellRatio"]) > 0 else 0,
-                long_account  = float(i["buyRatio"]),
-                short_account = float(i["sellRatio"]),
-                account_scope = "all_accounts",
-                timestamp     = self.normalize_timestamp(i["timestamp"]),
-            ) for i in data.get("list", [])]
+            out = []
+            for i in data.get("list", []):
+                sell = float(i["sellRatio"])
+                if sell <= 0:
+                    continue
+                out.append(LongShortRatio(
+                    symbol        = model_sym,
+                    market_type   = market_type,
+                    interval      = period,
+                    ratio         = float(i["buyRatio"]) / sell,
+                    long_account  = float(i["buyRatio"]),
+                    short_account = sell,
+                    account_scope = "all_accounts",
+                    timestamp     = self.normalize_timestamp(i["timestamp"]),
+                ))
+            return out
 
         return await self._paginate_backwards(fetch_batch_backward, limit, per_req)
 
