@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+import httpx
 import orjson
 from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Any, Set, Union, AsyncGenerator, Callable, Awaitable, Iterable
@@ -348,6 +349,49 @@ class BaseExchange(ABC):
                 return int(ts * 1000)
             return int(ts)
         raise ValueError(f"Unsupported timestamp format: {type(ts)}")
+
+
+    async def _paginate_backwards(self, fetch_func_by_end: Callable, total_limit: int, limit_per_req: int) -> List[Any]:
+        chunks = []
+        seen = set()
+        collected = 0
+        current_end = None
+        max_requests = 100
+        req_count = 0
+
+        while collected < total_limit and req_count < max_requests:
+            try:
+                batch = await fetch_func_by_end(current_end, limit_per_req)
+            except (httpx.HTTPStatusError, ValueError):
+                break
+            if not batch:
+                break
+
+            batch.sort(key=lambda x: x.timestamp)
+            new_items = []
+            for x in batch:
+                key = x.model_dump_json()
+                if key not in seen:
+                    seen.add(key)
+                    new_items.append(x)
+            if not new_items:
+                break
+
+            chunks.append(new_items)
+            collected += len(new_items)
+            req_count += 1
+            next_end = batch[0].timestamp
+            if next_end <= 0 or (current_end is not None and next_end >= current_end):
+                break
+            current_end = next_end
+
+        if req_count >= max_requests and collected < total_limit:
+            logging.getLogger(f"{self.name}_adapter").warning(f"{self.name} pagination hit {max_requests}-page safety cap with {collected}/{total_limit} records; result truncated")
+
+        chunks.reverse()
+        out = [item for chunk in chunks for item in chunk]
+        out.sort(key=lambda x: x.timestamp)
+        return out[-total_limit:]
 
 
     @property

@@ -4,7 +4,7 @@ import random
 import time
 import websockets
 import logging
-from typing import List, AsyncGenerator, Dict, Any, Optional, Callable
+from typing import List, AsyncGenerator, Dict, Any, Optional
 from src.exchanges.base import (
     BaseExchange, StreamHub, UpstreamUnavailableError,
     build_qty_value, build_volume_value, build_oi_value,
@@ -433,49 +433,6 @@ class BybitAdapter(BaseExchange):
 
         remaining = self._backoff_until - time.time()
         raise UpstreamUnavailableError(f"Max retries exceeded for {url}", retry_after=remaining if remaining > 0 else None)
-
-
-    async def _paginate_backwards(self, fetch_func_by_end: Callable, total_limit: int, limit_per_req: int) -> List[Any]:
-        chunks = []
-        seen = set()
-        collected = 0
-        current_end = None
-        max_requests = 100
-        req_count = 0
-
-        while collected < total_limit and req_count < max_requests:
-            try:
-                batch = await fetch_func_by_end(current_end, limit_per_req)
-            except (httpx.HTTPStatusError, ValueError):
-                break
-            if not batch:
-                break
-
-            batch.sort(key=lambda x: x.timestamp)
-            new_items = []
-            for x in batch:
-                key = x.model_dump_json()
-                if key not in seen:
-                    seen.add(key)
-                    new_items.append(x)
-            if not new_items:
-                break
-
-            chunks.append(new_items)
-            collected += len(new_items)
-            req_count += 1
-            next_end = batch[0].timestamp
-            if next_end <= 0 or (current_end is not None and next_end >= current_end):
-                break
-            current_end = next_end
-
-        if req_count >= max_requests and collected < total_limit:
-            logger.warning(f"Bybit pagination hit {max_requests}-page safety cap with {collected}/{total_limit} records; result truncated")
-
-        chunks.reverse()
-        out = [item for chunk in chunks for item in chunk]
-        out.sort(key=lambda x: x.timestamp)
-        return out[-total_limit:]
 
 
     async def _get_hub(self, market_type: MarketType) -> StreamHub:
