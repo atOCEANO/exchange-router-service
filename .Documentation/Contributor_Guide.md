@@ -424,7 +424,7 @@ These are conventions adapter authors follow that are not visible from the user-
 
 ### `_paginate_backwards` helper
 
-Every method that accepts `start_time` should route through `_paginate_backwards` (or its equivalent in the adapter), seeded with `start_time` on the first iteration. The helper collects forward-sorted batches, walks the response back by setting the upstream end-anchored parameter to one less than the oldest record's timestamp, and stops when no new records arrive or `max_requests` is reached. The user-facing contract is "inclusive backward-walking upper bound"; this is how that contract is implemented.
+Every method that accepts `start_time` should route through `_paginate_backwards`, which lives on `BaseExchange` (or its equivalent in the adapter, like the Kraken forward walk), seeded with `start_time` on the first iteration. The helper collects forward-sorted batches, walks the response back by setting the upstream end-anchored parameter to one less than the oldest record's timestamp, and stops when no new records arrive or `max_requests` is reached. The user-facing contract is "inclusive backward-walking upper bound"; this is how that contract is implemented.
 
 <br>
 
