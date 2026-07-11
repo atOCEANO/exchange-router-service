@@ -73,6 +73,7 @@ class OkxAdapter(BaseExchange):
 
         self._funding_interval_cache: Dict[str, int] = {}
         self._funding_interval_lock = asyncio.Lock()
+        self._contract_multiplier_cache: Dict[MarketType, Dict[str, float]] = {}
 
         self._capabilities = self._build_capabilities()
 
@@ -509,6 +510,11 @@ class OkxAdapter(BaseExchange):
         return interval
 
 
+    async def _multiplier_for(self, market_type: MarketType, model_symbol: str) -> Optional[float]:
+        await self._ensure_info_cache(market_type)
+        return self._contract_multiplier_cache.get(market_type, {}).get(model_symbol)
+
+
     async def _make_request(self, method: str, endpoint: str, params: Optional[Dict] = None) -> Any:
         url = f"{self.rest_url}{endpoint}"
         bucket = self._bucket_rubik if "/rubik/stat/" in endpoint else self._bucket_default
@@ -645,17 +651,18 @@ class OkxAdapter(BaseExchange):
         info          = await self._info_for(market_type, model_sym)
         quote         = info.quote_asset if info else ""
         contract_size = info.contract_size if info else None
+        multiplier    = await self._multiplier_for(market_type, model_sym)
         bid_price     = float(t.get("bidPx") or 0)
         ask_price     = float(t.get("askPx") or 0)
         bid_raw       = float(t.get("bidSz") or 0)
         ask_raw       = float(t.get("askSz") or 0)
 
-        if market_type == MarketType.LINEAR and contract_size is None:
-            raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
+        if market_type == MarketType.LINEAR and multiplier is None:
+            raise ValueError(f"Contract multiplier unavailable for {model_sym} on OKX linear")
 
         if market_type == MarketType.LINEAR:
-            bid_native = bid_raw * contract_size
-            ask_native = ask_raw * contract_size
+            bid_native = bid_raw * multiplier
+            ask_native = ask_raw * multiplier
             qty_unit   = "base"
             qty_cs     = None
         elif market_type == MarketType.INVERSE:
@@ -701,16 +708,16 @@ class OkxAdapter(BaseExchange):
             raise ValueError(f"Orderbook not found for {api_symbol}")
         b = data[0]
 
-        model_sym     = self.get_model_symbol(api_symbol, market_type)
-        info          = await self._info_for(market_type, model_sym)
-        quote         = info.quote_asset if info else ""
-        contract_size = info.contract_size if info else None
+        model_sym  = self.get_model_symbol(api_symbol, market_type)
+        info       = await self._info_for(market_type, model_sym)
+        quote      = info.quote_asset if info else ""
+        multiplier = await self._multiplier_for(market_type, model_sym)
 
-        if market_type == MarketType.LINEAR and contract_size is None:
-            raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
+        if market_type == MarketType.LINEAR and multiplier is None:
+            raise ValueError(f"Contract multiplier unavailable for {model_sym} on OKX linear")
 
         if market_type == MarketType.LINEAR:
-            mult      = contract_size
+            mult      = multiplier
             bids_rows = [[float(p), float(q) * mult] for p, q, *_ in b.get("bids", [])]
             asks_rows = [[float(p), float(q) * mult] for p, q, *_ in b.get("asks", [])]
             ob_qty_unit = "base"
@@ -745,16 +752,17 @@ class OkxAdapter(BaseExchange):
         info          = await self._info_for(market_type, model_sym)
         quote         = info.quote_asset if info else ""
         contract_size = info.contract_size if info else None
+        multiplier    = await self._multiplier_for(market_type, model_sym)
 
-        if market_type == MarketType.LINEAR and contract_size is None:
-            raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
+        if market_type == MarketType.LINEAR and multiplier is None:
+            raise ValueError(f"Contract multiplier unavailable for {model_sym} on OKX linear")
 
         trades = []
         for t in data:
             price    = float(t["px"])
             sz_raw   = float(t["sz"])
             if market_type == MarketType.LINEAR:
-                native = sz_raw * contract_size
+                native = sz_raw * multiplier
                 qty_unit_local = "base"
                 qty_cs = None
             elif market_type == MarketType.INVERSE:
@@ -1044,9 +1052,10 @@ class OkxAdapter(BaseExchange):
         info          = await self._info_for(market_type, model_sym)
         quote         = info.quote_asset if info else ""
         contract_size = info.contract_size if info else None
+        multiplier    = await self._multiplier_for(market_type, model_sym)
 
-        if market_type == MarketType.LINEAR and contract_size is None:
-            raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
+        if market_type == MarketType.LINEAR and multiplier is None:
+            raise ValueError(f"Contract multiplier unavailable for {model_sym} on OKX linear")
 
         def _parse(rows):
             out = []
@@ -1060,7 +1069,7 @@ class OkxAdapter(BaseExchange):
                     price  = float(d["bkPx"])
                     sz_raw = float(d["sz"])
                     if market_type == MarketType.LINEAR:
-                        native = sz_raw * contract_size
+                        native = sz_raw * multiplier
                         qty_unit_local = "base"
                         qty_cs = None
                     elif market_type == MarketType.INVERSE:
@@ -1173,15 +1182,17 @@ class OkxAdapter(BaseExchange):
             if not base or not quote:
                 continue
 
-            qty_unit = "contract" if market_type != MarketType.SPOT else "base"
-            contract_size: Optional[float] = None
+            multiplier: Optional[float] = None
             if market_type != MarketType.SPOT:
                 ct_val_raw = s.get("ctVal")
                 if ct_val_raw is not None:
                     try:
-                        contract_size = float(ct_val_raw)
+                        multiplier = float(ct_val_raw)
                     except (TypeError, ValueError):
-                        contract_size = None
+                        multiplier = None
+
+            qty_unit = "contract" if market_type == MarketType.INVERSE else "base"
+            contract_size: Optional[float] = multiplier if market_type == MarketType.INVERSE else None
 
             raw_min_qty = s.get("minSz")
             raw_max_qty = s.get("maxLmtSz") or s.get("maxMktSz")
@@ -1191,18 +1202,41 @@ class OkxAdapter(BaseExchange):
                 min_qty_v = None
             if max_qty_v is not None and max_qty_v <= 0:
                 max_qty_v = None
+            if market_type == MarketType.LINEAR:
+                if multiplier is None:
+                    min_qty_v = None
+                    max_qty_v = None
+                else:
+                    if min_qty_v is not None:
+                        min_qty_v = round(min_qty_v * multiplier, 12)
+                    if max_qty_v is not None:
+                        max_qty_v = round(max_qty_v * multiplier, 12)
+
+            lot_raw = s.get("lotSz", "0")
+            if market_type == MarketType.LINEAR and multiplier is not None:
+                try:
+                    qty_precision = self._precision(f"{float(lot_raw) * multiplier:.10f}")
+                except (TypeError, ValueError):
+                    qty_precision = self._precision(lot_raw)
+            else:
+                qty_precision = self._precision(lot_raw)
 
             funding_block = None
             if market_type != MarketType.SPOT:
                 funding_block = build_funding_convention("discrete")
 
+            model_sym = self.get_model_symbol(api_sym, market_type)
+            self._contract_multiplier_cache.setdefault(market_type, {})
+            if multiplier is not None:
+                self._contract_multiplier_cache[market_type][model_sym] = multiplier
+
             results.append(SymbolInfo(
-                symbol             = self.get_model_symbol(api_sym, market_type),
+                symbol             = model_sym,
                 native_symbol      = api_sym,
                 base_asset         = base,
                 quote_asset        = quote,
                 price_precision    = self._precision(s.get("tickSz", "0")),
-                quantity_precision = self._precision(s.get("lotSz", "0")),
+                quantity_precision = qty_precision,
                 min_qty            = min_qty_v,
                 max_qty            = max_qty_v,
                 min_notional       = None,
@@ -1284,9 +1318,10 @@ class OkxAdapter(BaseExchange):
         info          = await self._info_for(market_type, model_sym)
         quote         = info.quote_asset if info else ""
         contract_size = info.contract_size if info else None
+        multiplier    = await self._multiplier_for(market_type, model_sym)
 
-        if market_type == MarketType.LINEAR and contract_size is None:
-            raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
+        if market_type == MarketType.LINEAR and multiplier is None:
+            raise ValueError(f"Contract multiplier unavailable for {model_sym} on OKX linear")
 
         async for msg in self._ws_connect([{"channel": "bbo-tbt", "instId": api_symbol}]):
             try:
@@ -1301,8 +1336,8 @@ class OkxAdapter(BaseExchange):
                     ask_raw   = float(asks[0][1])
 
                     if market_type == MarketType.LINEAR:
-                        bid_native = bid_raw * contract_size
-                        ask_native = ask_raw * contract_size
+                        bid_native = bid_raw * multiplier
+                        ask_native = ask_raw * multiplier
                         qty_unit   = "base"
                         qty_cs     = None
                     elif market_type == MarketType.INVERSE:
@@ -1341,18 +1376,18 @@ class OkxAdapter(BaseExchange):
 
 
     async def stream_orderbook(self, market_type: MarketType, symbol: str, depth: int = 20, update_speed: str = "100ms") -> AsyncGenerator[OrderBook, None]:
-        api_symbol    = await self._resolve_symbol(symbol, market_type)
-        model_sym     = self.get_model_symbol(api_symbol, market_type)
-        info          = await self._info_for(market_type, model_sym)
-        quote         = info.quote_asset if info else ""
-        contract_size = info.contract_size if info else None
-        channel       = "bbo-tbt" if depth <= 1 else "books5" if depth <= 5 else "books"
+        api_symbol = await self._resolve_symbol(symbol, market_type)
+        model_sym  = self.get_model_symbol(api_symbol, market_type)
+        info       = await self._info_for(market_type, model_sym)
+        quote      = info.quote_asset if info else ""
+        multiplier = await self._multiplier_for(market_type, model_sym)
+        channel    = "bbo-tbt" if depth <= 1 else "books5" if depth <= 5 else "books"
 
-        if market_type == MarketType.LINEAR and contract_size is None:
-            raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
+        if market_type == MarketType.LINEAR and multiplier is None:
+            raise ValueError(f"Contract multiplier unavailable for {model_sym} on OKX linear")
 
         if market_type == MarketType.LINEAR:
-            qty_mult    = contract_size
+            qty_mult    = multiplier
             ob_qty_unit = "base"
         elif market_type == MarketType.INVERSE:
             qty_mult    = 1.0
@@ -1419,9 +1454,10 @@ class OkxAdapter(BaseExchange):
         info          = await self._info_for(market_type, model_sym)
         quote         = info.quote_asset if info else ""
         contract_size = info.contract_size if info else None
+        multiplier    = await self._multiplier_for(market_type, model_sym)
 
-        if market_type == MarketType.LINEAR and contract_size is None:
-            raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
+        if market_type == MarketType.LINEAR and multiplier is None:
+            raise ValueError(f"Contract multiplier unavailable for {model_sym} on OKX linear")
 
         async for msg in self._ws_connect([{"channel": "trades", "instId": api_symbol}]):
             try:
@@ -1429,7 +1465,7 @@ class OkxAdapter(BaseExchange):
                     price  = float(t["px"])
                     sz_raw = float(t["sz"])
                     if market_type == MarketType.LINEAR:
-                        native = sz_raw * contract_size
+                        native = sz_raw * multiplier
                         qty_unit_local = "base"
                         qty_cs = None
                     elif market_type == MarketType.INVERSE:
@@ -1491,9 +1527,10 @@ class OkxAdapter(BaseExchange):
         info          = await self._info_for(market_type, model_sym)
         quote         = info.quote_asset if info else ""
         contract_size = info.contract_size if info else None
+        multiplier    = await self._multiplier_for(market_type, model_sym)
 
-        if market_type == MarketType.LINEAR and contract_size is None:
-            raise ValueError(f"Contract size unavailable for {model_sym} on OKX linear")
+        if market_type == MarketType.LINEAR and multiplier is None:
+            raise ValueError(f"Contract multiplier unavailable for {model_sym} on OKX linear")
 
         async for msg in self._ws_connect([{"channel": "liquidation-orders", "instType": "SWAP"}]):
             try:
@@ -1507,7 +1544,7 @@ class OkxAdapter(BaseExchange):
                         price  = float(d["bkPx"])
                         sz_raw = float(d["sz"])
                         if market_type == MarketType.LINEAR:
-                            native = sz_raw * contract_size
+                            native = sz_raw * multiplier
                             qty_unit_local = "base"
                             qty_cs = None
                         elif market_type == MarketType.INVERSE:
