@@ -64,6 +64,25 @@ class InfoProbe(Probe):
                 evidence={"price_precision": data["price_precision"], "quantity_precision": data["quantity_precision"]},
             )]
 
+        qty_unit = data.get("qty_unit")
+        contract_size = data.get("contract_size")
+        if ctx.market_type == "inverse":
+            unit_ok = qty_unit == "contract"
+            cs_ok = contract_size is not None and contract_size > 0
+            rule = "inverse requires qty_unit='contract' and a positive contract_size"
+        else:
+            unit_ok = qty_unit == "base"
+            cs_ok = contract_size is None
+            rule = f"{ctx.market_type} requires qty_unit='base' and contract_size=null"
+        if not unit_ok or not cs_ok:
+            return [self.result(
+                ctx, self.name, started,
+                status="fail",
+                error_type=ErrorType.SCHEMA,
+                message=f"unit contract broken: qty_unit={qty_unit!r}, contract_size={contract_size}; {rule}",
+                evidence={"qty_unit": qty_unit, "contract_size": contract_size, "market_type": ctx.market_type},
+            )]
+
         r = self.result(
             ctx, self.name, started,
             status="pass",
