@@ -19,6 +19,8 @@ MAX_SLEEP_S = 60.0
 
 SERIES_ROUTES = ("candles", "trades", "agg_trades", "funding_rate", "open_interest", "liquidations", "long_short_ratio")
 
+FATAL_CLOSE_CODES = (1003, 1008)
+
 
 def _detail(response: httpx.Response) -> str:
     try:
@@ -45,6 +47,12 @@ def _sleep_for(attempt: int, retry_after: Optional[float]) -> float:
 
     base = 1.0
     return base * attempt + random.uniform(0, base)
+
+
+def _is_fatal_close(error: Exception) -> bool:
+    rcvd = getattr(error, "rcvd", None)
+    code = getattr(rcvd, "code", None) if rcvd is not None else getattr(error, "code", None)
+    return code in FATAL_CLOSE_CODES
 
 
 class AsyncCore:
@@ -344,8 +352,8 @@ class AsyncCore:
                 async for message in self.subscribe(exchange, market_type, channel, symbol):
                     yield message
 
-            except (websockets.ConnectionClosed, websockets.WebSocketException, OSError):
-                if not reconnect:
+            except (websockets.ConnectionClosed, websockets.WebSocketException, OSError) as error:
+                if not reconnect or _is_fatal_close(error):
                     raise
 
                 await asyncio.sleep(2)

@@ -11,6 +11,9 @@ from .handle import SyncMarket
 from .rows import Row
 
 
+STREAM_BUFFER_MAX = 1024
+
+
 class _LoopThread:
 
     def __init__(self):
@@ -30,19 +33,30 @@ class _LoopThread:
 
     def iterate(self, async_gen):
         sentinel = object()
-        items: "queue.Queue" = queue.Queue()
+        items: "queue.Queue" = queue.Queue(maxsize=STREAM_BUFFER_MAX)
         handle: Dict[str, Any] = {}
+
+        def offer(item):
+            while True:
+                try:
+                    items.put_nowait(item)
+                    return
+                except queue.Full:
+                    try:
+                        items.get_nowait()
+                    except queue.Empty:
+                        pass
 
         async def pump():
             handle["task"] = asyncio.current_task()
             try:
                 async for item in async_gen:
-                    items.put(item)
+                    offer(item)
             except Exception as error:
-                items.put(error)
+                offer(error)
             finally:
                 await async_gen.aclose()
-                items.put(sentinel)
+                offer(sentinel)
 
         future = asyncio.run_coroutine_threadsafe(pump(), self._loop)
 
