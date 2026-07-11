@@ -20,6 +20,8 @@ stream_manager = StreamManager()
 
 KNOWN_WS_CHANNELS = {"ticker", "book_ticker", "mark_price", "agg_trades", "trades", "orderbook", "liquidations"}
 
+WS_HANDSHAKE_TIMEOUT_S = 10.0
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -362,7 +364,7 @@ async def websocket_endpoint(websocket: WebSocket, exchange: str, market_type: M
     client_id: Optional[uuid.UUID] = None
 
     try:
-        data = await websocket.receive_json()
+        data = await asyncio.wait_for(websocket.receive_json(), timeout=WS_HANDSHAKE_TIMEOUT_S)
         channel, symbol = data.get("channel"), data.get("symbol")
         if not channel or not symbol:
             await websocket.close(code=1003)
@@ -385,6 +387,8 @@ async def websocket_endpoint(websocket: WebSocket, exchange: str, market_type: M
         while True:
             await websocket.receive_text()
 
+    except asyncio.TimeoutError:
+        await websocket.close(code=1008, reason="no subscription received")
     except WebSocketDisconnect:
         pass
     except Exception as e:
