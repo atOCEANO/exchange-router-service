@@ -93,7 +93,8 @@ class WebSocketProbe(Probe):
                             break
 
                     frames_received += 1
-                    captured_frames.append({"arrival_ms": arrived, "frame": msg})
+                    if len(captured_frames) < SAMPLE_MAX_ITEMS:
+                        captured_frames.append({"arrival_ms": arrived, "frame": msg})
         except asyncio.TimeoutError:
             last_error = "connection timeout"
         except websockets.exceptions.WebSocketException as e:
