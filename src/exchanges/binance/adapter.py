@@ -380,7 +380,10 @@ class BinanceAdapter(BaseExchange):
                     return resp.json()
 
                 if resp.status_code in [429, 418]:
-                    retry_after = int(resp.headers.get("Retry-After", 5))
+                    try:
+                        retry_after = int(resp.headers.get("Retry-After", 5))
+                    except (TypeError, ValueError):
+                        retry_after = 5
 
                     async with self._backoff_lock:
                         self._backoff_until[host] = max(self._backoff_until.get(host, 0.0), time.time() + retry_after)
