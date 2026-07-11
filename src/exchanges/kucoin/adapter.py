@@ -507,13 +507,8 @@ class KucoinAdapter(BaseExchange):
 
 
     async def _get_bullet(self, market_type: MarketType) -> Tuple[str, str, int]:
-        base = self._rest_base(market_type)
-        url = f"{base}/api/v1/bullet-public"
-        resp = await self.http_client.post(url)
-        body = resp.json()
-        if body.get("code") != "200000":
-            raise ValueError(f"KuCoin bullet token error: {body}")
-        data = body["data"]
+        base   = self._rest_base(market_type)
+        data   = await self._make_request("POST", base, "/api/v1/bullet-public")
         server = data["instanceServers"][0]
         return server["endpoint"], data["token"], int(server.get("pingInterval", 18000))
 
