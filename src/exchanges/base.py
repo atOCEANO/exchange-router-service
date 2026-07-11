@@ -362,7 +362,8 @@ class BaseExchange(ABC):
         while collected < total_limit and req_count < max_requests:
             try:
                 batch = await fetch_func_by_end(current_end, limit_per_req)
-            except (httpx.HTTPStatusError, ValueError):
+            except (httpx.HTTPStatusError, ValueError) as e:
+                logging.getLogger(f"{self.name}_adapter").warning(f"{self.name} pagination stopped early with {collected}/{total_limit} records; upstream request failed: {e}")
                 break
             if not batch:
                 break
