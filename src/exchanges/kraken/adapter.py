@@ -1112,6 +1112,8 @@ class KrakenAdapter(BaseExchange):
                     break
 
                 from_ts = last_ts_secs + interval_secs
+            else:
+                logger.warning(f"Kraken futures candle walk hit its 20-page cap for {model_sym} {interval}; result may be truncated.")
 
             all_candles.sort(key=lambda c: c.timestamp)
             if start_time:
