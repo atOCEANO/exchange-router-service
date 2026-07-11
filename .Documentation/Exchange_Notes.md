@@ -305,9 +305,9 @@ The `/api/v1/mark-price/{symbol}/current` endpoint only returns mark and index. 
 
 <br>
 
-### Futures `qty` and `volume` are in contracts
+### Futures sizes are contract-denominated upstream
 
-For futures (linear and inverse), `qty.native` and `volume.native` are reported in contracts, not the base asset. Each instrument has a `multiplier` field on the upstream contract spec which lands on `SymbolInfo.contract_size` (absolute-valued; KuCoin sometimes returns negative multipliers for inverse and the adapter takes the magnitude). The wire form is `qty: {native, unit: "contract", contract_size, usd}` where `usd = native × contract_size` (price-independent on inverse). For `XBTUSDTM`, 1 contract represents 0.001 XBT; for `XBTUSDM`, 1 contract represents 1 USD. Spot reports `qty.native` / `volume.native` in the base asset directly with `unit: "base"`.
+KuCoin reports futures sizes (trades, orderbook levels, kline volume, open interest, order limits) in contracts, not the base asset. Each instrument has a `multiplier` field on the upstream contract spec (absolute-valued; KuCoin sometimes returns negative multipliers for inverse and the adapter takes the magnitude). On linear contracts the adapter multiplies every contract count by the multiplier, so the wire is base-denominated throughout: data rows carry `unit: "base"`, and `SymbolInfo.min_qty` / `max_qty` / `quantity_precision` are in the base asset with `qty_unit: "base"` and `contract_size` null, per the schema; the multiplier itself lives in an adapter-internal cache. On inverse contracts the wire stays contract-denominated: `qty: {native, unit: "contract", contract_size, usd}` where `usd = native × contract_size` (price-independent), and `SymbolInfo.min_qty` / `max_qty` are contract counts with `qty_unit: "contract"` and `contract_size` populated. For `XBTUSDTM`, 1 contract represents 0.001 XBT; for `XBTUSDM`, 1 contract represents 1 USD. Spot reports `qty.native` / `volume.native` in the base asset directly with `unit: "base"`.
 
 <br>
 <br>
@@ -336,7 +336,13 @@ OKX exposes a "live" candles endpoint with shallow recency (~1440 most-recent ba
 
 ### SWAP/FUTURES `vol24h` and `volCcy24h` semantics
 
-For SWAP and FUTURES (both linear and inverse), OKX reports `vol24h` as the **contract count** and `volCcy24h` in the **base coin**. The wire form is `Ticker.volume_24h: {native: vol24h, unit: "contract", contract_size: ctVal, usd: native × contract_size, usd_basis: {method: "contract_size"}}`. `ctVal` is the instrument's contract size from `/api/v5/public/instruments`, which the adapter caches on SymbolInfo. Spot follows the conventional layout: `volume_24h.native = vol24h` (in the base coin), `unit = "base"`, USD derived from `close × native`.
+For SWAP and FUTURES (both linear and inverse), OKX reports `vol24h` as the **contract count** and `volCcy24h` in the **base coin**. On inverse the wire form is `Ticker.volume_24h: {native: vol24h, unit: "contract", contract_size: ctVal, usd: native × contract_size, usd_basis: {method: "contract_size"}}`; `ctVal` is the instrument's contract size from `/api/v5/public/instruments`, cached on `SymbolInfo.contract_size` for inverse. On linear the adapter reads `volCcy24h` directly, so the wire form is `{native: volCcy24h, unit: "base"}` with USD derived from `close × native`. Spot follows the conventional layout: `volume_24h.native = vol24h` (in the base coin), `unit = "base"`, USD derived from `close × native`.
+
+<br>
+
+### Order size metadata is contract-denominated upstream
+
+OKX reports `minSz`, `lotSz`, and `maxLmtSz` in contracts on SWAP instruments, and `ctVal` carries the size of one contract denominated in `ctValCcy`: the base coin on linear (`0.01` BTC for `BTC-USDT-SWAP`), the quote on inverse (`100` USD for `BTC-USD-SWAP`). On linear the adapter converts order limits to the base asset, so `SymbolInfo.min_qty` / `max_qty` / `quantity_precision` come back base-denominated with `qty_unit: "base"` and `contract_size` null, matching every other linear market; the `ctVal` multiplier is held in an adapter-internal cache and drives the same conversion applied to trade, orderbook, book-ticker, and liquidation sizes. On inverse, limits stay contract counts with `qty_unit: "contract"` and `contract_size` = `ctVal` (quote notional per contract).
 
 <br>
 
