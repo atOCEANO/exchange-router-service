@@ -331,4 +331,17 @@ with ExchangeRouterClient("http://localhost:8040") as client:
 
 `result` behaves like a dict over the symbols that returned, with `.ok`, `.degraded`, and `.failed` for triage.
 
+**Managing the client lifecycle explicitly.** The `with` block above constructs the client and closes it for you. When a `with` block does not fit your structure, construct the client, make your calls, and close it yourself, ideally in a `finally` so teardown always runs. This works for every method, including `candles_many`.
+
+```python
+from exchange_router_client import ExchangeRouterClient
+
+client = ExchangeRouterClient("http://localhost:8040")
+try:
+    df = client.get_candles("binance", "spot", "BTCUSDT", interval="1h", limit=500)
+    print(df.tail())
+finally:
+    client.close()
+```
+
 **Full method reference, DataFrame column layout, warnings, and end-to-end recipes are in the [Python SDK](.Documentation/Python_SDK.md) docs.**
