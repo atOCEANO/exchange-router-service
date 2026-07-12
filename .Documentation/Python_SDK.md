@@ -377,7 +377,7 @@ The batch methods on the sync client already run their fetches concurrently, so 
 
 ## Real-time streams
 
-`stream` yields messages as dicts and reconnects automatically when the upstream drops (the router closes the socket with code `1011`).
+`stream` yields messages as dicts and reconnects automatically when the upstream drops (the router closes the socket with code `1011`) or the transport fails. It does not retry a deliberate rejection: on close code `1003` or `1008` (for example an unsupported channel, or a subscription that never arrived) it raises `websockets.ConnectionClosed` so a misconfigured call fails fast instead of reconnecting forever.
 
 ```python
 for msg in client.stream("binance", "spot", "ticker", "BTCUSDT"):

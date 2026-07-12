@@ -553,7 +553,7 @@ Connect to `ws://localhost:8040/ws/{exchange}/{market_type}` and send a JSON sub
 | Code | Meaning |
 | :--- | :--- |
 | **1003** | Subscription payload rejected. Three causes: missing `channel` or `symbol`, channel name not in the supported set (`ticker`, `book_ticker`, `mark_price`, `agg_trades`, `trades`, `orderbook`, `liquidations`), or the channel exists but `ws: False` for this exchange/market in the capability map. |
-| **1008** | Exchange not registered, or market type not supported by that adapter. |
+| **1008** | Exchange not registered, market type not supported by that adapter, or no subscription payload received within the 10s handshake window. |
 | **1011** | Upstream exchange connection lost. Reconnect and re-subscribe. |
 
 <br>
