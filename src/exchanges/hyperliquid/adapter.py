@@ -4,7 +4,7 @@ import random
 import time
 import websockets
 import logging
-from typing import List, AsyncGenerator, Dict, Any, Optional
+from typing import List, AsyncGenerator, Dict, Any, Optional, Set
 from src.exchanges.base import (
     BaseExchange, StreamHub, UpstreamUnavailableError,
     build_qty_value, build_volume_value, build_oi_value,
@@ -25,6 +25,7 @@ class HyperliquidAdapter(BaseExchange):
     _TICKER_RESEED_S     = 120
     _MAX_SUBS_PER_HUB    = 900
     _MAX_HUBS            = 10
+    _CTX_TTL_S           = 1.0
 
 
     def __init__(self):
@@ -44,6 +45,8 @@ class HyperliquidAdapter(BaseExchange):
         self._topic_refs: Dict[str, int] = {}
 
         self._funding_interval_cache: Dict[MarketType, Dict[str, int]] = {}
+        self._ctx_cache: Dict[str, Any] = {}
+        self._ctx_locks: Dict[str, asyncio.Lock] = {}
 
         self._capabilities = self._build_capabilities()
 
@@ -224,6 +227,10 @@ class HyperliquidAdapter(BaseExchange):
         }
 
 
+    def normalize_symbol(self, symbol: str) -> str:
+        return symbol.replace("/", "").replace("-", "").replace(":", "").upper()
+
+
     def get_api_symbol(self, symbol: str, market_type: MarketType) -> str:
         s = self.normalize_symbol(symbol)
         if market_type == MarketType.LINEAR and s.endswith("USDC"):
@@ -314,15 +321,34 @@ class HyperliquidAdapter(BaseExchange):
         return model_sym, info.native_symbol, info.quote_asset
 
 
+    async def _ctx_snapshot(self, info_type: str, body: Dict, key: str) -> Any:
+        entry = self._ctx_cache.get(key)
+        if entry is not None and time.monotonic() - entry[0] < self._CTX_TTL_S:
+            return entry[1]
+        lock = self._ctx_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            entry = self._ctx_cache.get(key)
+            if entry is not None and time.monotonic() - entry[0] < self._CTX_TTL_S:
+                return entry[1]
+            data = await self._make_request(info_type, body)
+            self._ctx_cache[key] = (time.monotonic(), data)
+            return data
+
+
     async def _asset_ctx(self, market_type: MarketType, coin: str) -> Dict[str, Any]:
         if market_type == MarketType.SPOT:
-            data = await self._make_request("spotMetaAndAssetCtxs", {"type": "spotMetaAndAssetCtxs"})
+            data = await self._ctx_snapshot("spotMetaAndAssetCtxs", {"type": "spotMetaAndAssetCtxs"}, "spot")
             for ctx in data[1]:
                 if ctx.get("coin") == coin:
                     return ctx
             raise ValueError(f"Coin {coin} not found on Hyperliquid spot")
 
-        data     = await self._make_request("metaAndAssetCtxs", {"type": "metaAndAssetCtxs"})
+        body = {"type": "metaAndAssetCtxs"}
+        key  = "linear"
+        if ":" in coin:
+            body["dex"] = coin.split(":", 1)[0]
+            key         = f"linear:{body['dex']}"
+        data     = await self._ctx_snapshot("metaAndAssetCtxs", body, key)
         universe = data[0]["universe"]
         ctxs     = data[1]
         for u, ctx in zip(universe, ctxs):
@@ -528,8 +554,11 @@ class HyperliquidAdapter(BaseExchange):
         oracle = ctx.get("oraclePx")
         rate   = ctx.get("funding")
 
-        ts        = int(time.time() * 1000)
-        next_hour = ((ts // cycle_ms) + 1) * cycle_ms
+        ts = int(time.time() * 1000)
+        if ":" in coin:
+            valid_until = ts + cycle_ms
+        else:
+            valid_until = ((ts // cycle_ms) + 1) * cycle_ms
 
         funding = None
         if rate is not None:
@@ -537,7 +566,7 @@ class HyperliquidAdapter(BaseExchange):
                 kind           = "discrete",
                 per_cycle      = float(rate),
                 cycle_ms       = cycle_ms,
-                valid_until_ts = max(next_hour, ts + 1),
+                valid_until_ts = max(valid_until, ts + 1),
             )
 
         return MarkPrice(
@@ -730,29 +759,77 @@ class HyperliquidAdapter(BaseExchange):
         self._funding_interval_cache.setdefault(market_type, {})
 
         results = []
+        seen    = set()
         for u in universe:
             if u.get("isDelisted"):
                 continue
             coin      = u["name"]
             sz_dec    = int(u["szDecimals"])
             model_sym = self.get_model_symbol(coin, market_type)
+            if model_sym in seen:
+                logger.warning(f"Hyperliquid duplicate linear symbol {model_sym} ({coin}); skipping")
+                continue
+            seen.add(model_sym)
 
             self._funding_interval_cache[market_type][model_sym] = self._FUNDING_CYCLE_MS
+            results.append(self._linear_symbol_info(model_sym, coin, coin, sz_dec))
 
-            results.append(SymbolInfo(
-                symbol             = model_sym,
-                native_symbol      = coin,
-                base_asset         = coin,
-                quote_asset        = "USDC",
-                price_precision    = max(6 - sz_dec, 0),
-                quantity_precision = sz_dec,
-                min_qty            = None,
-                max_qty            = None,
-                min_notional       = self._MIN_ORDER_VALUE_USD,
-                qty_unit           = "base",
-                contract_size      = None,
-                funding            = build_funding_convention("discrete"),
-            ))
+        results.extend(await self._fetch_builder_info(market_type, seen))
+        return results
+
+
+    def _linear_symbol_info(self, model_sym: str, native: str, base: str, sz_dec: int) -> SymbolInfo:
+        return SymbolInfo(
+            symbol             = model_sym,
+            native_symbol      = native,
+            base_asset         = base,
+            quote_asset        = "USDC",
+            price_precision    = max(6 - sz_dec, 0),
+            quantity_precision = sz_dec,
+            min_qty            = None,
+            max_qty            = None,
+            min_notional       = self._MIN_ORDER_VALUE_USD,
+            qty_unit           = "base",
+            contract_size      = None,
+            funding            = build_funding_convention("discrete"),
+        )
+
+
+    async def _fetch_builder_info(self, market_type: MarketType, seen: Set[str]) -> List[SymbolInfo]:
+        try:
+            dexs = await self._make_request("perpDexs", {"type": "perpDexs"})
+        except Exception as e:
+            logger.warning(f"Hyperliquid perpDexs fetch failed; serving primary linear only: {e!r}")
+            return []
+
+        results = []
+        for entry in dexs:
+            if not entry:
+                continue
+            dex = entry.get("name")
+            if not dex:
+                continue
+
+            try:
+                data     = await self._make_request("metaAndAssetCtxs", {"type": "metaAndAssetCtxs", "dex": dex})
+                universe = data[0]["universe"]
+                for u in universe:
+                    if u.get("isDelisted"):
+                        continue
+                    native    = u["name"]
+                    base      = native.split(":", 1)[1] if ":" in native else native
+                    sz_dec    = int(u["szDecimals"])
+                    model_sym = self.get_model_symbol(f"{dex}{base}", market_type)
+                    if model_sym in seen:
+                        logger.warning(f"Hyperliquid duplicate linear symbol {model_sym} ({native}); skipping")
+                        continue
+                    seen.add(model_sym)
+
+                    self._funding_interval_cache[market_type][model_sym] = self._FUNDING_CYCLE_MS
+                    results.append(self._linear_symbol_info(model_sym, native, base, sz_dec))
+            except Exception as e:
+                logger.warning(f"Hyperliquid builder dex {dex} skipped: {e!r}")
+                continue
         return results
 
 
@@ -897,9 +974,13 @@ class HyperliquidAdapter(BaseExchange):
 
         async for msg in self._ws_connect(topic, sub_arg):
             try:
-                ctx       = (msg.get("data") or {}).get("ctx") or {}
-                ts        = int(time.time() * 1000)
-                next_hour = ((ts // self._FUNDING_CYCLE_MS) + 1) * self._FUNDING_CYCLE_MS
+                ctx      = (msg.get("data") or {}).get("ctx") or {}
+                ts       = int(time.time() * 1000)
+                cycle_ms = self._FUNDING_CYCLE_MS
+                if ":" in coin:
+                    valid_until = ts + cycle_ms
+                else:
+                    valid_until = ((ts // cycle_ms) + 1) * cycle_ms
                 yield MarkPrice(
                     symbol      = model_sym,
                     market_type = market_type,
@@ -909,8 +990,8 @@ class HyperliquidAdapter(BaseExchange):
                     funding     = build_funding_current(
                         kind           = "discrete",
                         per_cycle      = float(ctx["funding"]),
-                        cycle_ms       = self._FUNDING_CYCLE_MS,
-                        valid_until_ts = max(next_hour, ts + 1),
+                        cycle_ms       = cycle_ms,
+                        valid_until_ts = max(valid_until, ts + 1),
                     ),
                     timestamp   = ts,
                 )
