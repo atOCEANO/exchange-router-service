@@ -50,6 +50,7 @@ class HyperliquidAdapter(BaseExchange):
 
 
     async def _warm(self) -> None:
+        await self._step("spot_info",   self._ensure_info_cache(MarketType.SPOT))
         await self._step("linear_info", self._ensure_info_cache(MarketType.LINEAR))
 
 
@@ -60,7 +61,7 @@ class HyperliquidAdapter(BaseExchange):
 
     @property
     def supported_market_types(self) -> List[MarketType]:
-        return [MarketType.LINEAR]
+        return [MarketType.SPOT, MarketType.LINEAR]
 
 
     def get_capabilities(self) -> Dict[str, Any]:
@@ -71,6 +72,77 @@ class HyperliquidAdapter(BaseExchange):
         return {
             "name": self.name,
             "markets": {
+                MarketType.SPOT: {
+                    "ticker": {
+                        "rest": True,
+                        "ws":   True,
+                    },
+                    "book_ticker": {
+                        "rest": True,
+                        "ws":   True,
+                    },
+                    "mark_price": {
+                        "rest": False,
+                        "ws":   False,
+                    },
+                    "orderbook": {
+                        "rest":      True,
+                        "ws":        True,
+                        "depths":    [20],
+                        "max_depth": 20,
+                    },
+                    "trades": {
+                        "rest":      True,
+                        "ws":        True,
+                        "max_limit": 10,
+                    },
+                    "agg_trades": {
+                        "rest":         False,
+                        "ws":           False,
+                        "paginated":    False,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                    },
+                    "candles": {
+                        "rest":         True,
+                        "ws":           False,
+                        "paginated":    True,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                        "intervals":    ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1d", "3d", "1w", "1M"],
+                    },
+                    "funding_rate": {
+                        "rest":         False,
+                        "ws":           False,
+                        "paginated":    False,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                    },
+                    "open_interest": {
+                        "rest":         False,
+                        "ws":           False,
+                        "paginated":    False,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                        "intervals":    None,
+                    },
+                    "liquidations": {
+                        "rest":         False,
+                        "ws":           False,
+                        "paginated":    False,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                        "completeness": None,
+                    },
+                    "long_short_ratio": {
+                        "rest":         False,
+                        "ws":           False,
+                        "paginated":    False,
+                        "max_limit":    None,
+                        "retention_ms": None,
+                        "intervals":    None,
+                    },
+                },
                 MarketType.LINEAR: {
                     "ticker": {
                         "rest": True,
@@ -236,7 +308,14 @@ class HyperliquidAdapter(BaseExchange):
         return model_sym, info.native_symbol, info.quote_asset
 
 
-    async def _asset_ctx(self, coin: str) -> Dict[str, Any]:
+    async def _asset_ctx(self, market_type: MarketType, coin: str) -> Dict[str, Any]:
+        if market_type == MarketType.SPOT:
+            data = await self._make_request("spotMetaAndAssetCtxs", {"type": "spotMetaAndAssetCtxs"})
+            for ctx in data[1]:
+                if ctx.get("coin") == coin:
+                    return ctx
+            raise ValueError(f"Coin {coin} not found on Hyperliquid spot")
+
         data     = await self._make_request("metaAndAssetCtxs", {"type": "metaAndAssetCtxs"})
         universe = data[0]["universe"]
         ctxs     = data[1]
@@ -286,6 +365,8 @@ class HyperliquidAdapter(BaseExchange):
         channel = msg.get("channel")
         if channel in ("subscriptionResponse", "pong", None):
             return None
+        if channel == "activeSpotAssetCtx":
+            channel = "activeAssetCtx"
         data = msg.get("data")
         if channel == "trades":
             if isinstance(data, list) and data:
@@ -334,7 +415,7 @@ class HyperliquidAdapter(BaseExchange):
     async def get_ticker(self, market_type: MarketType, symbol: str) -> Ticker:
         model_sym, coin, quote = await self._lookup(market_type, symbol)
 
-        ctx       = await self._asset_ctx(coin)
+        ctx       = await self._asset_ctx(market_type, coin)
         high, low = await self._high_low_24h(coin)
         px        = ctx.get("midPx") or ctx.get("markPx")
         if px is None:
@@ -399,9 +480,11 @@ class HyperliquidAdapter(BaseExchange):
 
 
     async def get_mark_price(self, market_type: MarketType, symbol: str) -> MarkPrice:
+        if market_type != MarketType.LINEAR:
+            raise NotImplementedError(f"{self.name} does not support mark_price for {market_type.value}")
         model_sym, coin, quote = await self._lookup(market_type, symbol)
 
-        ctx      = await self._asset_ctx(coin)
+        ctx      = await self._asset_ctx(market_type, coin)
         cycle_ms = await self._funding_interval_ms_for(market_type, model_sym)
         cycle_ms = cycle_ms if cycle_ms is not None else self._FUNDING_CYCLE_MS
 
@@ -538,6 +621,8 @@ class HyperliquidAdapter(BaseExchange):
 
 
     async def get_funding_rate(self, market_type: MarketType, symbol: str, start_time: Optional[int] = None, limit: int = 100) -> List[FundingRate]:
+        if market_type != MarketType.LINEAR:
+            raise NotImplementedError(f"{self.name} does not support funding_rate for {market_type.value}")
         model_sym, coin, quote = await self._lookup(market_type, symbol)
 
         cycle_ms = await self._funding_interval_ms_for(market_type, model_sym)
@@ -570,9 +655,11 @@ class HyperliquidAdapter(BaseExchange):
 
 
     async def get_open_interest(self, market_type: MarketType, symbol: str, period: str = "1h", start_time: Optional[int] = None, limit: int = 30) -> List[OpenInterest]:
+        if market_type != MarketType.LINEAR:
+            raise NotImplementedError(f"{self.name} does not support open_interest for {market_type.value}")
         model_sym, coin, quote = await self._lookup(market_type, symbol)
 
-        ctx = await self._asset_ctx(coin)
+        ctx = await self._asset_ctx(market_type, coin)
         oi  = ctx.get("openInterest")
         if oi is None:
             raise ValueError(f"Hyperliquid returned no open interest for {coin}")
@@ -598,6 +685,8 @@ class HyperliquidAdapter(BaseExchange):
 
 
     async def _fetch_exchange_info(self, market_type: MarketType) -> List[SymbolInfo]:
+        if market_type == MarketType.SPOT:
+            return await self._fetch_spot_info()
         if market_type != MarketType.LINEAR:
             return []
 
@@ -629,6 +718,38 @@ class HyperliquidAdapter(BaseExchange):
                 qty_unit           = "base",
                 contract_size      = None,
                 funding            = build_funding_convention("discrete"),
+            ))
+        return results
+
+
+    async def _fetch_spot_info(self) -> List[SymbolInfo]:
+        data  = await self._make_request("spotMeta", {"type": "spotMeta"})
+        names = {t["index"]: t["name"] for t in data["tokens"]}
+        szdec = {t["index"]: int(t["szDecimals"]) for t in data["tokens"]}
+
+        results = []
+        for pair in data["universe"]:
+            base_idx  = pair["tokens"][0]
+            quote_idx = pair["tokens"][1]
+            base      = names.get(base_idx)
+            quote     = names.get(quote_idx)
+            if base is None or quote is None:
+                continue
+            base_sz = szdec.get(base_idx, 0)
+
+            results.append(SymbolInfo(
+                symbol             = f"{base}{quote}".upper(),
+                native_symbol      = pair["name"],
+                base_asset         = base,
+                quote_asset        = quote,
+                price_precision    = max(8 - base_sz, 0),
+                quantity_precision = base_sz,
+                min_qty            = None,
+                max_qty            = None,
+                min_notional       = None,
+                qty_unit           = "base",
+                contract_size      = None,
+                funding            = None,
             ))
         return results
 
@@ -733,6 +854,8 @@ class HyperliquidAdapter(BaseExchange):
 
 
     async def stream_mark_price(self, market_type: MarketType, symbol: str) -> AsyncGenerator[MarkPrice, None]:
+        if market_type != MarketType.LINEAR:
+            raise NotImplementedError(f"{self.name} does not support mark_price for {market_type.value}")
         model_sym, coin, quote = await self._lookup(market_type, symbol)
 
         topic   = f"activeAssetCtx:{coin}"
