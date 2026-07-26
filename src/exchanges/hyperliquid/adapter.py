@@ -20,7 +20,11 @@ logger = logging.getLogger("hyperliquid_adapter")
 
 
 class HyperliquidAdapter(BaseExchange):
-    _FUNDING_CYCLE_MS = 3_600_000
+    _FUNDING_CYCLE_MS    = 3_600_000
+    _MIN_ORDER_VALUE_USD = 10.0
+    _TICKER_RESEED_S     = 120
+    _MAX_SUBS_PER_HUB    = 900
+    _MAX_HUBS            = 10
 
 
     def __init__(self):
@@ -33,9 +37,11 @@ class HyperliquidAdapter(BaseExchange):
         self._backoff_until = 0.0
         self._backoff_lock  = asyncio.Lock()
 
-        self._hub: Optional[StreamHub] = None
+        self._hubs: List[Dict[str, Any]] = []
         self._hubs_lock = asyncio.Lock()
         self._topic_args: Dict[str, Dict] = {}
+        self._topic_hub: Dict[str, StreamHub] = {}
+        self._topic_refs: Dict[str, int] = {}
 
         self._funding_interval_cache: Dict[MarketType, Dict[str, int]] = {}
 
@@ -43,9 +49,9 @@ class HyperliquidAdapter(BaseExchange):
 
 
     async def shutdown(self):
-        if self._hub is not None:
-            await self._hub.close()
-            self._hub = None
+        for slot in list(self._hubs):
+            await slot["hub"].close()
+        self._hubs.clear()
         await self.http_client.aclose()
 
 
@@ -383,33 +389,61 @@ class HyperliquidAdapter(BaseExchange):
         return None
 
 
-    async def _get_hub(self) -> StreamHub:
+    def _make_hub(self, index: int) -> StreamHub:
+        async def _connect():
+            return await websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20)
+        return StreamHub(
+            name=f"hyperliquid_{index}",
+            connect=_connect,
+            subscribe_payload=self._sub_payload,
+            unsubscribe_payload=self._unsub_payload,
+            route=self._route,
+            keepalive_payload={"method": "ping"},
+            keepalive_interval=50.0,
+        )
+
+
+    async def _acquire_topic(self, topic: str, sub_arg: Dict) -> StreamHub:
         async with self._hubs_lock:
-            if self._hub is None:
-                async def _connect():
-                    return await websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20)
-                self._hub = StreamHub(
-                    name="hyperliquid",
-                    connect=_connect,
-                    subscribe_payload=self._sub_payload,
-                    unsubscribe_payload=self._unsub_payload,
-                    route=self._route,
-                    keepalive_payload={"method": "ping"},
-                    keepalive_interval=50.0,
-                )
-            return self._hub
+            hub = self._topic_hub.get(topic)
+            if hub is None:
+                slot = next((s for s in self._hubs if len(s["topics"]) < self._MAX_SUBS_PER_HUB), None)
+                if slot is None:
+                    if len(self._hubs) >= self._MAX_HUBS:
+                        raise UpstreamUnavailableError("Hyperliquid WS subscription capacity reached")
+                    slot = {"hub": self._make_hub(len(self._hubs)), "topics": set()}
+                    self._hubs.append(slot)
+                slot["topics"].add(topic)
+                self._topic_hub[topic] = slot["hub"]
+                hub = slot["hub"]
+            self._topic_args[topic] = sub_arg
+            self._topic_refs[topic] = self._topic_refs.get(topic, 0) + 1
+            return hub
+
+
+    async def _release_topic(self, topic: str, q: Any, hub: StreamHub) -> None:
+        await hub.unsubscribe(topic, q)
+        async with self._hubs_lock:
+            self._topic_refs[topic] = self._topic_refs.get(topic, 1) - 1
+            if self._topic_refs[topic] <= 0:
+                self._topic_refs.pop(topic, None)
+                self._topic_args.pop(topic, None)
+                assigned = self._topic_hub.pop(topic, None)
+                for slot in self._hubs:
+                    if slot["hub"] is assigned:
+                        slot["topics"].discard(topic)
+                        break
 
 
     async def _ws_connect(self, topic: str, sub_arg: Dict) -> AsyncGenerator[Dict, None]:
-        self._topic_args[topic] = sub_arg
-        hub = await self._get_hub()
+        hub = await self._acquire_topic(topic, sub_arg)
         q   = await hub.subscribe(topic)
         try:
             while True:
                 msg = await q.get()
                 yield msg
         finally:
-            await hub.unsubscribe(topic, q)
+            await self._release_topic(topic, q, hub)
 
 
     async def get_ticker(self, market_type: MarketType, symbol: str) -> Ticker:
@@ -714,7 +748,7 @@ class HyperliquidAdapter(BaseExchange):
                 quantity_precision = sz_dec,
                 min_qty            = None,
                 max_qty            = None,
-                min_notional       = None,
+                min_notional       = self._MIN_ORDER_VALUE_USD,
                 qty_unit           = "base",
                 contract_size      = None,
                 funding            = build_funding_convention("discrete"),
@@ -746,7 +780,7 @@ class HyperliquidAdapter(BaseExchange):
                 quantity_precision = base_sz,
                 min_qty            = None,
                 max_qty            = None,
-                min_notional       = None,
+                min_notional       = self._MIN_ORDER_VALUE_USD,
                 qty_unit           = "base",
                 contract_size      = None,
                 funding            = None,
@@ -772,7 +806,7 @@ class HyperliquidAdapter(BaseExchange):
         model_sym, coin, quote = await self._lookup(market_type, symbol)
 
         high, low = await self._high_low_24h(coin)
-        reseed_at = time.time() + 300
+        reseed_at = time.time() + self._TICKER_RESEED_S
         topic     = f"activeAssetCtx:{coin}"
         sub_arg   = {"type": "activeAssetCtx", "coin": coin}
 
@@ -787,7 +821,7 @@ class HyperliquidAdapter(BaseExchange):
                 if low is None or close < low:
                     low = close
                 if time.time() >= reseed_at:
-                    reseed_at = time.time() + 300
+                    reseed_at = time.time() + self._TICKER_RESEED_S
                     h2, l2    = await self._high_low_24h(coin)
                     if h2 is not None:
                         high, low = h2, l2
