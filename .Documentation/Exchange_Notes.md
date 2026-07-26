@@ -239,6 +239,28 @@ The router exposes two Hyperliquid markets: `linear` (USDC-margined perpetuals) 
 
 <br>
 
+### Builder-deployed perp dexs (equities, indices, pre-IPO)
+
+Beyond the primary perp dex, Hyperliquid hosts builder-deployed dexs (HIP-3): independently deployed perp venues that list equities, indices, and pre-IPO names (`NVDA`, `TSLA`, `US500`, `SPACEX`, `OPENAI`). The router folds every builder market into the `linear` market type as additional symbols; there is no separate market or venue field. Nine builder dexs are exposed all-in (`xyz`, `flx`, `vntl`, `hyna`, `km`, `abcd`, `cash`, `para`, `mkts`).
+
+Upstream, a builder coin is named `dex:coin`: the lowercase dex name, a colon, then the coin (`xyz:NVDA`, `km:US500`, `hyna:BTC`). The router splits that name into a flat, dex-prefixed symbol and maps it to the standard fields as follows, using `xyz:NVDA` as the worked example:
+
+| field | value for `xyz:NVDA` | how it is derived |
+| :--- | :--- | :--- |
+| `symbol` (routing / URL)                | `XYZNVDAUSDC` | `{dex}{coin}` uppercased, with the `USDC` suffix |
+| `base_asset`                            | `NVDA`       | the coin, the part after the `dex:` prefix |
+| `quote_asset`                           | `USDC`       | always USDC (see below) |
+| `native_symbol` (used for API requests) | `xyz:NVDA`   | the exact upstream `dex:coin`, unchanged |
+| `market_type`                           | `linear`     | builder perps are linear |
+
+Only the routing `symbol` is reshaped; `native_symbol` stays byte-for-byte as Hyperliquid names it, because that is what every data request (orderbook, trades, candles, funding, ticker) and every WebSocket subscription passes back as the `coin`. Four input forms resolve to the same market, case-insensitively, because symbol normalization strips `/`, `-`, and `:` and then reconciles the `USDC` suffix: `XYZNVDAUSDC`, `XYZNVDA`, `xyz:NVDA`, and `xyzNVDA` all map to `XYZNVDAUSDC`.
+
+Because the dex is baked into the routing symbol, the same coin listed on several dexs stays distinct: `NVDA` on `xyz`, `flx`, and `cash` are `XYZNVDAUSDC`, `FLXNVDAUSDC`, and `CASHNVDAUSDC`, and `hyna` re-lists primary crypto so `HYNABTCUSDC` sits alongside the primary `BTCUSDC`. There is no separate dex or venue field on any model, so a consumer that needs to tell a builder market from a primary one keys on the dex prefix in `symbol`, equivalently the `:` in `native_symbol` (primary coins have neither).
+
+Builder perps carry no collateral-token field upstream; their prices are USD-denominated and their asset context matches the USDC perps, so every builder market is treated as USDC-quoted (`quote_asset` is `USDC`). If Hyperliquid ever exposes a non-USDC builder collateral, that would need per-dex handling; none is exposed today. Everything else matches primary linear: mid price, 10-row REST trades, current-only open interest, `min_qty` and `max_qty` null, `min_notional` at the 10 USD floor, and `price_precision` of `6 - szDecimals`.
+
+<br>
+
 ### `Ticker.price` is the mid, not the last trade
 
 Hyperliquid's asset context carries no last-traded price, so `Ticker.price` is the current mid (`midPx`). The other price fields (`open_24h`, `high_24h`, `low_24h`, `volume_24h`, `price_change_percent`) are exact; only the last-price slot is a mid rather than the most recent fill. A consumer comparing `price` across venues should read Hyperliquid's as a mid quote.
@@ -259,7 +281,7 @@ Hyperliquid publishes only the current open interest, with no historical series.
 
 ### Funding is discrete and hourly
 
-Hyperliquid settles funding every hour, so `MarkPrice.funding` and `FundingRate.rate` carry `kind: "discrete"` with `cycle_ms: 3_600_000`, a shorter cycle than the 8h and 4h discrete venues. `per_cycle` is therefore already a per-hour rate, and `valid_until_ts` is the next top-of-hour settlement. See [Funding cycle and `valid_until_ts`](#funding-cycle-and-valid_until_ts) for the cross-venue math.
+Hyperliquid settles funding every hour, so `MarkPrice.funding` and `FundingRate.rate` carry `kind: "discrete"` with `cycle_ms: 3_600_000`, a shorter cycle than the 8h and 4h discrete venues. `per_cycle` is therefore already a per-hour rate, and on the primary dex `valid_until_ts` is the next top-of-hour settlement. Builder-deployed dex markets also settle hourly but not aligned to the clock hour, so for those symbols `valid_until_ts` is an hourly estimate (`timestamp + cycle_ms`) rather than the next top-of-hour; it still satisfies `valid_until_ts >= timestamp`. See [Funding cycle and `valid_until_ts`](#funding-cycle-and-valid_until_ts) for the cross-venue math.
 
 <br>
 
