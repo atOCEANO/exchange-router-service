@@ -251,7 +251,7 @@ Designed for localhost or a trusted network: no TLS termination, no authenticati
       <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
       <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook, Mark Price</td>
     </tr>
-    <tr style="border-bottom: 1px solid #30363d;">
+    <tr style="border-bottom: 2px solid #30363d;">
       <td style="padding: 8px 12px; opacity: 0.8;">Inverse</td>
       <td style="padding: 8px; text-align: center;">[x]</td>
       <td style="padding: 8px; text-align: center;">[x]</td>
@@ -260,6 +260,40 @@ Designed for localhost or a trusted network: no TLS termination, no authenticati
       <td style="padding: 8px; text-align: center;">[x]</td>
       <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
       <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook, Mark Price</td>
+    </tr>
+    <!-- Hyperliquid -->
+    <tr style="border-bottom: 1px solid #30363d;">
+      <td rowspan="3" style="padding: 12px; vertical-align: middle; text-align: left; border-right: 1px solid #30363d;">
+        <img src=".Documentation/imgs/exchanges/hyperliquid_logo.png" height="24" />
+      </td>
+      <td style="padding: 8px 12px; opacity: 0.8;">Spot</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px; opacity: 0.3;">-</td>
+    </tr>
+    <tr style="border-bottom: 1px solid #30363d;">
+      <td style="padding: 8px 12px; opacity: 0.8;">Linear</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center;">[x]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px;">Ticker, Book Ticker, Trades, Orderbook, Mark Price</td>
+    </tr>
+    <tr style="border-bottom: 1px solid #30363d;">
+      <td style="padding: 8px 12px; opacity: 0.8;">Inverse</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: center; opacity: 0.3;">[ ]</td>
+      <td style="padding: 8px; text-align: left; font-size: 0.85em; max-width: 250px; opacity: 0.3;">-</td>
     </tr>
   </tbody>
 </table>

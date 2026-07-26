@@ -225,6 +225,47 @@ The adapter passes `endTime` to `/v5/market/account-ratio` like any other pagina
 <br>
 <br>
 
+## Hyperliquid
+
+<br>
+
+### Symbol format and market coverage
+
+Hyperliquid is a perpetuals venue, and the router exposes its `linear` (USDC-margined perpetual) market only. There is no `inverse` market and spot is not yet wired, so `supported_market_types` is `["linear"]` and a request to any other market type returns an error. Perpetuals are quoted against USDC: the normalized symbol is `{coin}USDC` (`BTCUSDC`, `ETHUSDC`), `quote_asset` is `USDC`, and `native_symbol` is the bare coin (`BTC`) exactly as Hyperliquid's own API names it. Sizes are in the base coin throughout, so `qty_unit` is `"base"` and `contract_size` is `null` on every linear record, and the nested `usd` figures are USDC notional.
+
+<br>
+
+### `Ticker.price` is the mid, not the last trade
+
+Hyperliquid's asset context carries no last-traded price, so `Ticker.price` is the current mid (`midPx`). The other price fields (`open_24h`, `high_24h`, `low_24h`, `volume_24h`, `price_change_percent`) are exact; only the last-price slot is a mid rather than the most recent fill. A consumer comparing `price` across venues should read Hyperliquid's as a mid quote.
+
+<br>
+
+### REST trades return at most 10 rows
+
+The public REST recent-trades endpoint is capped at 10 rows and ignores `limit`, so `GET /hyperliquid/linear/trades/{symbol}` returns at most the 10 most recent trades (`trades.max_limit` is `10` in the capability map). For deeper or continuous trade flow, subscribe to the WebSocket `trades` stream, which is unbounded.
+
+<br>
+
+### Open interest is a current snapshot, not a history
+
+Hyperliquid publishes only the current open interest, with no historical series. `GET /hyperliquid/linear/open_interest/{symbol}` returns a single row carrying the live value, stamped at the most recent `period` boundary so its `usd` can be joined to a same-period candle close. `start` and `limit` are accepted but do not page back through history (`paginated` is `False`, `max_limit` is `1`). Consumers expecting an OI time series receive one point.
+
+<br>
+
+### Funding is discrete and hourly
+
+Hyperliquid settles funding every hour, so `MarkPrice.funding` and `FundingRate.rate` carry `kind: "discrete"` with `cycle_ms: 3_600_000`, a shorter cycle than the 8h and 4h discrete venues. `per_cycle` is therefore already a per-hour rate, and `valid_until_ts` is the next top-of-hour settlement. See [Funding cycle and `valid_until_ts`](#funding-cycle-and-valid_until_ts) for the cross-venue math.
+
+<br>
+
+### No public liquidations, long/short ratio, or per-symbol order limits
+
+Hyperliquid exposes no public liquidation feed and no long/short account ratio, so `liquidations` and `long_short_ratio` are `False` for REST and WS and calling those routes returns HTTP 501. It also does not publish per-symbol order-size limits, so `SymbolInfo.min_qty`, `max_qty`, and `min_notional` come back `null` (the platform minimum is a flat ~10 USD notional, not a per-symbol field).
+
+<br>
+<br>
+
 ## Kraken
 
 <br>
