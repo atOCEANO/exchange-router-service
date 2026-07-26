@@ -231,7 +231,11 @@ The adapter passes `endTime` to `/v5/market/account-ratio` like any other pagina
 
 ### Symbol format and market coverage
 
-Hyperliquid is a perpetuals venue, and the router exposes its `linear` (USDC-margined perpetual) market only. There is no `inverse` market and spot is not yet wired, so `supported_market_types` is `["linear"]` and a request to any other market type returns an error. Perpetuals are quoted against USDC: the normalized symbol is `{coin}USDC` (`BTCUSDC`, `ETHUSDC`), `quote_asset` is `USDC`, and `native_symbol` is the bare coin (`BTC`) exactly as Hyperliquid's own API names it. Sizes are in the base coin throughout, so `qty_unit` is `"base"` and `contract_size` is `null` on every linear record, and the nested `usd` figures are USDC notional.
+The router exposes two Hyperliquid markets: `linear` (USDC-margined perpetuals) and `spot`. There is no `inverse` market, so `supported_market_types` is `["spot", "linear"]` and an `inverse` request returns an error.
+
+**Linear.** Perpetuals are quoted against USDC: the normalized symbol is `{coin}USDC` (`BTCUSDC`, `ETHUSDC`), `quote_asset` is `USDC`, and `native_symbol` is the bare coin (`BTC`) exactly as Hyperliquid's own API names it. Sizes are in the base coin, so `qty_unit` is `"base"` and `contract_size` is `null` on every linear record, and the nested `usd` figures are USDC notional. `price_precision` is `6 - szDecimals`.
+
+**Spot.** Upstream, almost every spot pair is named `@N` (`@107`); only a handful are canonically named (`PURR/USDC`). The router resolves each pair through the token table into a flat `{base}{quote}` symbol (`HYPEUSDC`, `PURRUSDC`), and `native_symbol` carries the upstream `@N` (or `PURR/USDC`) form used for data requests. Spot is quoted against several stablecoins, not only USDC (`USDC`, `USDH`, `USDT0`, `USDE`), so one base can list under several symbols (`HYPEUSDC`, `HYPEUSDT0`, `HYPEUSDH`, `HYPEUSDE`) and `quote_asset` varies per row. Spot has no mark price, funding, or open interest, so those routes are `False`. `price_precision` is `8 - szDecimals`.
 
 <br>
 
