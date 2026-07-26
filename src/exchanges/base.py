@@ -151,9 +151,8 @@ class StreamHub:
                 self._queues[topic] = []
                 is_new_topic       = True
             self._queues[topic].append(q)
-            if self._task is None or self._task.done():
-                self._closed = False
-                self._task   = asyncio.create_task(self._run())
+            if not self._closed and (self._task is None or self._task.done()):
+                self._task = asyncio.create_task(self._run())
 
         if is_new_topic:
             try:
@@ -191,9 +190,10 @@ class StreamHub:
 
 
     async def close(self) -> None:
-        self._closed = True
-        task         = self._task
-        self._task   = None
+        async with self._lock:
+            self._closed = True
+            task         = self._task
+            self._task   = None
 
         if task is not None:
             task.cancel()
@@ -267,12 +267,15 @@ class StreamHub:
                     await self._send_payloads(self._sub_payload(topics))
 
                 self._connected.set()
-                reconnect_delay = 1
 
                 if self._keepalive_payload is not None and self._keepalive_interval > 0:
                     ka_task = asyncio.create_task(self._keepalive_loop(ws))
 
+                stable = False
                 async for raw in ws:
+                    if not stable:
+                        reconnect_delay = 1
+                        stable          = True
                     msg = self._parse(raw)
                     if msg is None:
                         continue
