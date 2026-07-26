@@ -265,7 +265,7 @@ Hyperliquid settles funding every hour, so `MarkPrice.funding` and `FundingRate.
 
 ### No public liquidations, long/short ratio, or per-symbol order limits
 
-Hyperliquid exposes no public liquidation feed and no long/short account ratio, so `liquidations` and `long_short_ratio` are `False` for REST and WS and calling those routes returns HTTP 501. It also does not publish per-symbol order-size limits, so `SymbolInfo.min_qty`, `max_qty`, and `min_notional` come back `null` (the platform minimum is a flat ~10 USD notional, not a per-symbol field).
+Hyperliquid exposes no public liquidation feed and no long/short account ratio, so `liquidations` and `long_short_ratio` are `False` for REST and WS and calling those routes returns HTTP 501. It also does not publish per-symbol order-size limits, so `SymbolInfo.min_qty` and `max_qty` come back `null`; `min_notional` is set to Hyperliquid's flat 10 USD minimum order value (a global platform floor, not a per-symbol figure). The funding cycle length and next-payout time are not on `SymbolInfo` (which carries only `funding.kind`); `cycle_ms` and `valid_until_ts` come from `mark_price`, and the hourly settlement timestamps from `funding_rate`.
 
 <br>
 <br>
