@@ -7,5 +7,5 @@
 #                                           @OCEΛNO
 #                                              2025
 
-SERVICE_VERSION = "2.5.1"
+SERVICE_VERSION = "2.5.2"
 SCHEMA_VERSION  = 3
