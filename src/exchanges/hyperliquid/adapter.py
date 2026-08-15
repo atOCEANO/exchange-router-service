@@ -25,7 +25,7 @@ class HyperliquidAdapter(BaseExchange):
     _TICKER_RESEED_S     = 120
     _MAX_SUBS_PER_HUB    = 900
     _MAX_HUBS            = 10
-    _CTX_TTL_S           = 1.0
+    _CTX_TTL_S           = 3.0
 
 
     def __init__(self):
@@ -47,6 +47,8 @@ class HyperliquidAdapter(BaseExchange):
         self._funding_interval_cache: Dict[MarketType, Dict[str, int]] = {}
         self._ctx_cache: Dict[str, Any] = {}
         self._ctx_locks: Dict[str, asyncio.Lock] = {}
+        self._hl_cache: Dict[str, Any] = {}
+        self._hl_locks: Dict[str, asyncio.Lock] = {}
 
         self._capabilities = self._build_capabilities()
 
@@ -368,6 +370,27 @@ class HyperliquidAdapter(BaseExchange):
         return high, low
 
 
+    async def _high_low_24h_cached(self, coin: str, close: float) -> Any:
+        entry = self._hl_cache.get(coin)
+        if entry is None or time.monotonic() - entry[0] >= self._TICKER_RESEED_S:
+            lock = self._hl_locks.setdefault(coin, asyncio.Lock())
+            async with lock:
+                entry = self._hl_cache.get(coin)
+                if entry is None or time.monotonic() - entry[0] >= self._TICKER_RESEED_S:
+                    high, low            = await self._high_low_24h(coin)
+                    entry                = (time.monotonic(), high, low)
+                    self._hl_cache[coin] = entry
+
+        seeded, high, low = entry
+        if close > 0:
+            if high is None or close > high:
+                high = close
+            if low is None or close < low:
+                low = close
+            self._hl_cache[coin] = (seeded, high, low)
+        return high, low
+
+
     async def _funding_interval_ms_for(self, market_type: MarketType, model_symbol: str) -> Optional[int]:
         await self._ensure_info_cache(market_type)
         return self._funding_interval_cache.get(market_type, {}).get(model_symbol)
@@ -475,13 +498,13 @@ class HyperliquidAdapter(BaseExchange):
     async def get_ticker(self, market_type: MarketType, symbol: str) -> Ticker:
         model_sym, coin, quote = await self._lookup(market_type, symbol)
 
-        ctx       = await self._asset_ctx(market_type, coin)
-        high, low = await self._high_low_24h(coin)
-        px        = ctx.get("midPx") or ctx.get("markPx")
+        ctx = await self._asset_ctx(market_type, coin)
+        px  = ctx.get("midPx") or ctx.get("markPx")
         if px is None:
             raise ValueError(f"Hyperliquid returned no price for {coin}")
-        close = float(px)
-        prev  = float(ctx.get("prevDayPx") or 0)
+        close     = float(px)
+        high, low = await self._high_low_24h_cached(coin, close)
+        prev      = float(ctx.get("prevDayPx") or 0)
 
         return Ticker(
             symbol               = model_sym,
