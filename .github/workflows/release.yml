@@ -1,12 +1,13 @@
-# Release: build the client SDK and the service image, then publish them as a
-# GitHub Release with the artifacts attached. Same shape as emsl's release, with
-# the payload a service has rather than the payload a library has: emsl's
-# four-platform wheel matrix collapses to one build, because the client SDK is
-# pure Python and its wheel is py3-none-any, and the image is the part emsl has
-# no counterpart for.
+# Release: check the tag against the service version, then publish a GitHub
+# Release with notes. Same shape as emsl's release, minus the build matrix,
+# because there is nothing here to build for anyone. emsl ships wheels because a
+# library has to arrive as a file; this is a service you run, so the artifact is
+# the repository at the tag, which GitHub attaches on its own. The client SDK is
+# versioned on its own line and installs straight from the tag, so shipping a
+# wheel here would only publish a file whose number disagrees with the release.
 #
-# A v* tag builds AND releases. A manual dispatch builds only, so the whole thing
-# can be dry-run before committing to a tag:
+# A v* tag releases. A manual dispatch runs the guard and stops, so the check can
+# be dry-run before committing to a tag:
 #   Actions -> release -> Run workflow
 
 name: release
@@ -20,10 +21,10 @@ permissions:
   contents: read
 
 jobs:
-  # The guard the rest of the release hangs off. v2.2.0 was tagged on a commit
-  # whose src/version.py still read 2.1.0, so a running container reported a
-  # version that no tag matched and nothing anywhere noticed. Every tag from
-  # v2.2.1 on has agreed; this is what keeps it that way.
+  # The guard the release hangs off. v2.2.0 was tagged on a commit whose
+  # src/version.py still read 2.1.0, so a running container reported a version
+  # that no tag matched and nothing anywhere noticed. Every tag from v2.2.1 on
+  # has agreed; this is what keeps it that way.
   version:
     name: the tag matches the service version
     runs-on: ubuntu-latest
@@ -45,57 +46,18 @@ jobs:
             exit 1
           fi
 
-  client:
-    name: client SDK sdist and wheel
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10" # the floor setup.py declares
-      - run: pip install build
-      - run: python -m build --sdist --wheel --outdir dist client
-      - uses: actions/upload-artifact@v4
-        with:
-          name: client
-          path: dist/*
-
-  image:
-    name: service image
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write # pushing to GHCR writes a package
-    steps:
-      - uses: actions/checkout@v4
-      - run: docker build -t ers-release .
-      # a dispatch proves the image builds and stops there; only a tag publishes
-      - name: push to GHCR
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          repo=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
-          version="${GITHUB_REF_NAME#v}"
-          docker tag ers-release "ghcr.io/${repo}:${version}"
-          docker tag ers-release "ghcr.io/${repo}:latest"
-          docker push "ghcr.io/${repo}:${version}"
-          docker push "ghcr.io/${repo}:latest"
-
   release:
     name: publish the release
-    needs: [version, client, image]
+    needs: [version]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') # a dispatch builds only, never releases
+    if: startsWith(github.ref, 'refs/tags/') # a dispatch checks only, never releases
     permissions:
       contents: write # creating a release writes to the repo
     steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
+      # no `files:`, so the assets are the source archives GitHub attaches
+      # itself. That is the thing you actually download to run this.
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
           generate_release_notes: true
           body: |
             `exchange-router-service` is a stateless, keyless router over public
@@ -104,26 +66,74 @@ jobs:
             both, so a client written against Binance spot works against Bybit
             linear with a single path change.
 
-            ## Run it
+            There is nothing to install from this page. Take the source below, or
+            clone at the tag, and run it either of the two ways.
+
+            ## Run it without Docker
 
             ```bash
-            docker run --rm -p 8040:8040 ghcr.io/atoceano/exchange-router-service:${{ github.ref_name }}
+            git clone --branch ${{ github.ref_name }} https://github.com/atOCEANO/exchange-router-service.git
+            cd exchange-router-service
+            python -m venv .venv
+            source .venv/bin/activate
+            pip install -r requirements.txt
+            uvicorn src.main:app --port 8040
             ```
 
-            The image is also tagged `latest`. It holds no keys, places no orders,
-            and persists nothing, so there is nothing to configure before it
-            serves.
+            On Windows, activate with `.venv\Scripts\activate`. Requires Python
+            3.10 or newer. Add `--reload` while working on an adapter.
 
-            ## The client SDK
+            ## Run it with Docker
 
-            A typed Python client is attached below. Note that **its version is not
-            the service version**: the SDK is released on its own line, so a
-            `${{ github.ref_name }}` service ships whatever SDK version was current.
-            Take the wheel from the Assets and install the file directly:
+            The image is built from the repository, so there is no registry to
+            pull from and nothing to trust but the source you just cloned:
 
             ```bash
-            pip install ./exchange_router_client-*-py3-none-any.whl
+            git clone --branch ${{ github.ref_name }} https://github.com/atOCEANO/exchange-router-service.git
+            cd exchange-router-service
+            cp .env.example .env
+            docker compose up --build
             ```
+
+            Compose binds to `127.0.0.1:8040` by default; set
+            `EXCHANGE_ROUTER_SERVICE_PORT` in `.env` to move it. To skip compose,
+            `docker build -t exchange-router-service .` and
+            `docker run --rm -p 8040:8040 exchange-router-service`.
+
+            Either way, confirm it is up:
+
+            ```bash
+            curl http://localhost:8040/version
+            curl http://localhost:8040/exchanges
+            ```
+
+            ## The Python client
+
+            A typed client lives in `client/` and installs straight from this tag.
+            It is versioned on its own line, so its number will not match the
+            service number, and that is intended:
+
+            ```bash
+            pip install "git+https://github.com/atOCEANO/exchange-router-service.git@${{ github.ref_name }}#subdirectory=client"
+            ```
+
+            No `await`, and it runs identically in a script and in a notebook:
+
+            ```python
+            from exchange_router_client import ExchangeRouterClient
+
+            with ExchangeRouterClient("http://localhost:8040") as client:
+                print(client.get_version())
+                print(client.get_exchanges())
+
+                df = client.get_candles("binance", "spot", "BTCUSDT", interval="1h", limit=100)
+                print(df.tail())
+            ```
+
+            The client holds persistent connections, so release it when done. The
+            `with` block guarantees cleanup; outside one, call `client.close()`.
+            See [Python SDK](https://github.com/atOCEANO/exchange-router-service/blob/${{ github.ref_name }}/.Documentation/Python_SDK.md)
+            for the full surface.
 
             ## What is in it
 
@@ -159,7 +169,7 @@ jobs:
             IPs that several of these exchanges block. CI therefore checks only
             what needs no upstream: every adapter package registers an adapter and
             declares a non-empty capabilities map and at least one market type, the
-            client SDK builds and imports from a clean interpreter, the image
+            client SDK installs into a clean interpreter and imports, the image
             builds and boots, and this tag matches `SERVICE_VERSION`. Treat the
-            auditor run, not this release, as the evidence that a given adapter
-            is correct against its exchange.
+            auditor run, not this release, as the evidence that a given adapter is
+            correct against its exchange.

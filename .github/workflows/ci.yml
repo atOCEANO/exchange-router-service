@@ -67,26 +67,23 @@ jobs:
           PY
 
   client:
-    name: build the client SDK
+    name: the client SDK installs and imports
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - run: pip install build
-      - run: python -m build --sdist --wheel --outdir dist client
-      # a clean interpreter, so a missing dependency in setup.py surfaces here
-      # rather than in someone's first pip install
-      - name: install the wheel and import it
+      # this is the install the SDK page and the release notes both tell people
+      # to run, just pointed at the checkout instead of at github, so a broken
+      # setup.py or a dependency missing from it fails here rather than in
+      # someone's first pip install. A clean venv, so nothing already on the
+      # runner can satisfy an import the package forgot to declare.
+      - name: install it into a clean interpreter
         run: |
           python -m venv /tmp/fresh
-          /tmp/fresh/bin/pip install dist/*.whl
-          /tmp/fresh/bin/python -c "import exchange_router_client as c; print(c.__version__)"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: client
-          path: dist/*
+          /tmp/fresh/bin/pip install ./client
+          /tmp/fresh/bin/python -c "import exchange_router_client as c; print('SDK', c.__version__)"
 
   image:
     name: the image boots and answers

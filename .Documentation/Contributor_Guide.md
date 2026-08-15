@@ -423,7 +423,7 @@ See [Auditor Guide](Auditor_Guide.md) for the full probe catalogue, env knobs, c
 
 ### What CI does check
 
-`.github/workflows/ci.yml` runs on every push to `main` and every pull request. It cannot run the auditor, so it checks only what needs no upstream, and the list is deliberately short: every adapter package registers an adapter and declares a non-empty capabilities map and at least one market type, the client SDK builds and imports from a clean interpreter, and the image builds, boots, and answers on `/status`, `/version` and `/exchanges`.
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request. It cannot run the auditor, so it checks only what needs no upstream, and the list is deliberately short: every adapter package registers an adapter and declares a non-empty capabilities map and at least one market type, the client SDK installs into a clean interpreter and imports, and the image builds, boots, and answers on `/status`, `/version` and `/exchanges`.
 
 The first of those is the one worth knowing about. `load_exchanges()` catches and logs an adapter that fails to import, so a broken adapter does not stop the service, it just leaves it running with one exchange fewer and nothing anywhere fails. Counting the packages on disk against the registry is what turns that into a red build. Treat a green CI run as saying the service is assembled, never as saying an adapter is correct against its exchange; only an auditor run says that.
 
@@ -434,9 +434,9 @@ The first of those is the one worth knowing about. `load_exchanges()` catches an
 
 `SERVICE_VERSION` in `src/version.py` is the single source of the version, and **the tag must equal it**. CI enforces this rather than generating it: a workflow that wrote the version would leave a running container reporting a number that is in no commit. `v2.2.0` was tagged on a commit still reading `2.1.0` before the rule existed; every tag from `v2.2.1` on agrees, and the guard job is what keeps it that way.
 
-To cut a release, bump `src/version.py` in its own commit (the history keeps these separate, `chore(version): bump service to X.Y.Z`), then tag that commit `vX.Y.Z` and push the tag. `.github/workflows/release.yml` then checks the tag against `src/version.py`, builds the client SDK sdist and wheel, builds and pushes the image to GHCR as both `X.Y.Z` and `latest`, and publishes a GitHub Release with the SDK artifacts attached. A manual dispatch from the Actions tab builds everything and publishes nothing, so the whole path can be dry-run before you commit to a tag.
+To cut a release, bump `src/version.py` in its own commit (the history keeps these separate, `chore(version): bump service to X.Y.Z`), then tag `vX.Y.Z` and push the tag. `.github/workflows/release.yml` checks the tag against `src/version.py` and publishes a GitHub Release with generated notes. A manual dispatch from the Actions tab runs the guard and stops, so the check can be dry-run before you commit to a tag.
 
-The client SDK carries its own version in `client/exchange_router_client/_version.py` and is released on its own line, so the wheel attached to a service release will usually not match the service number. That is intended, and the release body says so.
+The release builds and attaches nothing, which is deliberate. A library has to arrive as a file, so emsl ships wheels; this is a service you run, and the artifact is the repository at the tag, which GitHub attaches by itself. The release body carries the three things a reader actually needs instead: running it from a checkout without Docker, building the image from the same checkout, and installing the client. The client SDK carries its own version in `client/exchange_router_client/_version.py` and installs straight from the tag, so publishing a wheel here would only produce a file whose number disagrees with the release it is attached to.
 
 <br>
 <br>
