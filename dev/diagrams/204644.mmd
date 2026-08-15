@@ -12,7 +12,12 @@ flowchart LR
     A -. "Raw Data" .-> R
     B -. "Raw Data" .-> R
     X -. "Raw Data" .-> R
-    R -. "Normalized Clean Data" .-> C
+    %% mermaid caps an edge label at 200px and wraps past it, and a wrapped label
+    %% is laid out as a padded 200px block where an unwrapped one hugs its text.
+    %% "Normalized Clean Data" was the only label over the cap, so it alone drew a
+    %% box twice the size of its neighbour's and read as a different type size.
+    %% "Clean" was saying what "Normalized" already said, so the cap decides it
+    R -. "Normalized Data" .-> C
 
     classDef entry fill:#16232e,stroke:#4d9feb,stroke-width:2px,color:#e6edf3
     classDef stage fill:#16232e,stroke:#2ee6a6,stroke-width:2px,color:#e6edf3
