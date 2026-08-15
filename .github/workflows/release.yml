@@ -1,0 +1,165 @@
+# Release: build the client SDK and the service image, then publish them as a
+# GitHub Release with the artifacts attached. Same shape as emsl's release, with
+# the payload a service has rather than the payload a library has: emsl's
+# four-platform wheel matrix collapses to one build, because the client SDK is
+# pure Python and its wheel is py3-none-any, and the image is the part emsl has
+# no counterpart for.
+#
+# A v* tag builds AND releases. A manual dispatch builds only, so the whole thing
+# can be dry-run before committing to a tag:
+#   Actions -> release -> Run workflow
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The guard the rest of the release hangs off. v2.2.0 was tagged on a commit
+  # whose src/version.py still read 2.1.0, so a running container reported a
+  # version that no tag matched and nothing anywhere noticed. Every tag from
+  # v2.2.1 on has agreed; this is what keeps it that way.
+  version:
+    name: the tag matches the service version
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') # a dispatch has no tag to match
+    steps:
+      - uses: actions/checkout@v4
+      - name: compare the tag against src/version.py
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          src=$(sed -n 's/^SERVICE_VERSION *= *"\(.*\)"/\1/p' src/version.py)
+          echo "tag ${GITHUB_REF_NAME} -> ${tag}"
+          echo "src/version.py    -> ${src}"
+          if [ -z "$src" ]; then
+            echo "::error::could not read SERVICE_VERSION out of src/version.py"
+            exit 1
+          fi
+          if [ "$tag" != "$src" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match SERVICE_VERSION ${src}; bump src/version.py or move the tag"
+            exit 1
+          fi
+
+  client:
+    name: client SDK sdist and wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10" # the floor setup.py declares
+      - run: pip install build
+      - run: python -m build --sdist --wheel --outdir dist client
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client
+          path: dist/*
+
+  image:
+    name: service image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # pushing to GHCR writes a package
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t ers-release .
+      # a dispatch proves the image builds and stops there; only a tag publishes
+      - name: push to GHCR
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          repo=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          version="${GITHUB_REF_NAME#v}"
+          docker tag ers-release "ghcr.io/${repo}:${version}"
+          docker tag ers-release "ghcr.io/${repo}:latest"
+          docker push "ghcr.io/${repo}:${version}"
+          docker push "ghcr.io/${repo}:latest"
+
+  release:
+    name: publish the release
+    needs: [version, client, image]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') # a dispatch builds only, never releases
+    permissions:
+      contents: write # creating a release writes to the repo
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            `exchange-router-service` is a stateless, keyless router over public
+            crypto market data. One endpoint, one schema, six exchanges. REST and
+            WebSocket sit on the same port and the same adapter instance serves
+            both, so a client written against Binance spot works against Bybit
+            linear with a single path change.
+
+            ## Run it
+
+            ```bash
+            docker run --rm -p 8040:8040 ghcr.io/atoceano/exchange-router-service:${{ github.ref_name }}
+            ```
+
+            The image is also tagged `latest`. It holds no keys, places no orders,
+            and persists nothing, so there is nothing to configure before it
+            serves.
+
+            ## The client SDK
+
+            A typed Python client is attached below. Note that **its version is not
+            the service version**: the SDK is released on its own line, so a
+            `${{ github.ref_name }}` service ships whatever SDK version was current.
+            Take the wheel from the Assets and install the file directly:
+
+            ```bash
+            pip install ./exchange_router_client-*-py3-none-any.whl
+            ```
+
+            ## What is in it
+
+            - Six adapters: Binance, Bybit, Kraken, KuCoin, OKX, and Hyperliquid,
+              across spot, linear, and inverse markets.
+            - One normalized wire format. Raw upstream dicts never cross the
+              boundary; every response is a Pydantic model from `src/models.py`.
+            - Nested value objects on every quantitative record: `qty`, `volume`
+              and `open_interest` each come back as
+              `{native, unit, contract_size?, usd, usd_basis?}`, so one record
+              carries both the raw upstream value and a quote-currency notional
+              with the conversion basis spelled out.
+            - A `kind: "discrete" | "continuous"` discriminator on funding, so a
+              position-PnL calculation branches on the funding model itself with no
+              exchange-specific code.
+            - Rate-limit and ban avoidance per upstream host: proactive backoff off
+              the used-weight header, `Retry-After` honoured on 429 and 418, and a
+              fail-fast 503 once retries are spent.
+            - One upstream WebSocket per `(channel, symbol)` tuple, fanned out to
+              every attached client and cancelled when the last subscriber leaves.
+
+            ## Scope
+
+            Public market data only. It places no orders, holds no API keys,
+            manages no accounts, and writes nothing to disk. If you need
+            authentication or private endpoints, this is not it.
+
+            ## Verified
+
+            Honestly and narrowly. The real suite is the auditor
+            (`python -m tools.auditor`), and it runs against live exchange APIs
+            from a developer machine, because hosted runners issue from datacenter
+            IPs that several of these exchanges block. CI therefore checks only
+            what needs no upstream: every adapter package registers an adapter and
+            declares a non-empty capabilities map and at least one market type, the
+            client SDK builds and imports from a clean interpreter, the image
+            builds and boots, and this tag matches `SERVICE_VERSION`. Treat the
+            auditor run, not this release, as the evidence that a given adapter
+            is correct against its exchange.

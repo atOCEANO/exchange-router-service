@@ -1,0 +1,114 @@
+# Continuous integration: the half of the local loop that a hosted runner can
+# actually do. The auditor is the real suite and it cannot run here, because
+# exchange APIs block the datacenter IPs hosted runners issue from, which the
+# Auditor Guide records under "why the suite runs locally, not in CI". So this
+# checks what is checkable with no upstream: every adapter package registers an
+# adapter and declares a usable capabilities map, the client SDK builds and
+# installs clean, and the image boots and answers on the routes that need no
+# network. It is a smaller claim than emsl's gate, deliberately.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  adapters:
+    name: adapters load and declare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10" # the floor the client declares, so the service is held to it too
+      - run: pip install -r requirements.txt
+      # load_exchanges() logs and swallows an adapter that fails to import
+      # (src/exchanges/__init__.py), so a broken adapter leaves a service running
+      # with one fewer exchange and nothing anywhere fails. Counting the packages
+      # on disk against the registry is what turns that into a red build. Nothing
+      # here touches the network: an adapter's __init__ is documented as
+      # synchronous and lightweight, and get_capabilities is a static declaration.
+      - name: every adapter package registers an adapter
+        run: |
+          python - <<'PY'
+          import pathlib
+          import sys
+
+          from src.exchanges import EXCHANGE_REGISTRY, load_exchanges
+
+          root = pathlib.Path("src/exchanges")
+          packages = sorted(
+              p.name for p in root.iterdir() if p.is_dir() and (p / "__init__.py").exists()
+          )
+          load_exchanges()
+          loaded = sorted(EXCHANGE_REGISTRY)
+
+          print(f"packages on disk: {packages}")
+          print(f"adapters loaded:  {loaded}")
+          if len(loaded) != len(packages):
+              sys.exit(
+                  f"{len(packages)} adapter packages on disk but {len(loaded)} registered; "
+                  f"load_exchanges swallows an import error, so check the job log above "
+                  f"for a 'Failed to load adapter' line naming the one that did not come up"
+              )
+
+          for name, adapter in EXCHANGE_REGISTRY.items():
+              caps = adapter.get_capabilities()
+              if not isinstance(caps, dict) or not caps:
+                  sys.exit(f"{name} get_capabilities returned {caps!r}, expected a non-empty dict")
+              if not adapter.supported_market_types:
+                  sys.exit(f"{name} declares no supported market types")
+          print(f"{len(loaded)} adapters, each declaring capabilities and market types")
+          PY
+
+  client:
+    name: build the client SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install build
+      - run: python -m build --sdist --wheel --outdir dist client
+      # a clean interpreter, so a missing dependency in setup.py surfaces here
+      # rather than in someone's first pip install
+      - name: install the wheel and import it
+        run: |
+          python -m venv /tmp/fresh
+          /tmp/fresh/bin/pip install dist/*.whl
+          /tmp/fresh/bin/python -c "import exchange_router_client as c; print(c.__version__)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client
+          path: dist/*
+
+  image:
+    name: the image boots and answers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t ers-ci .
+      # the lifespan preloads adapters over the network and every one of those
+      # calls will fail on a blocked runner. That is fine and is the point of
+      # checking these three routes: they are the ones served off the registry
+      # and the version module, so they answer whether or not a warm succeeded.
+      - name: boot it and check the routes that need no upstream
+        run: |
+          id=$(docker run -d -p 8040:8040 ers-ci)
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8040/status >/dev/null 2>&1 && break
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8040/status
+          curl -fsS http://127.0.0.1:8040/version
+          curl -fsS http://127.0.0.1:8040/exchanges
+          count=$(curl -fsS http://127.0.0.1:8040/exchanges | python -c "import json,sys; print(json.load(sys.stdin)['count'])")
+          docker logs "$id"
+          docker rm -f "$id" >/dev/null
+          test "$count" -gt 0 || { echo "::error::the service came up with no exchanges registered"; exit 1; }

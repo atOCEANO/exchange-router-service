@@ -9,5 +9,8 @@ venv/
 Thumbs.db
 .pytest_cache/
 *.log
+build/
+dist/
+*.egg-info/
 tools/auditor/runs/*
 !tools/auditor/runs/.gitkeep
