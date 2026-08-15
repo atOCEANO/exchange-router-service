@@ -324,7 +324,7 @@ The harness uses `min(big_limit, retention_ms / period_ms, market_age_ms / perio
 
 Most adapters use the shared `_paginate_backwards` helper, bounded by an internal `max_requests = 100` page count. When that cap fires before the requested `limit` is reached, the helper logs a `WARNING` and returns whatever it managed to collect. Natural termination ("no more new data") handles every correctly-paginating case; the 100-page cap only fires for genuinely pathological asks (e.g. `?limit=1_000_000` on 1m candles, which would need ~120,000 pages).
 
-Two adapters use custom loops with different bounds: Kraken futures candles iterates at most 20 times (no warning on exhaustion) because the upstream chart endpoint returns large batches and 20 rounds cover the supported retention; OKX candles combines a "recent" fetch with `_paginate_backwards`-driven "history" walks, both bounded by 100 pages. These are defense-in-depth knobs, not part of the capability contract; consumers should not rely on a specific cap.
+Some adapters use custom loops with different bounds: Kraken futures candles iterates at most 20 times (no warning on exhaustion) because the upstream chart endpoint returns large batches and 20 rounds cover the supported retention; OKX candles combines a "recent" fetch with `_paginate_backwards`-driven "history" walks, both bounded by 100 pages. These are defense-in-depth knobs, not part of the capability contract; consumers should not rely on a specific cap.
 
 If you want a different bound, fork the helper. The cap is not surfaced as a capability field.
 

@@ -61,10 +61,11 @@ jobs:
           generate_release_notes: true
           body: |
             `exchange-router-service` is a stateless, keyless router over public
-            crypto market data. One endpoint, one schema, six exchanges. REST and
-            WebSocket sit on the same port and the same adapter instance serves
-            both, so a client written against Binance spot works against Bybit
-            linear with a single path change.
+            crypto market data. One endpoint, one schema, and every registered
+            adapter speaks it. REST and WebSocket sit on the same port and the
+            same adapter instance serves both, so a client written against one
+            exchange and market type works against another with a single path
+            change.
 
             There is nothing to install from this page. Take the source below, or
             clone at the tag, and run it either of the two ways.
@@ -137,8 +138,10 @@ jobs:
 
             ## What is in it
 
-            - Six adapters: Binance, Bybit, Kraken, KuCoin, OKX, and Hyperliquid,
-              across spot, linear, and inverse markets.
+            - Every registered adapter behind one schema, across spot, linear and
+              inverse markets. The set supported at this tag is listed in
+              [Supported Exchanges](https://github.com/atOCEANO/exchange-router-service/blob/${{ github.ref_name }}/README.md#supported-exchanges);
+              adding one is a new adapter and no change to the routing core.
             - One normalized wire format. Raw upstream dicts never cross the
               boundary; every response is a Pydantic model from `src/models.py`.
             - Nested value objects on every quantitative record: `qty`, `volume`
