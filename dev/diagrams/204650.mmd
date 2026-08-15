@@ -1,0 +1,20 @@
+flowchart RL
+    C1["<b>Call 1</b><br/>limit N, no start"]
+    C2["<b>Call 2</b><br/>start = oldest of call 1<br/>minus 1"]
+    C3["<b>Call 3</b><br/>start = oldest of call 2<br/>minus 1"]
+    N["newest"]
+    O["older"]
+    L["oldest"]
+
+    C1 --> N
+    N --- O
+    C2 --> O
+    O --- L
+    C3 --> L
+
+    classDef stage fill:#16232e,stroke:#2ee6a6,stroke-width:2px,color:#e6edf3
+    %% the records are what the calls walk over rather than steps of their own,
+    %% so they stay grey and let the three calls carry the eye
+    classDef idle fill:#16232e,stroke:#8b949e,stroke-width:2px,color:#e6edf3
+    class C1,C2,C3 stage
+    class N,O,L idle

@@ -1,0 +1,29 @@
+flowchart TD
+    O(["<b>8-hour position open</b>"])
+
+    subgraph DV["Discrete venue"]
+        D0["t0"] --> D4["t4"] --> D8["t8 charge once<br/>per_cycle × notional"]
+    end
+
+    subgraph CV["Continuous venue"]
+        C0["t0"] --> C1["t1"] --> CE["..."] --> C8["t8 - 8 hourly charges<br/>per_cycle × notional × 1h /<br/>cycle_ms"]
+    end
+
+    O --> DV
+    O --> CV
+
+    classDef entry fill:#16232e,stroke:#4d9feb,stroke-width:2px,color:#e6edf3
+    classDef stage fill:#16232e,stroke:#2ee6a6,stroke-width:2px,color:#e6edf3
+    %% the sample points a discrete venue passes through are charged nothing, so
+    %% they are grey where the continuous venue's are live and teal. that contrast
+    %% is the whole diagram, and it is the one thing not to normalise away
+    classDef idle fill:#16232e,stroke:#8b949e,stroke-width:2px,color:#e6edf3
+    class O entry
+    class C0,C1,CE,C8,D8 stage
+    class D0,D4 idle
+
+    %% the venue frames are scenery rather than nodes, so they are dashed and grey.
+    %% left to the theme they come out an opaque brown: mermaid derives a cluster
+    %% background from the palette, and this palette only names a few colours
+    classDef frame fill:transparent,stroke:#8b949e,stroke-width:2px,stroke-dasharray:6 6,color:#8b949e
+    class DV,CV frame

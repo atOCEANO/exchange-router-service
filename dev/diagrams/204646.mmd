@@ -1,0 +1,26 @@
+flowchart TD
+    Q(["<b>GET</b> exchange /<br/>market_type / route /<br/>symbol"])
+    %% a diamond grows on its widest line rather than its text, so the label is
+    %% broken short: one long line drew a lozenge a third of the image tall
+    V{"Validate<br/>exchange and<br/>market_type"}
+    E(["400 or 404"])
+    D["Adapter dispatch"]
+    M["_make_request<br/>retry and backoff on 5xx"]
+    U[("Upstream exchange")]
+    N["Pydantic normalization<br/>typed value objects"]
+    J(["JSON response"])
+
+    Q --> V
+    V -- "unknown" --> E
+    V -- "ok" --> D
+    D --> M
+    M --> U
+    U --> N
+    N --> J
+
+    classDef entry fill:#16232e,stroke:#4d9feb,stroke-width:2px,color:#e6edf3
+    classDef stage fill:#16232e,stroke:#2ee6a6,stroke-width:2px,color:#e6edf3
+    classDef alert fill:#16232e,stroke:#c98500,stroke-width:2px,color:#e6edf3
+    class Q entry
+    class V,D,M,U,N,J stage
+    class E alert

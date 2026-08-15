@@ -1,0 +1,22 @@
+flowchart TD
+    U(["<b>uvicorn starts</b>"])
+    L["lifespan: startup_exchanges"]
+    S["Scan src/exchanges,<br/>instantiate N adapters"]
+    P["await adapter.preload<br/>base default is a no-op,<br/>returns at once"]
+    W["Spawn _warm as a<br/>background task"]
+    Y["lifespan yields"]
+    R(["Router accepts traffic<br/>immediately"])
+    C[("Warm cache fills<br/>in the background")]
+
+    U --> L
+    L --> S
+    S --> P
+    P --> W
+    W --> Y
+    Y --> R
+    W -. "keeps fetching metadata<br/>after yield" .-> C
+
+    classDef entry fill:#16232e,stroke:#4d9feb,stroke-width:2px,color:#e6edf3
+    classDef stage fill:#16232e,stroke:#2ee6a6,stroke-width:2px,color:#e6edf3
+    class U entry
+    class L,S,P,W,Y,R,C stage

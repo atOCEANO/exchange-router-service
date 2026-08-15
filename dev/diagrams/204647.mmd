@@ -1,0 +1,25 @@
+flowchart LR
+    M["<b>StreamManager</b><br/>key =<br/>exchange:market_type:channel:symbol"]
+    H["One StreamHub<br/>per channel and symbol"]
+    W[("Upstream WS")]
+    A(["Client A"])
+    B(["Client B"])
+    C(["Client C"])
+    E{{"/ws/exchange/market_type"}}
+
+    M --> H
+    H --> W
+    W -. "frames" .-> H
+    H -. "fan out" .-> M
+    M -. "frame" .-> A
+    M -. "frame" .-> B
+    M -. "frame" .-> C
+    M --> E
+    A --> E
+    B --> E
+    C --> E
+
+    classDef entry fill:#16232e,stroke:#4d9feb,stroke-width:2px,color:#e6edf3
+    classDef stage fill:#16232e,stroke:#2ee6a6,stroke-width:2px,color:#e6edf3
+    class A,B,C entry
+    class M,H,W,E stage

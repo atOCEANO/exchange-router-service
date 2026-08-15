@@ -1,0 +1,20 @@
+flowchart LR
+    C("<b>Client Application</b>")
+    R{"<b>Router Service</b>"}
+    A[("Exchange A")]
+    B[("Exchange B")]
+    X[("Exchange C")]
+
+    C -- "Normalized Request" --> R
+    R -- "API Request" --> A
+    R -- "API Request" --> B
+    R -- "API Request" --> X
+    A -. "Raw Data" .-> R
+    B -. "Raw Data" .-> R
+    X -. "Raw Data" .-> R
+    R -. "Normalized Clean Data" .-> C
+
+    classDef entry fill:#16232e,stroke:#4d9feb,stroke-width:2px,color:#e6edf3
+    classDef stage fill:#16232e,stroke:#2ee6a6,stroke-width:2px,color:#e6edf3
+    class C entry
+    class R,A,B,X stage

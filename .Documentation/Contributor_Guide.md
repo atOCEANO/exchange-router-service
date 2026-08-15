@@ -126,6 +126,28 @@ When something breaks, it helps to bypass FastAPI entirely. Instantiate the adap
 When iterating without `--reload`, set `--port` on the uvicorn command line directly; the `EXCHANGE_ROUTER_SERVICE_PORT` env var is only consumed by `docker-compose.yml` and is not read by the Python service.
 
 <br>
+
+### Documentation diagrams
+
+`dev/diagrams/` holds the mermaid source for every hand-made diagram in `.Documentation/imgs/`, one `.mmd` per image, plus the shared palette in `config.json`. Nothing in the service depends on it and it is not installed anywhere; it exists so that no picture in the documentation is a file nobody can remake. Rendering the whole set writes straight into the image directory:
+
+```bash
+docker run --rm --shm-size=1g \
+  -v "${PWD}/dev/diagrams:/diagrams" \
+  -v "${PWD}/.Documentation/imgs:/out" \
+  --entrypoint sh minlag/mermaid-cli \
+  -c 'set -e; for f in /diagrams/*.mmd; do n=$(basename "$f" .mmd); /home/mermaidcli/node_modules/.bin/mmdc -i "$f" -o "/out/$n.png" -c /diagrams/config.json -p /diagrams/puppeteer.json -b transparent -s 3; done'
+```
+
+The images are numbered rather than named and the descriptive name survives only in their alt text: 204644 is the README hero, 204646 the REST lifecycle, 204647 the WebSocket fan-out, 204648 the startup lifecycle, 204649 the funding timelines, 204650 backward pagination, 204651 rate-limit and ban avoidance. All seven were reconstructed by reading the rendered PNG, because no source was ever kept, so a rerun redraws them rather than reproducing the originals.
+
+**Three things the setup depends on.** The image's bundled headless-shell is broken with an ENOENT, so `puppeteer.json` points `executablePath` at the chromium the image also ships, and its entrypoint is `mmdc` itself, so the command above clears it and calls the binary by full path. The background has to be `transparent` rather than white, or the images invert badly against GitHub's dark mode, which is what the replaced set did. And no `-w`: mermaid's own width keeps the wide diagrams at a consistent 2352 across, which is why the `width=` values in the pages can stay as they are.
+
+**On rerunning.** Layout is deterministic: every image comes back at the identical pixel dimensions every time. The byte stream is not, for the five diagrams that contain a stadium node. Anti-aliasing along a rounded outline lands a handful of edge pixels differently between runs, on the order of 0.013 percent of the image, so a rerun is visually identical but shows as a modified file in git. Do not read that diff as a change; check the dimensions instead.
+
+**The palette** in `config.json` is the same file emsl uses, so the two repos' diagrams are one visual set: node fill `#16232e`, a teal `#2ee6a6` border for anything the service does itself, a blue `#4d9feb` one for anything a caller or an upstream initiates, `#e6edf3` text, `#8b949e` arrows, trebuchet sans. Two classes are local to this repo, both on the rate-limit and lifecycle flows: `#c98500` for a degraded path that still returns, and `#ff5470` for a terminal one. It also names the cluster and edge-label colours, which look like padding and are not: mermaid derives whatever the palette leaves out, and left to itself it draws cluster frames as opaque brown boxes.
+
+<br>
 <br>
 
 ## Adapter Implementation

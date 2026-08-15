@@ -1,0 +1,46 @@
+flowchart TD
+    R(["<b>Request to host</b>"])
+    %% a diamond grows on its widest line rather than its text, so every label on
+    %% one is broken short: left long they draw lozenges that dwarf the stages
+    B{"Host inside<br/>backoff<br/>window?"}
+    W["Wait out the window<br/>plus 0.05 to 1.0s jitter"]
+    S["Send request"]
+    H["Read used-weight header"]
+    %% the committed image said "1150 of 1200", and no host has ever been either
+    %% number: the per-host limits are 6000 and 2400, 1200 is only the fallback for
+    %% a host absent from the table, and the trip is 0.95 of whichever applies, so
+    %% even the fallback rounds to 1140. a threshold stated as a ratio cannot go
+    %% stale the next time a limit moves, which is the point of keeping the source
+    N{"Near weight<br/>budget? over 95%<br/>of the host limit"}
+    P["Set 2s proactive backoff<br/>before any ban"]
+    A{"Response"}
+    OK(["Return data"])
+    CE(["Client error to 400"])
+    RA["Honor Retry-After,<br/>extend host backoff"]
+    RL{"Retries left?"}
+    F(["Upstream unavailable<br/>503 plus Retry-After"])
+
+    R --> B
+    B -- "yes" --> W
+    B -- "no" --> S
+    W --> S
+    S --> H
+    H --> N
+    N -- "yes" --> P
+    N -- "no" --> A
+    P --> A
+    A -- "200" --> OK
+    A -- "400 / 404 / 405" --> CE
+    A -- "429 / 418" --> RA
+    RA --> RL
+    RL -- "yes" --> R
+    RL -- "no" --> F
+
+    classDef entry fill:#16232e,stroke:#4d9feb,stroke-width:2px,color:#e6edf3
+    classDef stage fill:#16232e,stroke:#2ee6a6,stroke-width:2px,color:#e6edf3
+    classDef alert fill:#16232e,stroke:#c98500,stroke-width:2px,color:#e6edf3
+    classDef fatal fill:#16232e,stroke:#ff5470,stroke-width:2px,color:#e6edf3
+    class R entry
+    class B,S,H,N,P,A,OK,RL stage
+    class W,CE,RA alert
+    class F fatal
