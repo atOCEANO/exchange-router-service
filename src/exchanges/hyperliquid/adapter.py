@@ -37,6 +37,7 @@ class HyperliquidAdapter(BaseExchange):
 
         self._backoff_until = 0.0
         self._backoff_lock  = asyncio.Lock()
+        self._backoff_queue = 0
 
         self._hubs: List[Dict[str, Any]] = []
         self._hubs_lock = asyncio.Lock()
@@ -273,7 +274,12 @@ class HyperliquidAdapter(BaseExchange):
                 wait_time = self._backoff_until - now
                 if wait_time > 30:
                     raise UpstreamUnavailableError(f"Hyperliquid backoff in effect. Retry in {wait_time:.0f}s.", retry_after=wait_time)
-                await asyncio.sleep(wait_time + random.uniform(0.05, 1.0))
+                self._backoff_queue += 1
+                try:
+                    spread = min(0.05 + self._backoff_queue * 0.25, 5.0)
+                    await asyncio.sleep(wait_time + random.uniform(0.05, spread))
+                finally:
+                    self._backoff_queue -= 1
 
             try:
                 resp = await self.http_client.post(self.info_url, json=body)

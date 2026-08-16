@@ -263,7 +263,13 @@ Builder perps carry no collateral-token field upstream; their prices are USD-den
 
 ### `Ticker.price` is the mid, not the last trade
 
-Hyperliquid's asset context carries no last-traded price, so `Ticker.price` is the current mid (`midPx`). The other price fields (`open_24h`, `high_24h`, `low_24h`, `volume_24h`, `price_change_percent`) are exact; only the last-price slot is a mid rather than the most recent fill. A consumer comparing `price` across venues should read Hyperliquid's as a mid quote.
+Hyperliquid's asset context carries no last-traded price, so `Ticker.price` is the current mid (`midPx`). `open_24h`, `volume_24h` and `price_change_percent` are exact; `high_24h` and `low_24h` carry the caveat below; only the last-price slot is a mid rather than the most recent fill. A consumer comparing `price` across venues should read Hyperliquid's as a mid quote.
+
+<br>
+
+### `high_24h` and `low_24h` widen instantly but shed a peak lazily
+
+Hyperliquid publishes no 24h high or low, so the router derives them from a 24h candle snapshot. That snapshot is refreshed at most once every 120 seconds per coin, on REST and on the WebSocket ticker alike, and between refreshes the live mid widens the pair on every update. So a **new** extreme is never late: if price prints beyond the range, the range moves with it in the same response, and `low_24h <= price <= high_24h` always holds. What lags is the opposite case. A peak set 24 hours ago that has just rolled out of the window can still be reported for up to 120 seconds after it expired, which makes the range slightly too wide rather than wrong in the direction that matters. Both transports answer identically here; before, REST refetched the snapshot on every single call, which cost one upstream request per ticker and put the route under Hyperliquid's weight limit far sooner than the data justified.
 
 <br>
 
